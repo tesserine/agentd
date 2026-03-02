@@ -1,6 +1,6 @@
 # agentd
 
-`agentd` is an autonomous AI agent runtime daemon for running autonomous AI agents on your own infrastructure.
+`agentd` is an autonomous AI agent runtime daemon. Run autonomous AI agents on infrastructure you control.
 
 ## Status
 
