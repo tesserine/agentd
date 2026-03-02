@@ -2,7 +2,7 @@
 
 ## 1. What agentd Is
 
-agentd is an autonomous AI agent runtime daemon. It runs autonomous AI agents on infrastructure you control — scheduling sessions, constructing isolated execution environments, wiring tools via MCP, and managing credentials so agents can do useful work without a hosted platform.
+agentd is an autonomous AI agent runtime daemon. It runs autonomous AI agents on infrastructure you control, scheduling sessions, constructing isolated execution environments, wiring tools via MCP, and managing credentials.
 
 agentd is:
 - **Self-hosted** — runs on your machines, under your control
@@ -41,13 +41,13 @@ Every architectural decision in agentd traces to a capability that agents need i
 
 **Need:** Agents know what to do — what triggered this session, what the objective is.
 
-**Constraint:** The runtime provides session context describing the trigger (schedule, event, manual invocation) and any mission-specific parameters. Scheduling configuration determines when agents run.
+**Constraint:** The runtime provides session context and any mission-specific parameters. Scheduling configuration determines when agents run.
 
 ### Tools
 
 **Need:** Agents act on the world — create pull requests, query databases, send messages, modify infrastructure.
 
-**Constraint:** Domain-specific tools are provided by MCP server plugins, discovered and wired by the runtime at session setup. The agent interacts with tools through a standard MCP protocol, not through direct API calls.
+**Constraint:** CLI tools are installed in the container image and available directly. Domain-specific tools are provided by MCP server plugins, discovered and wired by the runtime at session setup.
 
 ### Context
 
