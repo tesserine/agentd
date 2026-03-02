@@ -23,9 +23,6 @@ Each landing PR must verify documentation and code remain aligned. Confirm READM
 - Keep PR scope to one issue and make it small enough for focused review.
 - Rust changes must be `cargo fmt` formatted, `cargo clippy` clean, and warning-free.
 
-## Skill Locations
-Detailed cognitive and process skills live in `docs/skills/`. The foundational skill is `docs/skills/ground.md` (need-first design and verified constraints discipline). Add future skills in this directory and keep `AGENTS.md` as the thin routing layer.
-
 ## Skill Layers
 agentd supports two project-level skill layers:
 
