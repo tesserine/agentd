@@ -95,3 +95,5 @@ OpenCode.
 
 When using normal pilot operation, do not hand-manage symlinks inside these
 target directories; let `loadout install` and `loadout clean` own them.
+These target roots are ignored by git in both directory and symlink forms to
+keep local setup changes out of repository status.
