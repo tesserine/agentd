@@ -17,7 +17,7 @@ agentd is not:
 
 ## 2. Agent Capability Needs
 
-Every architectural decision in agentd traces to a capability that agents need in order to do useful work. These seven needs are the grounding layer — the rest of the document derives from them.
+Every architectural decision in agentd traces to a capability that agents need in order to do useful work. These six needs are the grounding layer — the rest of the document derives from them.
 
 ### Network
 
@@ -55,12 +55,6 @@ Every architectural decision in agentd traces to a capability that agents need i
 
 **Constraint:** The runtime mounts deployment-specific read-only data into the agent's environment. Agents can read this context but cannot modify it.
 
-### Skills
-
-**Need:** Agents have reusable capabilities — workflows, procedures, domain knowledge packaged for re-use across sessions and agents.
-
-**Constraint:** The runtime loads skills into the agent's environment during session setup. Skills are files on disk, available to the agent's tooling, not compiled into the runtime.
-
 ## 3. Crate Layout and Constraint Mapping
 
 The workspace is organized so that each crate owns a distinct concern. Boundaries exist where responsibility, dependency direction, or rate of change differs.
@@ -68,7 +62,7 @@ The workspace is organized so that each crate owns a distinct concern. Boundarie
 | Crate | Responsibility | Needs Served | Boundary Rationale |
 |---|---|---|---|
 | `agentd` | Composition root. Parses configuration, assembles components, starts the daemon. | All (orchestration) | Wiring logic changes independently of any single subsystem. Keeps the binary crate thin. |
-| `agentd-runner` | Session lifecycle. Constructs containers, injects identity and credentials, wires MCP servers, manages execution, persists state on teardown. | Identity, Credentials, Mission, Tools, Context, Skills | The largest concentration of capability-need logic. Isolated so session mechanics can evolve without touching scheduling or transport. |
+| `agentd-runner` | Session lifecycle. Constructs containers, injects identity and credentials, wires MCP servers, manages execution, persists state on teardown. | Identity, Credentials, Mission, Tools, Context | The largest concentration of capability-need logic. Isolated so session mechanics can evolve without touching scheduling or transport. |
 | `agentd-scheduler` | Job scheduling. Determines when agents run based on cron expressions, events, or manual triggers. | Mission | Scheduling policy changes independently of session execution. Different deployments may need different scheduling strategies. |
 | `mcp-transport` | Shared MCP protocol. Handles stdio JSON-RPC framing, message serialization, and transport mechanics for communication between the runner and MCP server plugins. | Tools | Protocol logic is shared across all plugins. Isolating it prevents each plugin from reimplementing transport. |
 | `forgejo-mcp` | First plugin. MCP server providing Forgejo/Gitea domain tools — repository operations, issue management, pull requests. | Tools | Domain-specific logic lives outside the core runtime. Demonstrates the plugin pattern that other MCP servers follow. |
@@ -128,10 +122,9 @@ The runner constructs the agent's execution environment:
 2. **Identity injection** — The agent's name, home directory, and identity environment variables are set. The persistent home directory is mounted.
 3. **Credential mounting** — Secrets configured for the agent are injected into the container's environment. Each agent receives only its own credentials.
 4. **Context mounting** — Deployment-specific read-only data (documentation, shared configuration) is mounted into the container.
-5. **Skill loading** — Skill files are placed into the agent's environment where its tooling can discover them.
-6. **MCP server wiring** — The runner starts each MCP server plugin configured for the agent, wires their stdio through `mcp-transport`, and registers their tools.
+5. **MCP server wiring** — The runner starts each MCP server plugin configured for the agent, wires their stdio through `mcp-transport`, and registers their tools.
 
-**Needs served:** Identity, Credentials, Context, Skills, Tools.
+**Needs served:** Identity, Credentials, Context, Tools.
 
 ### Phase 3: Execution (`agentd-runner` + `mcp-transport`)
 
@@ -167,7 +160,6 @@ agentd uses Podman containers for agent execution. Containers provide:
 | Home directory | Read-write volume | Host path per agent | Persistent identity, state, working files | Identity |
 | Credentials | Secrets / env vars | Host secret store | API tokens, SSH keys, passwords | Credentials |
 | Context | Read-only bind mount | Deployment-specific path | Documentation, shared configuration | Context |
-| Skills | Read-only bind mount | Skill directories | Reusable workflows and procedures | Skills |
 
 ### The agent's view from inside
 
@@ -180,7 +172,6 @@ The agent sees a Linux environment with:
 | XDG directories | `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` — all under `$HOME` |
 | Writability | Full read-write access to `$HOME` and everything under it |
 | Tools | MCP server plugins are wired and available through the agent's session |
-| Skills | Loaded into the environment at paths the agent's tooling can discover |
 
 Sessions that exceed the configured timeout are killed. Work persisted to the home directory before timeout survives.
 
@@ -218,6 +209,5 @@ Every architectural decision traces to a capability need. If the decision were r
 | Mission | Scheduler passes trigger context to runner; runner injects session context | `agentd-scheduler` triggers sessions; `agentd-runner` constructs context | Agents run without knowing why or what to do |
 | Tools | MCP server plugins wired via `mcp-transport`; stdio JSON-RPC | `mcp-transport` crate; `forgejo-mcp` as reference plugin | Agents cannot act on the world; no tool invocation path |
 | Context | Read-only deployment-specific data mounted into container | `agentd-runner` owns context mounting | Agents operate without environmental awareness |
-| Skills | Skill files loaded into agent environment during session setup | `agentd-runner` owns skill loading | Agents lack reusable capabilities; every session starts from scratch |
 | Plugin separation | Domain logic in plugin crates, protocol in `mcp-transport`, lifecycle in `agentd-runner` | Crate boundaries in `Cargo.toml` workspace | Adding a domain requires modifying core runtime; transport reimplemented per plugin |
 | Scheduling independence | `agentd-scheduler` owns trigger logic, separate from session execution | Crate boundary between `agentd-scheduler` and `agentd-runner` | Changing scheduling policy requires modifying session lifecycle code |
