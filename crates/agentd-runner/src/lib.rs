@@ -1,12 +1,15 @@
 //! Session lifecycle management for agentd.
 
 use std::fmt;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const AGENT_NAME_ENV: &str = "AGENT_NAME";
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
+const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
 const REPO_DIR: &str = "/agentd/workspace/repo";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,9 @@ pub enum RunnerError {
     InvalidEnvironmentName {
         name: String,
     },
+    ReservedEnvironmentName {
+        name: String,
+    },
     Io(std::io::Error),
     PodmanCommandFailed {
         args: Vec<String>,
@@ -78,6 +84,12 @@ impl fmt::Display for RunnerError {
                 f,
                 "environment variable names must not be empty and must not contain '=': {name}"
             ),
+            RunnerError::ReservedEnvironmentName { name } => {
+                write!(
+                    f,
+                    "environment variable name is reserved by the runner: {name}"
+                )
+            }
             RunnerError::Io(error) => write!(f, "{error}"),
             RunnerError::PodmanCommandFailed {
                 args,
@@ -132,9 +144,7 @@ pub fn run_session(
 
     let start_result = match invocation.timeout {
         Some(timeout) => run_container_with_timeout(&container_name, timeout),
-        None => Ok(container_status_to_outcome(run_container_to_completion(
-            &container_name,
-        )?)),
+        None => run_container_to_completion(&container_name),
     };
 
     let cleanup_result = cleanup_container(&container_name);
@@ -161,6 +171,11 @@ fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     for variable in &spec.environment {
         if variable.name.is_empty() || variable.name.contains('=') {
             return Err(RunnerError::InvalidEnvironmentName {
+                name: variable.name.clone(),
+            });
+        }
+        if is_reserved_environment_name(&variable.name) {
+            return Err(RunnerError::ReservedEnvironmentName {
                 name: variable.name.clone(),
             });
         }
@@ -193,13 +208,15 @@ fn create_container(
             methodology_dir.display(),
             METHODOLOGY_MOUNT_PATH
         ),
-        "--env".to_string(),
-        format!("AGENT_NAME={}", spec.agent_name),
     ];
 
     for variable in &spec.environment {
         args.push("--env".to_string());
         args.push(format!("{}={}", variable.name, variable.value));
+    }
+    for (name, value) in runner_managed_environment(spec) {
+        args.push("--env".to_string());
+        args.push(format!("{name}={value}"));
     }
 
     args.push(spec.base_image.clone());
@@ -239,31 +256,29 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script
 }
 
-fn run_container_to_completion(container_name: &str) -> Result<ExitStatus, RunnerError> {
-    let output = Command::new("podman")
-        .args(["start", "--attach", container_name])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+fn run_container_to_completion(container_name: &str) -> Result<SessionOutcome, RunnerError> {
+    let mut start = start_attached_container(container_name)?;
+    let status = start.child.wait()?;
+    let stderr = finish_captured_stderr(start.stderr_thread)?;
 
-    Ok(output)
+    classify_attached_start_result(start.args, status, stderr)
 }
 
 fn run_container_with_timeout(
     container_name: &str,
     timeout: Duration,
 ) -> Result<SessionOutcome, RunnerError> {
-    let mut child = Command::new("podman")
-        .args(["start", "--attach", container_name])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+    let mut start = start_attached_container(container_name)?;
 
-    match wait_for_child(&mut child, timeout)? {
-        Some(status) => Ok(container_status_to_outcome(status)),
+    match wait_for_child(&mut start.child, timeout)? {
+        Some(status) => {
+            let stderr = finish_captured_stderr(start.stderr_thread)?;
+            classify_attached_start_result(start.args, status, stderr)
+        }
         None => {
             cleanup_container(container_name)?;
-            let _ = child.wait();
+            let _ = start.child.wait();
+            let _ = finish_captured_stderr(start.stderr_thread)?;
             Ok(SessionOutcome::TimedOut)
         }
     }
@@ -280,6 +295,12 @@ fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<Option<ExitSta
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+struct AttachedPodmanStart {
+    args: Vec<String>,
+    child: Child,
+    stderr_thread: thread::JoinHandle<std::io::Result<String>>,
 }
 
 fn cleanup_container(container_name: &str) -> Result<(), RunnerError> {
@@ -304,11 +325,102 @@ fn run_podman_command(args: Vec<String>) -> Result<(), RunnerError> {
     })
 }
 
+fn start_attached_container(container_name: &str) -> Result<AttachedPodmanStart, RunnerError> {
+    let args = vec![
+        "start".to_string(),
+        "--attach".to_string(),
+        container_name.to_string(),
+    ];
+    let mut child = Command::new("podman")
+        .args(&args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stderr = child
+        .stderr
+        .take()
+        .expect("podman stderr should be piped when capturing attached startup errors");
+
+    Ok(AttachedPodmanStart {
+        args,
+        child,
+        stderr_thread: thread::spawn(move || forward_and_capture_stderr(stderr)),
+    })
+}
+
+fn classify_attached_start_result(
+    args: Vec<String>,
+    status: ExitStatus,
+    stderr: String,
+) -> Result<SessionOutcome, RunnerError> {
+    if status.code() == Some(PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE) {
+        return Err(RunnerError::PodmanCommandFailed {
+            args,
+            status,
+            stderr,
+        });
+    }
+
+    Ok(container_status_to_outcome(status))
+}
+
 fn container_status_to_outcome(status: ExitStatus) -> SessionOutcome {
     match status.code().unwrap_or(1) {
         0 => SessionOutcome::Succeeded,
         exit_code => SessionOutcome::Failed { exit_code },
     }
+}
+
+fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1] {
+    [(AGENT_NAME_ENV, &spec.agent_name)]
+}
+
+fn is_reserved_environment_name(name: &str) -> bool {
+    matches!(name, AGENT_NAME_ENV)
+}
+
+fn finish_captured_stderr(
+    stderr_thread: thread::JoinHandle<std::io::Result<String>>,
+) -> Result<String, RunnerError> {
+    stderr_thread
+        .join()
+        .map_err(|panic_payload| {
+            let message = match panic_payload.downcast::<String>() {
+                Ok(message) => *message,
+                Err(panic_payload) => match panic_payload.downcast::<&'static str>() {
+                    Ok(message) => (*message).to_string(),
+                    Err(_) => "unknown panic".to_string(),
+                },
+            };
+
+            RunnerError::Io(std::io::Error::other(format!(
+                "stderr forwarding thread panicked: {message}"
+            )))
+        })?
+        .map_err(RunnerError::Io)
+}
+
+fn forward_and_capture_stderr<T>(mut stderr: T) -> std::io::Result<String>
+where
+    T: Read,
+{
+    let mut collected = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut host_stderr = std::io::stderr().lock();
+
+    loop {
+        let bytes_read = stderr.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let chunk = &buffer[..bytes_read];
+        host_stderr.write_all(chunk)?;
+        host_stderr.flush()?;
+        collected.extend_from_slice(chunk);
+    }
+
+    Ok(String::from_utf8_lossy(&collected).into_owned())
 }
 
 fn sanitize_name(value: &str) -> String {
@@ -387,4 +499,111 @@ fn exit_status_label(status: &ExitStatus) -> String {
         .code()
         .map(|code| code.to_string())
         .unwrap_or_else(|| "signal".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_spec_rejects_reserved_environment_names() {
+        let error = validate_spec(&SessionSpec {
+            agent_name: "agent".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir: PathBuf::from("/tmp/methodology"),
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "AGENT_NAME".to_string(),
+                value: "spoofed".to_string(),
+            }],
+        })
+        .expect_err("reserved runner environment names should be rejected");
+
+        match error {
+            RunnerError::ReservedEnvironmentName { name } => {
+                assert_eq!(name, "AGENT_NAME");
+            }
+            other => panic!("expected ReservedEnvironmentName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attached_start_classifies_exit_code_125_as_runner_error() {
+        let error = classify_attached_start_result(
+            vec![
+                "start".to_string(),
+                "--attach".to_string(),
+                "container".to_string(),
+            ],
+            exit_status(125),
+            "podman start failed".to_string(),
+        )
+        .expect_err("podman infrastructure failures should surface as runner errors");
+
+        match error {
+            RunnerError::PodmanCommandFailed {
+                args,
+                status,
+                stderr,
+            } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "start".to_string(),
+                        "--attach".to_string(),
+                        "container".to_string(),
+                    ]
+                );
+                assert_eq!(status.code(), Some(125));
+                assert_eq!(stderr, "podman start failed");
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attached_start_classifies_nonzero_exit_as_session_failure() {
+        let outcome = classify_attached_start_result(
+            vec![
+                "start".to_string(),
+                "--attach".to_string(),
+                "container".to_string(),
+            ],
+            exit_status(23),
+            String::new(),
+        )
+        .expect("agent exit codes should remain session outcomes");
+
+        assert_eq!(outcome, SessionOutcome::Failed { exit_code: 23 });
+    }
+
+    #[test]
+    fn attached_start_classifies_zero_exit_as_success() {
+        let outcome = classify_attached_start_result(
+            vec![
+                "start".to_string(),
+                "--attach".to_string(),
+                "container".to_string(),
+            ],
+            exit_status(0),
+            String::new(),
+        )
+        .expect("successful attached starts should remain successful session outcomes");
+
+        assert_eq!(outcome, SessionOutcome::Succeeded);
+    }
+
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+
+        ExitStatusExt::from_raw(code << 8)
+    }
+
+    #[cfg(windows)]
+    fn exit_status(code: i32) -> ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+
+        ExitStatusExt::from_raw(code as u32)
+    }
 }
