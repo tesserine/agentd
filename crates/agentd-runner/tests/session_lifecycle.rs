@@ -48,6 +48,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
 
     assert_eq!(outcome, SessionOutcome::Succeeded);
     fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
 }
 
 #[test]
@@ -88,6 +89,90 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
 
     assert_eq!(outcome, SessionOutcome::Failed { exit_code: 23 });
     fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources() {
+    if skip_if_podman_unavailable(
+        "returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources",
+    ) {
+        return;
+    }
+
+    let fixture = SessionFixture::new("failure-agent-125");
+    let image = fixture.build_image();
+
+    let outcome = run_session(
+        SessionSpec {
+            agent_name: "failure-agent-125".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![
+                ResolvedEnvironmentVariable {
+                    name: "GITHUB_TOKEN".to_string(),
+                    value: "test-token".to_string(),
+                },
+                ResolvedEnvironmentVariable {
+                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    value: "fail-125".to_string(),
+                },
+            ],
+        },
+        SessionInvocation {
+            repo_url: "/srv/test-repo.git".to_string(),
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Failed { exit_code: 125 });
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn succeeds_when_methodology_dir_path_contains_commas() {
+    if skip_if_podman_unavailable("succeeds_when_methodology_dir_path_contains_commas") {
+        return;
+    }
+
+    let fixture = SessionFixture::new_with_root_prefix(
+        "comma-methodology-agent",
+        "agentd-runner,comma,methodology",
+    );
+    let image = fixture.build_image();
+
+    let outcome = run_session(
+        SessionSpec {
+            agent_name: "comma-methodology-agent".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![
+                ResolvedEnvironmentVariable {
+                    name: "GITHUB_TOKEN".to_string(),
+                    value: "test-token".to_string(),
+                },
+                ResolvedEnvironmentVariable {
+                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    value: "success".to_string(),
+                },
+            ],
+        },
+        SessionInvocation {
+            repo_url: "/srv/test-repo.git".to_string(),
+            work_unit: Some("task-42".to_string()),
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Succeeded);
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
 }
 
 #[test]
@@ -126,6 +211,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
 
     assert_eq!(outcome, SessionOutcome::TimedOut);
     fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
 }
 
 struct SessionFixture {
@@ -135,7 +221,11 @@ struct SessionFixture {
 
 impl SessionFixture {
     fn new(agent_name: &str) -> Self {
-        let root = unique_temp_dir(&format!("agentd-runner-{agent_name}"));
+        Self::new_with_root_prefix(agent_name, &format!("agentd-runner-{agent_name}"))
+    }
+
+    fn new_with_root_prefix(agent_name: &str, root_prefix: &str) -> Self {
+        let root = unique_temp_dir(root_prefix);
         fs::create_dir_all(&root).expect("fixture root should be created");
 
         let methodology_dir = root.join("methodology");
@@ -194,6 +284,26 @@ impl SessionFixture {
         assert!(
             !names.lines().any(|name| name.starts_with(&expected_prefix)),
             "runner left container behind with prefix {expected_prefix}: {names}"
+        );
+    }
+
+    fn assert_no_runner_secret_left_behind(&self) {
+        let output = Command::new("podman")
+            .args(["secret", "ls", "--format", "{{.Name}}"])
+            .output()
+            .expect("podman secret ls should run");
+        assert!(
+            output.status.success(),
+            "podman secret ls failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let names =
+            String::from_utf8(output.stdout).expect("podman secret ls output should be utf-8");
+        let expected_fragment = format!("agentd-{}-", self.agent_name);
+        assert!(
+            !names.lines().any(|name| name.contains(&expected_fragment)),
+            "runner left secrets behind for {expected_fragment}: {names}"
         );
     }
 }
@@ -330,6 +440,11 @@ EOF
         if [ "${RUNA_TEST_BEHAVIOR:-}" = "fail" ]; then
             [ "$#" = "0" ]
             exit 23
+        fi
+
+        if [ "${RUNA_TEST_BEHAVIOR:-}" = "fail-125" ]; then
+            [ "$#" = "0" ]
+            exit 125
         fi
 
         if [ "${RUNA_TEST_BEHAVIOR:-}" = "sleep" ]; then

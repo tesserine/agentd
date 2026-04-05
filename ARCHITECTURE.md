@@ -83,7 +83,7 @@ The runner prepares the execution environment:
 
 1. Creates an ephemeral Podman container from the agent's configured base image.
 2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
-3. Injects caller-resolved credentials as environment variables for that session only.
+3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only and initializes runa from `manifest.toml` at the mount root.
 5. Clones the requested repository into an ephemeral workspace inside the container and writes the configured agent command into runa's project config.
 
@@ -113,7 +113,7 @@ From inside the environment, an agent should see:
 
 ## 6. Credential Flow
 
-Credentials are declared by agent configuration and sourced from an operator-managed secret store outside `agentd-runner`. During session setup, the runner receives already-resolved credential values from its caller and injects them into the execution environment as environment variables.
+Credentials are declared by agent configuration and sourced from an operator-managed secret store outside `agentd-runner`. During session setup, the runner receives already-resolved credential values from its caller, creates Podman-managed ephemeral secrets from them, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line.
 
 Isolation is per agent: one agent receives only its own declared credentials. Sharing access to the same external service still requires separate credential declarations per agent so compromise remains scoped.
 

@@ -1,16 +1,20 @@
 //! Session lifecycle management for agentd.
 
 use std::fmt;
+use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
+const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
 const REPO_DIR: &str = "/agentd/workspace/repo";
+const SESSION_SECRET_PREFIX: &str = "agentd-session-secret-";
+const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSpec {
@@ -121,6 +125,20 @@ impl From<std::io::Error> for RunnerError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecretBinding {
+    secret_name: String,
+    target_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionResources {
+    container_name: String,
+    methodology_staging_dir: PathBuf,
+    methodology_mount_source: PathBuf,
+    secret_bindings: Vec<SecretBinding>,
+}
+
 pub fn run_session(
     spec: SessionSpec,
     invocation: SessionInvocation,
@@ -140,14 +158,19 @@ pub fn run_session(
         });
     }
 
-    create_container(&container_name, &spec, &invocation)?;
+    let resources = prepare_session_resources(&container_name, &spec)?;
+
+    if let Err(error) = create_container(&resources, &spec, &invocation) {
+        let _ = cleanup_session_resources(&resources);
+        return Err(error);
+    }
 
     let start_result = match invocation.timeout {
-        Some(timeout) => run_container_with_timeout(&container_name, timeout),
-        None => run_container_to_completion(&container_name),
+        Some(timeout) => run_container_with_timeout(&resources.container_name, timeout),
+        None => run_container_to_completion(&resources.container_name),
     };
 
-    let cleanup_result = cleanup_container(&container_name);
+    let cleanup_result = cleanup_session_resources(&resources);
 
     match (start_result, cleanup_result) {
         (Ok(outcome), Ok(())) => Ok(outcome),
@@ -193,38 +216,11 @@ fn validate_invocation(invocation: &SessionInvocation) -> Result<(), RunnerError
 }
 
 fn create_container(
-    container_name: &str,
+    resources: &SessionResources,
     spec: &SessionSpec,
     invocation: &SessionInvocation,
 ) -> Result<(), RunnerError> {
-    let methodology_dir = spec.methodology_dir.canonicalize()?;
-    let mut args = vec![
-        "create".to_string(),
-        "--name".to_string(),
-        container_name.to_string(),
-        "--mount".to_string(),
-        format!(
-            "type=bind,src={},target={},ro=true",
-            methodology_dir.display(),
-            METHODOLOGY_MOUNT_PATH
-        ),
-    ];
-
-    for variable in &spec.environment {
-        args.push("--env".to_string());
-        args.push(format!("{}={}", variable.name, variable.value));
-    }
-    for (name, value) in runner_managed_environment(spec) {
-        args.push("--env".to_string());
-        args.push(format!("{name}={value}"));
-    }
-
-    args.push(spec.base_image.clone());
-    args.push("sh".to_string());
-    args.push("-lc".to_string());
-    args.push(build_container_script(spec, invocation));
-
-    run_podman_command(args)
+    run_podman_command(build_create_container_args(resources, spec, invocation)).map(|_| ())
 }
 
 fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
@@ -261,7 +257,7 @@ fn run_container_to_completion(container_name: &str) -> Result<SessionOutcome, R
     let status = start.child.wait()?;
     let stderr = finish_captured_stderr(start.stderr_thread)?;
 
-    classify_attached_start_result(start.args, status, stderr)
+    classify_attached_start_result(start.args, container_name, status, stderr)
 }
 
 fn run_container_with_timeout(
@@ -273,7 +269,7 @@ fn run_container_with_timeout(
     match wait_for_child(&mut start.child, timeout)? {
         Some(status) => {
             let stderr = finish_captured_stderr(start.stderr_thread)?;
-            classify_attached_start_result(start.args, status, stderr)
+            classify_attached_start_result(start.args, container_name, status, stderr)
         }
         None => {
             cleanup_container(container_name)?;
@@ -310,12 +306,38 @@ fn cleanup_container(container_name: &str) -> Result<(), RunnerError> {
         "--ignore".to_string(),
         container_name.to_string(),
     ])
+    .map(|_| ())
 }
 
-fn run_podman_command(args: Vec<String>) -> Result<(), RunnerError> {
-    let output = Command::new("podman").args(&args).output()?;
+fn run_podman_command(args: Vec<String>) -> Result<String, RunnerError> {
+    run_podman_command_with_input(args, None)
+}
+
+fn run_podman_command_with_input(
+    args: Vec<String>,
+    stdin_data: Option<&[u8]>,
+) -> Result<String, RunnerError> {
+    let mut command = Command::new("podman");
+    command
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if stdin_data.is_some() {
+        command.stdin(Stdio::piped());
+    }
+
+    let mut child = command.spawn()?;
+    if let Some(stdin_data) = stdin_data {
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("podman stdin should be piped when input is provided");
+        stdin.write_all(stdin_data)?;
+    }
+
+    let output = child.wait_with_output()?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
 
     Err(RunnerError::PodmanCommandFailed {
@@ -350,10 +372,29 @@ fn start_attached_container(container_name: &str) -> Result<AttachedPodmanStart,
 
 fn classify_attached_start_result(
     args: Vec<String>,
+    container_name: &str,
     status: ExitStatus,
     stderr: String,
 ) -> Result<SessionOutcome, RunnerError> {
+    classify_attached_start_result_with_inspector(args, status, stderr, || {
+        inspect_terminal_container_outcome(container_name)
+    })
+}
+
+fn classify_attached_start_result_with_inspector<F>(
+    args: Vec<String>,
+    status: ExitStatus,
+    stderr: String,
+    inspect_terminal_outcome: F,
+) -> Result<SessionOutcome, RunnerError>
+where
+    F: FnOnce() -> Option<SessionOutcome>,
+{
     if status.code() == Some(PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE) {
+        if let Some(outcome) = inspect_terminal_outcome() {
+            return Ok(outcome);
+        }
+
         return Err(RunnerError::PodmanCommandFailed {
             args,
             status,
@@ -371,12 +412,206 @@ fn container_status_to_outcome(status: ExitStatus) -> SessionOutcome {
     }
 }
 
+fn inspect_terminal_container_outcome(container_name: &str) -> Option<SessionOutcome> {
+    let output = run_podman_command(vec![
+        "inspect".to_string(),
+        "--type".to_string(),
+        "container".to_string(),
+        "--format".to_string(),
+        "{{.State.Status}} {{.State.ExitCode}}".to_string(),
+        container_name.to_string(),
+    ])
+    .ok()?;
+    let (status, exit_code) = parse_container_state(&output)?;
+
+    if matches!(status, "exited" | "stopped") {
+        return Some(exit_code_to_outcome(exit_code));
+    }
+
+    None
+}
+
+fn parse_container_state(output: &str) -> Option<(&str, i32)> {
+    let mut parts = output.split_whitespace();
+    let status = parts.next()?;
+    let exit_code = parts.next()?.parse().ok()?;
+    Some((status, exit_code))
+}
+
+fn exit_code_to_outcome(exit_code: i32) -> SessionOutcome {
+    match exit_code {
+        0 => SessionOutcome::Succeeded,
+        exit_code => SessionOutcome::Failed { exit_code },
+    }
+}
+
 fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1] {
     [(AGENT_NAME_ENV, &spec.agent_name)]
 }
 
 fn is_reserved_environment_name(name: &str) -> bool {
     matches!(name, AGENT_NAME_ENV)
+}
+
+fn prepare_session_resources(
+    container_name: &str,
+    spec: &SessionSpec,
+) -> Result<SessionResources, RunnerError> {
+    let methodology_staging_dir = create_methodology_staging_dir(&spec.methodology_dir)?;
+    let methodology_mount_source = methodology_staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
+    let mut resources = SessionResources {
+        container_name: container_name.to_string(),
+        methodology_staging_dir,
+        methodology_mount_source,
+        secret_bindings: Vec::new(),
+    };
+
+    for (index, variable) in spec.environment.iter().enumerate() {
+        let secret_name = format!("{SESSION_SECRET_PREFIX}{container_name}-{index}");
+        if let Err(error) = create_podman_secret(&secret_name, &variable.value) {
+            let _ = cleanup_session_resources(&resources);
+            return Err(error);
+        }
+        resources.secret_bindings.push(SecretBinding {
+            secret_name,
+            target_name: variable.name.clone(),
+        });
+    }
+
+    Ok(resources)
+}
+
+fn create_methodology_staging_dir(methodology_dir: &Path) -> Result<PathBuf, RunnerError> {
+    let canonical_methodology_dir = methodology_dir.canonicalize()?;
+    let staging_dir =
+        safe_staging_root().join(format!("{SESSION_STAGE_PREFIX}{}", unique_suffix()));
+    fs::create_dir_all(&staging_dir)?;
+    let staged_link = staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
+
+    if let Err(error) = create_directory_symlink(&canonical_methodology_dir, &staged_link) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
+
+    Ok(staging_dir)
+}
+
+fn safe_staging_root() -> PathBuf {
+    let temp_dir = std::env::temp_dir();
+    if !path_requires_mount_staging_alias(&temp_dir) {
+        return temp_dir;
+    }
+
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp")
+    }
+
+    #[cfg(not(unix))]
+    {
+        temp_dir
+    }
+}
+
+fn path_requires_mount_staging_alias(path: &Path) -> bool {
+    path.to_string_lossy().contains(',')
+}
+
+fn create_podman_secret(secret_name: &str, value: &str) -> Result<(), RunnerError> {
+    run_podman_command_with_input(
+        vec![
+            "secret".to_string(),
+            "create".to_string(),
+            secret_name.to_string(),
+            "-".to_string(),
+        ],
+        Some(value.as_bytes()),
+    )
+    .map(|_| ())
+}
+
+fn cleanup_session_resources(resources: &SessionResources) -> Result<(), RunnerError> {
+    let container_result = cleanup_container(&resources.container_name);
+    let secret_result = cleanup_podman_secrets(&resources.secret_bindings);
+    let staging_result = cleanup_methodology_staging_dir(&resources.methodology_staging_dir);
+
+    container_result?;
+    secret_result?;
+    staging_result
+}
+
+fn cleanup_podman_secrets(secret_bindings: &[SecretBinding]) -> Result<(), RunnerError> {
+    if secret_bindings.is_empty() {
+        return Ok(());
+    }
+
+    let mut args = vec![
+        "secret".to_string(),
+        "rm".to_string(),
+        "--ignore".to_string(),
+    ];
+    args.extend(
+        secret_bindings
+            .iter()
+            .map(|binding| binding.secret_name.clone()),
+    );
+    run_podman_command(args).map(|_| ())
+}
+
+fn cleanup_methodology_staging_dir(path: &Path) -> Result<(), RunnerError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RunnerError::Io(error)),
+    }
+}
+
+fn build_create_container_args(
+    resources: &SessionResources,
+    spec: &SessionSpec,
+    invocation: &SessionInvocation,
+) -> Vec<String> {
+    let mut args = vec![
+        "create".to_string(),
+        "--name".to_string(),
+        resources.container_name.clone(),
+        "--mount".to_string(),
+        format!(
+            "type=bind,src={},target={},ro=true",
+            resources.methodology_mount_source.display(),
+            METHODOLOGY_MOUNT_PATH
+        ),
+    ];
+
+    for binding in &resources.secret_bindings {
+        args.push("--secret".to_string());
+        args.push(format!(
+            "{},type=env,target={}",
+            binding.secret_name, binding.target_name
+        ));
+    }
+
+    for (name, value) in runner_managed_environment(spec) {
+        args.push("--env".to_string());
+        args.push(format!("{name}={value}"));
+    }
+
+    args.push(spec.base_image.clone());
+    args.push("sh".to_string());
+    args.push("-lc".to_string());
+    args.push(build_container_script(spec, invocation));
+
+    args
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
+    std::os::unix::fs::symlink(source, destination).map_err(RunnerError::Io)
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
+    std::os::windows::fs::symlink_dir(source, destination).map_err(RunnerError::Io)
 }
 
 fn finish_captured_stderr(
@@ -504,6 +739,9 @@ fn exit_status_label(status: &ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn validate_spec_rejects_reserved_environment_names() {
@@ -529,7 +767,7 @@ mod tests {
 
     #[test]
     fn attached_start_classifies_exit_code_125_as_runner_error() {
-        let error = classify_attached_start_result(
+        let error = classify_attached_start_result_with_inspector(
             vec![
                 "start".to_string(),
                 "--attach".to_string(),
@@ -537,6 +775,7 @@ mod tests {
             ],
             exit_status(125),
             "podman start failed".to_string(),
+            || None,
         )
         .expect_err("podman infrastructure failures should surface as runner errors");
 
@@ -562,6 +801,23 @@ mod tests {
     }
 
     #[test]
+    fn attached_start_preserves_agent_exit_code_125_when_inspection_reports_terminal_exit() {
+        let outcome = classify_attached_start_result_with_inspector(
+            vec![
+                "start".to_string(),
+                "--attach".to_string(),
+                "container".to_string(),
+            ],
+            exit_status(125),
+            String::new(),
+            || Some(SessionOutcome::Failed { exit_code: 125 }),
+        )
+        .expect("inspected terminal exit code should win over podman attach status");
+
+        assert_eq!(outcome, SessionOutcome::Failed { exit_code: 125 });
+    }
+
+    #[test]
     fn attached_start_classifies_nonzero_exit_as_session_failure() {
         let outcome = classify_attached_start_result(
             vec![
@@ -569,6 +825,7 @@ mod tests {
                 "--attach".to_string(),
                 "container".to_string(),
             ],
+            "container",
             exit_status(23),
             String::new(),
         )
@@ -585,12 +842,194 @@ mod tests {
                 "--attach".to_string(),
                 "container".to_string(),
             ],
+            "container",
             exit_status(0),
             String::new(),
         )
         .expect("successful attached starts should remain successful session outcomes");
 
         assert_eq!(outcome, SessionOutcome::Succeeded);
+    }
+
+    #[test]
+    fn run_session_does_not_pass_resolved_environment_values_via_podman_create_arguments() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .expect("fake podman lock should be acquired");
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            create)
+                printf 'create %s\n' "$*" >> "$log_root/secret-commands.log"
+                cat > "$log_root/secret-value.log"
+                ;;
+            rm)
+                printf 'rm %s\n' "$*" >> "$log_root/secret-commands.log"
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    create)
+        printf '%s\n' "$*" > "$log_root/create-args.log"
+        ;;
+    start)
+        exit 0
+        ;;
+    rm)
+        exit 0
+        ;;
+    inspect)
+        exit 125
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let outcome = fixture.run_with_fake_podman(SessionSpec {
+            agent_name: "agent".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir,
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "GITHUB_TOKEN".to_string(),
+                value: "test-token".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            outcome.expect("session should succeed with fake podman"),
+            SessionOutcome::Succeeded
+        );
+
+        let create_args = fixture.read_log("create-args.log");
+        assert!(
+            !create_args.contains("GITHUB_TOKEN=test-token"),
+            "resolved environment values must not appear in podman create args: {create_args}"
+        );
+        assert!(
+            create_args.contains("--secret"),
+            "resolved environment should be injected via podman secrets: {create_args}"
+        );
+
+        let secret_args = fixture.read_log("secret-commands.log");
+        assert!(
+            secret_args.contains("create"),
+            "podman secret create should be invoked before container create: {secret_args}"
+        );
+        assert_eq!(fixture.read_log("secret-value.log"), "test-token");
+    }
+
+    fn fake_podman_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct FakePodmanFixture {
+        root: PathBuf,
+        log_dir: PathBuf,
+        bin_dir: PathBuf,
+    }
+
+    impl FakePodmanFixture {
+        fn new() -> Self {
+            let root = unique_temp_dir("agentd-runner-fake-podman");
+            let log_dir = root.join("logs");
+            let bin_dir = root.join("bin");
+            fs::create_dir_all(&log_dir).expect("log dir should be created");
+            fs::create_dir_all(&bin_dir).expect("bin dir should be created");
+
+            Self {
+                root,
+                log_dir,
+                bin_dir,
+            }
+        }
+
+        fn write_script(&self, body: &str) {
+            let script_path = self.bin_dir.join("podman");
+            fs::write(&script_path, body).expect("fake podman script should be written");
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let mut permissions = fs::metadata(&script_path)
+                    .expect("fake podman script metadata should be available")
+                    .permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&script_path, permissions)
+                    .expect("fake podman script should be executable");
+            }
+        }
+
+        fn create_methodology_dir(&self, name: &str) -> PathBuf {
+            let methodology_dir = self.root.join(name);
+            fs::create_dir_all(&methodology_dir).expect("methodology dir should be created");
+            fs::write(methodology_dir.join("manifest.toml"), "name = \"test\"\n")
+                .expect("methodology manifest should be written");
+            methodology_dir
+        }
+
+        fn run_with_fake_podman(&self, spec: SessionSpec) -> Result<SessionOutcome, RunnerError> {
+            let original_path =
+                env::var_os("PATH").expect("PATH should exist for fake podman tests");
+            let fake_path = env::join_paths(
+                std::iter::once(self.bin_dir.clone()).chain(env::split_paths(&original_path)),
+            )
+            .expect("fake PATH should be constructed");
+
+            // Test-only PATH mutation is serialized by fake_podman_lock.
+            unsafe {
+                env::set_var("PATH", &fake_path);
+                env::set_var("AGENTD_FAKE_PODMAN_LOG_DIR", &self.log_dir);
+            }
+
+            let result = run_session(
+                spec,
+                SessionInvocation {
+                    repo_url: "repo".to_string(),
+                    work_unit: None,
+                    timeout: None,
+                },
+            );
+
+            // Test-only PATH mutation is serialized by fake_podman_lock.
+            unsafe {
+                env::set_var("PATH", original_path);
+                env::remove_var("AGENTD_FAKE_PODMAN_LOG_DIR");
+            }
+
+            result
+        }
+
+        fn read_log(&self, name: &str) -> String {
+            fs::read_to_string(self.log_dir.join(name)).unwrap_or_default()
+        }
+    }
+
+    impl Drop for FakePodmanFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 
     #[cfg(unix)]
@@ -605,5 +1044,16 @@ mod tests {
         use std::os::windows::process::ExitStatusExt;
 
         ExitStatusExt::from_raw(code as u32)
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after the unix epoch")
+                .as_nanos()
+        ))
     }
 }
