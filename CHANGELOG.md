@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Added a documented static agent configuration format in `examples/agentd.toml` plus strict TOML parsing in the `agentd` crate for agent identity, base image, methodology mounts, credentials, and static runa command settings.
+- Added a Podman-backed session lifecycle in `agentd-runner` that creates ephemeral containers, mounts methodology assets read-only, clones a fresh repository workspace, runs `runa`, injects caller-resolved credentials, supports optional timeouts, and force-removes the container on teardown.
 
 ### Changed
 

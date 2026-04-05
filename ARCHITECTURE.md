@@ -81,39 +81,39 @@ The scheduler determines when an agent should run. Triggers may come from time-b
 
 The runner prepares the execution environment:
 
-1. Creates the container or equivalent isolated runtime environment.
-2. Mounts the agent's persistent home directory and establishes identity variables.
-3. Injects the credentials declared for that agent.
-4. Mounts deployment-specific context read-only.
-5. Makes required tools available, including any runtime configuration needed for direct MCP access to external servers.
+1. Creates an ephemeral Podman container from the agent's configured base image.
+2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
+3. Injects caller-resolved credentials as environment variables for that session only.
+4. Mounts the configured methodology directory read-only and initializes runa from `manifest.toml` at the mount root.
+5. Clones the requested repository into an ephemeral workspace inside the container and writes the configured agent command into runa's project config.
 
 ### Phase 3: Execution (`agentd-runner`)
 
-The runner launches the chosen agent runtime inside the prepared environment and supervises the session. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
+The runner launches `runa run` inside the prepared repository workspace and supervises the container until natural completion or an optional timeout. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
 
 ### Phase 4: Teardown (`agentd-runner`)
 
-When the session ends or times out, the runner preserves agent state in the persistent home directory and cleans up transient execution resources.
+When the session ends or times out, the runner force-removes the container and discards the entire ephemeral workspace. No session state is preserved on the host by the runner.
 
 ## 5. Container Isolation Model
 
-agentd is expected to run sessions in isolated environments such as Podman containers so agents remain separated from the host and from one another.
+agentd runs sessions in ephemeral Podman containers so agents remain separated from the host and from one another.
 
 | Mount or Injection | Purpose | Need Served |
 |---|---|---|
-| Persistent home directory | Preserve identity, working files, and session-to-session state | Identity |
+| Read-only methodology directory | Expose the runa methodology manifest and protocol assets without allowing mutation | Context |
 | Credentials | Authenticate to external systems without baking secrets into images | Credentials |
-| Read-only context | Provide deployment facts without granting write access | Context |
+| Ephemeral cloned repository | Give the session a writable project workspace that starts clean each run | Mission, Tool Availability |
 
 From inside the environment, an agent should see:
-- a stable `HOME`
 - identity-related environment variables
-- read-write access to its own persistent state
+- a read-only methodology mount rooted at `manifest.toml`
+- a fresh writable repository checkout for the current session
 - the tools and runtime configuration needed for its assigned work
 
 ## 6. Credential Flow
 
-Credentials are declared by agent configuration and sourced from an operator-managed secret store. During session setup, the runner resolves the declared credentials and injects them into the execution environment as environment variables or mounted secret files.
+Credentials are declared by agent configuration and sourced from an operator-managed secret store outside `agentd-runner`. During session setup, the runner receives already-resolved credential values from its caller and injects them into the execution environment as environment variables.
 
 Isolation is per agent: one agent receives only its own declared credentials. Sharing access to the same external service still requires separate credential declarations per agent so compromise remains scoped.
 
@@ -122,9 +122,9 @@ Isolation is per agent: one agent receives only its own declared credentials. Sh
 | Need | Architectural Decision | Workspace Evidence | Failure if Violated |
 |---|---|---|---|
 | Network | Session environments receive deployment-controlled network access | `agentd-runner` owns session setup | Agents cannot reach external services |
-| Credentials | Secrets are injected at launch, not stored in code or images | `agentd-runner` boundary and crate intent | Agents cannot authenticate or credentials leak across agents |
-| Identity | Each agent has persistent state and stable identity variables | `agentd-runner` boundary and crate intent | Agents lose state across sessions |
-| Mission | Scheduling hands mission context into session launch | `agentd-scheduler` plus `agentd-runner` boundary | Agents run without a reason or target |
+| Credentials | Secrets are injected at launch, not stored in code or images | `agentd-runner` accepts caller-resolved environment values | Agents cannot authenticate or credentials leak across agents |
+| Identity | Each session receives stable in-container identity variables and container naming | `agentd-runner` session contract and Podman lifecycle | Operators cannot distinguish which agent a session belongs to |
+| Mission | Scheduling or CLI invocation hands repo and optional work unit into session launch | `agentd-scheduler` plus `agentd-runner` boundary | Agents run without a reason or target |
 | Tool Availability | Tools are provided through the environment; MCP remains a runtime concern | Three-crate workspace with no transport crate | agentd would absorb protocol work it does not need |
-| Context | Deployment data is mounted read-only into sessions | `agentd-runner` boundary and crate intent | Agents operate without local awareness |
+| Context | Methodology assets are mounted read-only into sessions and the repo is freshly cloned per run | `agentd-runner` boundary and crate intent | Agents operate without local awareness |
 | Scheduling independence | Timing policy remains separate from execution setup | `agentd-scheduler` crate boundary | Scheduling changes would destabilize runner logic |
