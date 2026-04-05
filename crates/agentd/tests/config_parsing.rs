@@ -34,6 +34,24 @@ fn write_temp_config(name: &str, contents: &str) -> PathBuf {
     path
 }
 
+fn write_temp_config_under(base_dir: &Path, name: &str, contents: &str) -> PathBuf {
+    let unique = format!(
+        "agentd-config-test-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    );
+    let dir = base_dir.join(unique);
+
+    std::fs::create_dir_all(&dir).expect("temp test directory should be created");
+
+    let path = dir.join("agentd.toml");
+    std::fs::write(&path, contents).expect("temp config should be written");
+    path
+}
+
 #[test]
 fn parses_example_config_into_static_agent_settings() {
     let config = Config::from_str(&example_config()).expect("example config should parse");
@@ -75,6 +93,41 @@ command = ["codex", "exec"]
         path.parent()
             .expect("config file should have a parent directory")
             .join("../groundwork")
+    );
+}
+
+#[test]
+fn loading_config_from_a_relative_path_resolves_methodology_dir_from_an_absolute_base_dir() {
+    let current_dir = std::env::current_dir().expect("current directory should be available");
+    let path = write_temp_config_under(
+        &current_dir.join("target"),
+        "relative-load-path",
+        r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    );
+    let relative_path = path
+        .strip_prefix(&current_dir)
+        .expect("fixture path should be under the current directory");
+
+    let config = Config::load(relative_path).expect("config file should parse");
+    let agent = config.agent("codex").expect("agent should exist");
+
+    assert_eq!(
+        agent.methodology_dir(),
+        path.parent()
+            .expect("config file should have a parent directory")
+            .join("../groundwork")
+    );
+    assert!(
+        agent.methodology_dir().is_absolute(),
+        "loaded methodology_dir should be absolute when loaded from a file"
     );
 }
 
@@ -182,6 +235,72 @@ command = ["codex", "exec"]
     .expect_err("empty names should be rejected");
 
     assert!(error.to_string().contains("name"));
+}
+
+#[test]
+fn rejects_agent_names_with_leading_or_trailing_whitespace() {
+    for name in [" codex", "codex "] {
+        let error = Config::from_str(&format!(
+            r#"
+[[agents]]
+name = "{name}"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#
+        ))
+        .expect_err("whitespace-padded agent names should be rejected");
+
+        match error {
+            ConfigError::FieldHasOuterWhitespace {
+                field,
+                agent,
+                credential,
+            } => {
+                assert_eq!(field, "name");
+                assert_eq!(agent, None);
+                assert_eq!(credential, None);
+            }
+            other => panic!("expected whitespace validation error, got {other}"),
+        }
+    }
+}
+
+#[test]
+fn rejects_credential_names_with_leading_or_trailing_whitespace() {
+    for name in [" GITHUB_TOKEN", "GITHUB_TOKEN "] {
+        let error = Config::from_str(&format!(
+            r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+
+[[agents.credentials]]
+name = "{name}"
+source = "op://agentd/github/token"
+"#
+        ))
+        .expect_err("whitespace-padded credential names should be rejected");
+
+        match error {
+            ConfigError::FieldHasOuterWhitespace {
+                field,
+                agent,
+                credential,
+            } => {
+                assert_eq!(field, "credentials.name");
+                assert_eq!(agent.as_deref(), Some("codex"));
+                assert_eq!(credential, None);
+            }
+            other => panic!("expected whitespace validation error, got {other}"),
+        }
+    }
 }
 
 #[test]

@@ -13,7 +13,7 @@ pub struct Config {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
-        let base_dir = path.parent().map(Path::to_path_buf);
+        let base_dir = absolute_config_dir(path)?;
         Self::parse(&contents, base_dir.as_deref())
     }
 
@@ -36,7 +36,7 @@ impl Config {
         let mut agents = Vec::with_capacity(raw.agents.len());
 
         for raw_agent in raw.agents {
-            validate_non_empty("name", &raw_agent.name, Some(raw_agent.name.as_str()), None)?;
+            validate_lookup_key("name", &raw_agent.name, None, None)?;
 
             if !seen_agents.insert(raw_agent.name.clone()) {
                 return Err(ConfigError::DuplicateAgentName {
@@ -77,7 +77,7 @@ impl Config {
             let mut seen_credentials = HashSet::new();
             let mut credentials = Vec::with_capacity(raw_agent.credentials.len());
             for raw_credential in raw_agent.credentials {
-                validate_non_empty(
+                validate_lookup_key(
                     "credentials.name",
                     &raw_credential.name,
                     Some(raw_agent.name.as_str()),
@@ -200,6 +200,11 @@ pub enum ConfigError {
         agent: Option<String>,
         credential: Option<String>,
     },
+    FieldHasOuterWhitespace {
+        field: &'static str,
+        agent: Option<String>,
+        credential: Option<String>,
+    },
     EmptyCommand {
         agent: String,
     },
@@ -226,6 +231,25 @@ impl fmt::Display for ConfigError {
                 credential,
             } => {
                 write!(f, "field '{field}' must not be empty")?;
+
+                if let Some(agent) = agent {
+                    write!(f, " for agent '{agent}'")?;
+                }
+                if let Some(credential) = credential {
+                    write!(f, " credential '{credential}'")?;
+                }
+
+                Ok(())
+            }
+            ConfigError::FieldHasOuterWhitespace {
+                field,
+                agent,
+                credential,
+            } => {
+                write!(
+                    f,
+                    "field '{field}' must not have leading or trailing whitespace"
+                )?;
 
                 if let Some(agent) = agent {
                     write!(f, " for agent '{agent}'")?;
@@ -311,6 +335,36 @@ fn validate_non_empty(
     }
 
     Ok(())
+}
+
+fn validate_lookup_key(
+    field: &'static str,
+    value: &str,
+    agent: Option<&str>,
+    credential: Option<&str>,
+) -> Result<(), ConfigError> {
+    validate_non_empty(field, value, agent, credential)?;
+
+    if value != value.trim() {
+        return Err(ConfigError::FieldHasOuterWhitespace {
+            field,
+            agent: agent.map(str::to_owned),
+            credential: credential.map(str::to_owned),
+        });
+    }
+
+    Ok(())
+}
+
+fn absolute_config_dir(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+    let absolute_base_dir = if base_dir.is_absolute() {
+        base_dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(base_dir)
+    };
+
+    Ok(Some(absolute_base_dir))
 }
 
 fn resolve_methodology_dir(base_dir: Option<&Path>, methodology_dir: &str) -> PathBuf {
