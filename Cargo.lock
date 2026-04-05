@@ -8,8 +8,6 @@ version = "0.1.0"
 dependencies = [
  "agentd-runner",
  "agentd-scheduler",
- "forgejo-mcp",
- "mcp-transport",
 ]
 
 [[package]]
@@ -18,12 +16,4 @@ version = "0.1.0"
 
 [[package]]
 name = "agentd-scheduler"
-version = "0.1.0"
-
-[[package]]
-name = "forgejo-mcp"
-version = "0.1.0"
-
-[[package]]
-name = "mcp-transport"
 version = "0.1.0"

@@ -4,7 +4,7 @@
 agentd is an autonomous AI agent runtime daemon for running autonomous AI agents on infrastructure you control. It is for builders and operators who need predictable, self-hosted execution of agent workflows without relying on hosted runtimes. The project is being built as a modular Rust workspace so runtime, scheduling, and integration concerns can evolve independently.
 
 ## Architecture
-agentd uses a workspace-and-plugin shape: the `agentd` binary crate composes focused crates for runner lifecycle (`agentd-runner`), scheduling (`agentd-scheduler`), shared MCP transport (`mcp-transport`), and Forgejo MCP integration (`forgejo-mcp`). Keep architectural decisions aligned to this modular boundary unless a constraint requires change. See `ARCHITECTURE.md` for design rationale and the full constraint derivation.
+agentd uses a three-crate workspace shape: the `agentd` binary crate composes focused crates for runner lifecycle (`agentd-runner`) and scheduling (`agentd-scheduler`). Agent runtimes handle MCP directly when they need it; agentd configures and supervises execution environments rather than implementing MCP transport itself. Keep architectural decisions aligned to this modular boundary unless a constraint requires change. See `ARCHITECTURE.md` for design rationale and the full constraint derivation.
 
 ## Development Discipline
 
