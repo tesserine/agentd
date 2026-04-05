@@ -10,7 +10,7 @@ Early development. Not yet functional.
 
 ## Architecture Overview
 
-The system is organized as a Rust workspace with focused crates for runtime, scheduling, and MCP transport/plugin integration. See [ARCHITECTURE.md](ARCHITECTURE.md) for the architecture document.
+The system is organized as a Rust workspace with focused crates for composition, session lifecycle, and scheduling. Agent runtimes handle MCP directly when they need it; `agentd` is responsible for preparing and supervising the execution environment. See [ARCHITECTURE.md](ARCHITECTURE.md) for the architecture document.
 
 ## Quick Start
 
