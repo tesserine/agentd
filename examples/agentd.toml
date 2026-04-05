@@ -1,0 +1,20 @@
+# Static agent registry for agentd.
+# Session-specific inputs such as repo and work unit come from the CLI at run time.
+
+[[agents]]
+# Stable operator-facing agent name used for lookup and container identity.
+name = "codex"
+# Prebuilt image containing the agent runtime and runa.
+base_image = "ghcr.io/example/codex:latest"
+# Methodology directory to mount read-only into the session environment.
+methodology_dir = "../groundwork"
+
+[agents.runa]
+# Static agent-runtime command executed by runa inside the container.
+command = ["codex", "exec"]
+
+[[agents.credentials]]
+# Secret name exposed inside the session environment.
+name = "GITHUB_TOKEN"
+# Operator-managed secret reference. agentd preserves this string as-is.
+source = "op://agentd/github/token"
