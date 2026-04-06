@@ -358,8 +358,11 @@ fn run_container_with_timeout(
             classify_attached_start_result(args, container_name, status, stderr)
         }
         Ok(None) => {
-            cleanup_container(container_name)?;
-            finalize_attached_start(start)?;
+            let cleanup_result = cleanup_container(container_name);
+            let finalize_result = finalize_attached_start(start).map(|_| ());
+
+            cleanup_result?;
+            finalize_result?;
             Ok(SessionOutcome::TimedOut)
         }
         Err(error) => {
@@ -1908,6 +1911,79 @@ esac
         assert!(
             elapsed >= Duration::from_millis(100),
             "attached start should be awaited before returning wait errors, returned after {elapsed:?}"
+        );
+
+        let pid = fixture
+            .read_log("start.pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fake podman start should record its pid");
+        assert_process_is_reaped(pid);
+    }
+
+    #[test]
+    fn run_container_with_timeout_reaps_attached_child_when_cleanup_container_fails_after_timeout()
+    {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    start)
+        printf '%s\n' "$$" > "$log_root/start.pid"
+        sleep 0.3
+        exit 0
+        ;;
+    rm)
+        echo "rm failed after timeout" >&2
+        exit 47
+        ;;
+    inspect)
+        printf 'created\n'
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let started_at = Instant::now();
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_container_with_timeout("container", &[], Duration::from_millis(50))
+            })
+            .expect_err("timeout cleanup failure should surface as a runner error");
+        let elapsed = started_at.elapsed();
+
+        match error {
+            RunnerError::PodmanCommandFailed { args, status, .. } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "rm".to_string(),
+                        "--force".to_string(),
+                        "--ignore".to_string(),
+                        "container".to_string(),
+                    ]
+                );
+                assert_eq!(status.code(), Some(47));
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "attached start should be awaited before returning timeout cleanup errors, returned after {elapsed:?}"
         );
 
         let pid = fixture
