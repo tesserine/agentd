@@ -17,6 +17,8 @@ const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
 const REPO_DIR: &str = "/agentd/workspace/repo";
+const SUPPORTED_REPO_URL_FORMS: &str =
+    "https://, http://, ssh://, git://, or SCP-style user@host:path";
 const SESSION_SECRET_PREFIX: &str = "agentd-secret-";
 const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
 
@@ -90,7 +92,10 @@ impl fmt::Display for RunnerError {
             }
             RunnerError::InvalidAgentName => write!(f, "agent_name must not be empty"),
             RunnerError::InvalidBaseImage => write!(f, "base_image must not be empty"),
-            RunnerError::InvalidRepoUrl => write!(f, "repo_url must not be empty"),
+            RunnerError::InvalidRepoUrl => write!(
+                f,
+                "repo_url must be a supported remote repository URL ({SUPPORTED_REPO_URL_FORMS})"
+            ),
             RunnerError::InvalidAgentCommand => {
                 write!(f, "agent_command must contain at least one argument")
             }
@@ -227,11 +232,31 @@ fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
 }
 
 fn validate_invocation(invocation: &SessionInvocation) -> Result<(), RunnerError> {
-    if invocation.repo_url.trim().is_empty() {
+    let repo_url = invocation.repo_url.as_str();
+    if repo_url.trim().is_empty() || repo_url != repo_url.trim() || !is_supported_repo_url(repo_url)
+    {
         return Err(RunnerError::InvalidRepoUrl);
     }
 
     Ok(())
+}
+
+fn is_supported_repo_url(repo_url: &str) -> bool {
+    ["https://", "http://", "ssh://", "git://"]
+        .iter()
+        .any(|prefix| repo_url.starts_with(prefix))
+        || is_scp_style_repo_url(repo_url)
+}
+
+fn is_scp_style_repo_url(repo_url: &str) -> bool {
+    let Some((user, host_and_path)) = repo_url.split_once('@') else {
+        return false;
+    };
+    let Some((host, path)) = host_and_path.split_once(':') else {
+        return false;
+    };
+
+    !user.is_empty() && !host.is_empty() && !path.is_empty() && !host.contains('@')
 }
 
 fn create_container(
@@ -931,6 +956,8 @@ mod tests {
     use std::fs;
     use std::sync::{Mutex, OnceLock};
 
+    const VALID_REMOTE_REPO_URL: &str = "https://example.com/agentd.git";
+
     #[test]
     fn validate_spec_rejects_reserved_environment_names() {
         let error = validate_spec(&SessionSpec {
@@ -998,6 +1025,78 @@ mod tests {
     }
 
     #[test]
+    fn validate_invocation_accepts_supported_remote_repo_urls() {
+        for repo_url in [
+            "https://example.com/agentd.git",
+            "http://example.com/agentd.git",
+            "ssh://git@example.com/agentd.git",
+            "git://example.com/agentd.git",
+            "git@example.com:agentd.git",
+        ] {
+            validate_invocation(&SessionInvocation {
+                repo_url: repo_url.to_string(),
+                work_unit: None,
+                timeout: None,
+            })
+            .unwrap_or_else(|error| panic!("expected {repo_url} to be accepted, got {error}"));
+        }
+    }
+
+    #[test]
+    fn validate_invocation_rejects_non_remote_repo_urls() {
+        for repo_url in [
+            "",
+            " ",
+            " repo ",
+            "repo",
+            "./repo",
+            "../repo.git",
+            "/srv/test-repo.git",
+            "file:///srv/test-repo.git",
+            "example.com:agentd.git",
+            "git@example.com",
+            "@example.com:agentd.git",
+            "git@:agentd.git",
+        ] {
+            let error = validate_invocation(&SessionInvocation {
+                repo_url: repo_url.to_string(),
+                work_unit: None,
+                timeout: None,
+            })
+            .expect_err("non-remote repo URL should be rejected");
+
+            assert!(
+                matches!(error, RunnerError::InvalidRepoUrl),
+                "expected InvalidRepoUrl for {repo_url}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_session_rejects_invalid_repo_url_before_methodology_validation() {
+        let error = run_session(
+            SessionSpec {
+                agent_name: "agent".to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/does-not-exist"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            },
+            SessionInvocation {
+                repo_url: "/srv/test-repo.git".to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        )
+        .expect_err("invalid repo URL should be rejected before setup");
+
+        assert!(
+            matches!(error, RunnerError::InvalidRepoUrl),
+            "expected InvalidRepoUrl, got {error:?}"
+        );
+    }
+
+    #[test]
     fn create_container_args_include_shared_relabel_for_methodology_mount() {
         let args = build_create_container_args(
             &SessionResources {
@@ -1014,7 +1113,7 @@ mod tests {
                 environment: Vec::new(),
             },
             &SessionInvocation {
-                repo_url: "repo".to_string(),
+                repo_url: VALID_REMOTE_REPO_URL.to_string(),
                 work_unit: None,
                 timeout: None,
             },
@@ -1842,7 +1941,7 @@ esac
                         }],
                     },
                     SessionInvocation {
-                        repo_url: "repo".to_string(),
+                        repo_url: VALID_REMOTE_REPO_URL.to_string(),
                         work_unit: None,
                         timeout: None,
                     },
@@ -1966,7 +2065,7 @@ esac
                         }],
                     },
                     SessionInvocation {
-                        repo_url: "repo".to_string(),
+                        repo_url: VALID_REMOTE_REPO_URL.to_string(),
                         work_unit: None,
                         timeout: None,
                     },
@@ -2086,7 +2185,7 @@ exit 17
                 run_session(
                     spec,
                     SessionInvocation {
-                        repo_url: "repo".to_string(),
+                        repo_url: VALID_REMOTE_REPO_URL.to_string(),
                         work_unit: None,
                         timeout: None,
                     },

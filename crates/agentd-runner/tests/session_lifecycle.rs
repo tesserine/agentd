@@ -10,6 +10,8 @@ use agentd_runner::{
     ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec, run_session,
 };
 
+const TEST_REMOTE_REPO_URL: &str = "git://127.0.0.1:9418/test-repo.git";
+
 #[test]
 fn succeeds_without_timeout_and_cleans_up_container() {
     if skip_if_podman_unavailable("succeeds_without_timeout_and_cleans_up_container") {
@@ -45,7 +47,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
             ],
         },
         SessionInvocation {
-            repo_url: "/srv/test-repo.git".to_string(),
+            repo_url: TEST_REMOTE_REPO_URL.to_string(),
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -89,7 +91,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
             ],
         },
         SessionInvocation {
-            repo_url: "/srv/test-repo.git".to_string(),
+            repo_url: TEST_REMOTE_REPO_URL.to_string(),
             work_unit: None,
             timeout: None,
         },
@@ -133,7 +135,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
             ],
         },
         SessionInvocation {
-            repo_url: "/srv/test-repo.git".to_string(),
+            repo_url: TEST_REMOTE_REPO_URL.to_string(),
             work_unit: None,
             timeout: None,
         },
@@ -178,7 +180,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             ],
         },
         SessionInvocation {
-            repo_url: "/srv/test-repo.git".to_string(),
+            repo_url: TEST_REMOTE_REPO_URL.to_string(),
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -220,7 +222,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
             ],
         },
         SessionInvocation {
-            repo_url: "/srv/test-repo.git".to_string(),
+            repo_url: TEST_REMOTE_REPO_URL.to_string(),
             work_unit: None,
             timeout: Some(Duration::from_secs(1)),
         },
@@ -264,7 +266,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                 ],
             },
             SessionInvocation {
-                repo_url: "/srv/test-repo.git".to_string(),
+                repo_url: TEST_REMOTE_REPO_URL.to_string(),
                 work_unit: None,
                 timeout: None,
             },
@@ -325,6 +327,8 @@ impl SessionFixture {
 
         write_test_repo(&bare_repo_dir);
         fs::write(context_dir.join("runa"), RUNA_STUB).expect("runa stub should be written");
+        fs::write(context_dir.join("entrypoint.sh"), ENTRYPOINT_SH)
+            .expect("entrypoint script should be written");
         fs::write(context_dir.join("Containerfile"), CONTAINERFILE)
             .expect("containerfile should be written");
 
@@ -567,10 +571,32 @@ fn run_git_in<const N: usize>(directory: &Path, args: [&str; N]) {
 const CONTAINERFILE: &str = r#"
 FROM docker.io/library/alpine:3.20
 
-RUN apk add --no-cache git
+RUN apk add --no-cache git git-daemon
 COPY runa /usr/local/bin/runa
-RUN chmod +x /usr/local/bin/runa
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /usr/local/bin/runa /entrypoint.sh
 COPY repo.git /srv/test-repo.git
+ENTRYPOINT ["/entrypoint.sh"]
+"#;
+
+const ENTRYPOINT_SH: &str = r#"#!/bin/sh
+set -eu
+
+git daemon --export-all --base-path=/srv --reuseaddr --listen=127.0.0.1 --port=9418 /srv &
+git_daemon_pid=$!
+trap 'kill "$git_daemon_pid" >/dev/null 2>&1 || true; wait "$git_daemon_pid" >/dev/null 2>&1 || true' EXIT
+
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+    if git ls-remote git://127.0.0.1:9418/test-repo.git >/dev/null 2>&1; then
+        exec "$@"
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+
+echo "git daemon did not become ready" >&2
+exit 97
 "#;
 
 const RUNA_STUB: &str = r#"#!/bin/sh
