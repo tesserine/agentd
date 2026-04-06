@@ -17,7 +17,7 @@ const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
 const REPO_DIR: &str = "/agentd/workspace/repo";
-const SESSION_SECRET_PREFIX: &str = "agentd-session-secret-";
+const SESSION_SECRET_PREFIX: &str = "agentd-secret-";
 const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,7 +541,7 @@ fn prepare_session_resources(
     };
 
     for (index, variable) in spec.environment.iter().enumerate() {
-        let secret_name = format!("{SESSION_SECRET_PREFIX}{container_name}-{index}");
+        let secret_name = format!("{SESSION_SECRET_PREFIX}{session_id}-{index}");
         if let Err(error) = create_podman_secret(&secret_name, &variable.value) {
             let _ = cleanup_session_resources(&resources);
             return Err(error);
@@ -653,7 +653,7 @@ fn build_create_container_args(
         resources.container_name.clone(),
         "--mount".to_string(),
         format!(
-            "type=bind,src={},target={},ro=true",
+            "type=bind,src={},target={},ro=true,relabel=shared",
             resources.methodology_mount_source.display(),
             METHODOLOGY_MOUNT_PATH
         ),
@@ -956,6 +956,38 @@ mod tests {
     }
 
     #[test]
+    fn create_container_args_include_shared_relabel_for_methodology_mount() {
+        let args = build_create_container_args(
+            &SessionResources {
+                container_name: "agentd-agent-session".to_string(),
+                methodology_staging_dir: PathBuf::from("/tmp/staging"),
+                methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+                secret_bindings: Vec::new(),
+            },
+            &SessionSpec {
+                agent_name: "agent".to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            },
+            &SessionInvocation {
+                repo_url: "repo".to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        );
+
+        let mount_value = argument_value(&args.join(" "), "--mount")
+            .expect("podman create should receive a methodology mount");
+
+        assert!(
+            mount_value.contains("relabel=shared"),
+            "methodology bind mount should include shared SELinux relabeling: {mount_value}"
+        );
+    }
+
+    #[test]
     fn wait_for_container_exit_checks_child_status_again_after_timeout_boundary() {
         let _guard = fake_podman_lock()
             .lock()
@@ -1246,6 +1278,7 @@ esac
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fixture = FakePodmanFixture::new();
+        let agent_name = "a".repeat(190);
         fixture.write_script(
             r#"#!/bin/sh
 set -eu
@@ -1322,7 +1355,7 @@ esac
 
         let methodology_dir = fixture.create_methodology_dir("runner-methodology");
         let outcome = fixture.run_with_fake_podman(SessionSpec {
-            agent_name: "agent".to_string(),
+            agent_name: agent_name.clone(),
             base_image: "image".to_string(),
             methodology_dir,
             agent_command: vec!["codex".to_string(), "exec".to_string()],
@@ -1354,8 +1387,9 @@ esac
             .nth(1)
             .expect("secret create should include a secret name");
 
+        let container_prefix = format!("agentd-{agent_name}-");
         let container_suffix = container_name
-            .strip_prefix("agentd-agent-")
+            .strip_prefix(&container_prefix)
             .expect("container name should include agent prefix");
         let stage_suffix = stage_dir_name
             .strip_prefix(SESSION_STAGE_PREFIX)
@@ -1364,7 +1398,7 @@ esac
         assert_eq!(stage_suffix, container_suffix);
         assert_eq!(
             secret_name,
-            format!("{SESSION_SECRET_PREFIX}{container_name}-0")
+            format!("{SESSION_SECRET_PREFIX}{container_suffix}-0")
         );
         assert_eq!(container_suffix.len(), 32);
         assert!(
