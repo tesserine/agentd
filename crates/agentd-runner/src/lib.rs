@@ -812,7 +812,7 @@ fn build_create_container_args(
     args.push("--user".to_string());
     args.push("0:0".to_string());
     args.push(spec.base_image.clone());
-    args.push("sh".to_string());
+    args.push("/bin/sh".to_string());
     args.push("-lc".to_string());
     args.push(build_container_script(spec, invocation));
 
@@ -1305,6 +1305,40 @@ mod tests {
         assert!(
             user_index < image_index,
             "--user should be injected before the image argument: {args:?}"
+        );
+    }
+
+    #[test]
+    fn create_container_args_use_absolute_shell_path_after_image_argument() {
+        let args = build_create_container_args(
+            &SessionResources {
+                container_name: "agentd-agent-session".to_string(),
+                methodology_staging_dir: PathBuf::from("/tmp/staging"),
+                methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+                secret_bindings: Vec::new(),
+            },
+            &SessionSpec {
+                agent_name: "agent".to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            },
+            &SessionInvocation {
+                repo_url: VALID_REMOTE_REPO_URL.to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        );
+
+        let image_index = args
+            .iter()
+            .position(|arg| arg == "image")
+            .expect("podman create should include the base image");
+        assert_eq!(
+            args.get(image_index + 1).map(String::as_str),
+            Some("/bin/sh"),
+            "podman create should invoke the documented absolute shell path"
         );
     }
 
