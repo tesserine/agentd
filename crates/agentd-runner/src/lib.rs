@@ -316,7 +316,7 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
         "set -eu\n\
          mkdir -p /agentd/workspace\n\
          rm -rf /agentd/workspace/repo\n\
-         git clone --no-hardlinks -- ",
+         GIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- ",
     );
     script.push_str(&shell_quote(&invocation.repo_url));
     script.push(' ');
@@ -386,8 +386,12 @@ fn run_container_with_timeout(
             }
             Err(error) => {
                 log_cleanup_failure("session execution", &error);
-                log_attached_start_finalization_skipped("session execution", &error);
-                std::mem::forget(start);
+                if let Err(kill_error) = start.child.kill() {
+                    log_attached_start_kill_failure("session execution", &kill_error);
+                }
+                if let Err(finalize_error) = finalize_attached_start(start).map(|_| ()) {
+                    log_attached_start_finalization_failure("session execution", &finalize_error);
+                }
                 Ok(SessionOutcome::TimedOut)
             }
         },
@@ -429,9 +433,9 @@ fn log_attached_start_finalization_failure(stage: &str, error: &RunnerError) {
     let _ = log_attached_start_finalization_failure_to(&mut stderr, stage, error);
 }
 
-fn log_attached_start_finalization_skipped(stage: &str, error: &RunnerError) {
+fn log_attached_start_kill_failure(stage: &str, error: &std::io::Error) {
     let mut stderr = std::io::stderr().lock();
-    let _ = log_attached_start_finalization_skipped_to(&mut stderr, stage, error);
+    let _ = log_attached_start_kill_failure_to(&mut stderr, stage, error);
 }
 
 fn log_cleanup_failure_to<W>(
@@ -459,18 +463,15 @@ where
     )
 }
 
-fn log_attached_start_finalization_skipped_to<W>(
+fn log_attached_start_kill_failure_to<W>(
     writer: &mut W,
     stage: &str,
-    error: &RunnerError,
+    error: &std::io::Error,
 ) -> std::io::Result<()>
 where
     W: Write,
 {
-    writeln!(
-        writer,
-        "attached start finalization after {stage} skipped because cleanup failed: {error}"
-    )
+    writeln!(writer, "attached start kill after {stage} failed: {error}")
 }
 
 fn wait_for_container_exit(
@@ -1436,6 +1437,29 @@ mod tests {
         assert!(
             script.contains("git clone --no-hardlinks -- '-repo.git' '/agentd/workspace/repo'"),
             "git clone should terminate options before the repo URL: {script}"
+        );
+    }
+
+    #[test]
+    fn build_container_script_disables_git_terminal_prompts() {
+        let script = build_container_script(
+            &SessionSpec {
+                agent_name: "agent".to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            },
+            &SessionInvocation {
+                repo_url: VALID_REMOTE_REPO_URL.to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        );
+
+        assert!(
+            script.contains("GIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- "),
+            "git clone should fail fast instead of prompting for credentials: {script}"
         );
     }
 
@@ -2689,8 +2713,7 @@ shift
 case "$command_name" in
     start)
         printf '%s\n' "$$" > "$log_root/start.pid"
-        sleep 0.3
-        exit 0
+        exec sleep 0.3
         ;;
     rm)
         printf '%s\n' "$*" >> "$log_root/rm-commands.log"
@@ -2727,6 +2750,13 @@ esac
             "--force --ignore container\n",
             "timeout cleanup should still attempt force removal once before returning TimedOut"
         );
+
+        let pid = fixture
+            .read_log("start.pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fake podman start should record its pid");
+        assert_process_is_reaped(pid);
     }
 
     #[test]
@@ -2764,19 +2794,19 @@ esac
     }
 
     #[test]
-    fn attached_start_finalization_skip_logs_include_session_execution_stage() {
+    fn attached_start_kill_failure_logs_include_session_execution_stage() {
         let mut output = Vec::new();
 
-        log_attached_start_finalization_skipped_to(
+        log_attached_start_kill_failure_to(
             &mut output,
             "session execution",
-            &RunnerError::InvalidBaseImage,
+            &std::io::Error::other("permission denied"),
         )
-        .expect("finalization skip log should be written");
+        .expect("kill failure log should be written");
 
         assert_eq!(
-            String::from_utf8(output).expect("finalization skip log should be utf-8"),
-            "attached start finalization after session execution skipped because cleanup failed: base_image must not be empty\n"
+            String::from_utf8(output).expect("kill failure log should be utf-8"),
+            "attached start kill after session execution failed: permission denied\n"
         );
     }
 
