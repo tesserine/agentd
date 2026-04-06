@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use agentd_runner::validate_environment_name;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +84,7 @@ impl Config {
                     Some(raw_agent.name.as_str()),
                     None,
                 )?;
-                if raw_credential.name.contains(',') {
+                if validate_environment_name(&raw_credential.name).is_err() {
                     return Err(ConfigError::InvalidCredentialName {
                         agent: raw_agent.name.clone(),
                         name: raw_credential.name,
@@ -238,7 +239,7 @@ impl fmt::Display for ConfigError {
             ConfigError::InvalidCredentialName { agent, name } => {
                 write!(
                     f,
-                    "agent '{agent}' defines invalid credential name '{name}'; credential names must not contain ','"
+                    "agent '{agent}' defines invalid credential name '{name}'; credential names must not contain ',' or '=' and must not use reserved name 'AGENT_NAME'"
                 )
             }
             ConfigError::EmptyField {

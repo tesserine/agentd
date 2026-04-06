@@ -332,6 +332,62 @@ source = "op://agentd/github/token"
 }
 
 #[test]
+fn rejects_credential_names_containing_equals_signs() {
+    let error = Config::from_str(
+        r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+
+[[agents.credentials]]
+name = "FOO=BAR"
+source = "op://agentd/github/token"
+"#,
+    )
+    .expect_err("credential names containing '=' should be rejected");
+
+    match error {
+        ConfigError::InvalidCredentialName { agent, name } => {
+            assert_eq!(agent, "codex");
+            assert_eq!(name, "FOO=BAR");
+        }
+        other => panic!("expected invalid credential name error, got {other}"),
+    }
+}
+
+#[test]
+fn rejects_reserved_credential_names() {
+    let error = Config::from_str(
+        r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+
+[[agents.credentials]]
+name = "AGENT_NAME"
+source = "op://agentd/github/token"
+"#,
+    )
+    .expect_err("runner-reserved credential names should be rejected");
+
+    match error {
+        ConfigError::InvalidCredentialName { agent, name } => {
+            assert_eq!(agent, "codex");
+            assert_eq!(name, "AGENT_NAME");
+        }
+        other => panic!("expected invalid credential name error, got {other}"),
+    }
+}
+
+#[test]
 fn rejects_empty_command_arrays_and_empty_command_elements() {
     let empty_command_error = Config::from_str(
         r#"

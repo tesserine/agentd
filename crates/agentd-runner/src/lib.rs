@@ -45,6 +45,12 @@ pub enum SessionOutcome {
     TimedOut,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvironmentNameValidationError {
+    Invalid,
+    Reserved,
+}
+
 #[derive(Debug)]
 pub enum RunnerError {
     MissingMethodologyManifest {
@@ -196,15 +202,18 @@ fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     }
 
     for variable in &spec.environment {
-        if variable.name.is_empty() || variable.name.contains('=') || variable.name.contains(',') {
-            return Err(RunnerError::InvalidEnvironmentName {
-                name: variable.name.clone(),
-            });
-        }
-        if is_reserved_environment_name(&variable.name) {
-            return Err(RunnerError::ReservedEnvironmentName {
-                name: variable.name.clone(),
-            });
+        match validate_environment_name(&variable.name) {
+            Ok(()) => {}
+            Err(EnvironmentNameValidationError::Invalid) => {
+                return Err(RunnerError::InvalidEnvironmentName {
+                    name: variable.name.clone(),
+                });
+            }
+            Err(EnvironmentNameValidationError::Reserved) => {
+                return Err(RunnerError::ReservedEnvironmentName {
+                    name: variable.name.clone(),
+                });
+            }
         }
     }
 
@@ -314,6 +323,9 @@ fn wait_for_container_exit(
         }
 
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if let Some(status) = child.try_wait()? {
+                return Ok(Some(status));
+            }
             return Ok(None);
         }
         thread::sleep(Duration::from_millis(50));
@@ -486,6 +498,17 @@ fn inspect_container_status(container_name: &str) -> Result<String, RunnerError>
 
 fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1] {
     [(AGENT_NAME_ENV, &spec.agent_name)]
+}
+
+pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValidationError> {
+    if name.is_empty() || name.contains('=') || name.contains(',') {
+        return Err(EnvironmentNameValidationError::Invalid);
+    }
+    if is_reserved_environment_name(name) {
+        return Err(EnvironmentNameValidationError::Reserved);
+    }
+
+    Ok(())
 }
 
 fn is_reserved_environment_name(name: &str) -> bool {
@@ -824,6 +847,93 @@ mod tests {
             }
             other => panic!("expected InvalidEnvironmentName, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn validate_spec_rejects_environment_names_containing_equals_signs() {
+        let error = validate_spec(&SessionSpec {
+            agent_name: "agent".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir: PathBuf::from("/tmp/methodology"),
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "TOKEN=EXTRA".to_string(),
+                value: "secret".to_string(),
+            }],
+        })
+        .expect_err("environment names containing '=' should be rejected");
+
+        match error {
+            RunnerError::InvalidEnvironmentName { name } => {
+                assert_eq!(name, "TOKEN=EXTRA");
+            }
+            other => panic!("expected InvalidEnvironmentName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_for_container_exit_checks_child_status_again_after_timeout_boundary() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    inspect)
+        sleep 0.05
+        printf 'running\n'
+        ;;
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            rm)
+                printf 'rm %s\n' "$*" >> "$log_root/secret-commands.log"
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 0.02"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child process should start");
+
+        let result = fixture.run_with_fake_podman_env(|| {
+            wait_for_container_exit(
+                &mut child,
+                "container",
+                &[SecretBinding {
+                    secret_name: "secret".to_string(),
+                    target_name: "GITHUB_TOKEN".to_string(),
+                }],
+                Some(Duration::from_millis(10)),
+            )
+        });
+
+        let status = result
+            .expect("wait should succeed")
+            .expect("completed child should win over timeout");
+        assert_eq!(status.code(), Some(0));
     }
 
     #[test]
@@ -1197,6 +1307,19 @@ esac
         }
 
         fn run_with_fake_podman(&self, spec: SessionSpec) -> Result<SessionOutcome, RunnerError> {
+            self.run_with_fake_podman_env(|| {
+                run_session(
+                    spec,
+                    SessionInvocation {
+                        repo_url: "repo".to_string(),
+                        work_unit: None,
+                        timeout: None,
+                    },
+                )
+            })
+        }
+
+        fn run_with_fake_podman_env<T>(&self, run: impl FnOnce() -> T) -> T {
             let original_path =
                 env::var_os("PATH").expect("PATH should exist for fake podman tests");
             let fake_path = env::join_paths(
@@ -1210,14 +1333,7 @@ esac
                 env::set_var("AGENTD_FAKE_PODMAN_LOG_DIR", &self.log_dir);
             }
 
-            let result = run_session(
-                spec,
-                SessionInvocation {
-                    repo_url: "repo".to_string(),
-                    work_unit: None,
-                    timeout: None,
-                },
-            );
+            let result = run();
 
             // Test-only PATH mutation is serialized by fake_podman_lock.
             unsafe {
