@@ -248,23 +248,25 @@ fn validate_invocation(invocation: &SessionInvocation) -> Result<(), RunnerError
 }
 
 fn is_supported_repo_url(repo_url: &str) -> bool {
-    SUPPORTED_REPO_URL_PREFIXES
-        .iter()
-        .any(|prefix| repo_url.starts_with(prefix))
+    repo_url_authority(repo_url)
+        .map(|authority| !authority.is_empty() && !authority.starts_with('/'))
+        .unwrap_or(false)
 }
 
 fn has_repo_url_userinfo(repo_url: &str) -> bool {
-    let Some(prefix) = SUPPORTED_REPO_URL_PREFIXES
+    repo_url_authority(repo_url)
+        .map(|authority| authority.contains('@'))
+        .unwrap_or(false)
+}
+
+fn repo_url_authority(repo_url: &str) -> Option<&str> {
+    let prefix = SUPPORTED_REPO_URL_PREFIXES
         .iter()
-        .find(|prefix| repo_url.starts_with(**prefix))
-    else {
-        return false;
-    };
+        .find(|prefix| repo_url.starts_with(**prefix))?;
 
-    let authority = &repo_url[prefix.len()..];
-    let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
-
-    authority[..authority_end].contains('@')
+    let remainder = &repo_url[prefix.len()..];
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    Some(&remainder[..authority_end])
 }
 
 fn unsupported_repo_url_error() -> RunnerError {
@@ -957,9 +959,14 @@ fn toml_string(value: &str) -> String {
         match character {
             '\\' => encoded.push_str("\\\\"),
             '"' => encoded.push_str("\\\""),
+            '\u{0008}' => encoded.push_str("\\b"),
+            '\u{000C}' => encoded.push_str("\\f"),
             '\n' => encoded.push_str("\\n"),
             '\r' => encoded.push_str("\\r"),
             '\t' => encoded.push_str("\\t"),
+            other if other.is_control() => {
+                encoded.push_str(&format!("\\u{:04X}", other as u32));
+            }
             other => encoded.push(other),
         }
     }
@@ -1079,6 +1086,12 @@ mod tests {
             "ssh://git@example.com/agentd.git",
             "git@example.com:agentd.git",
             "https://user:token@example.com/repo.git",
+            "https://",
+            "http://",
+            "git://",
+            "http:///repo.git",
+            "https://?ref=main",
+            "https://#readme",
             "example.com:agentd.git",
             "git@example.com",
             "@example.com:agentd.git",
@@ -1224,6 +1237,35 @@ mod tests {
         assert!(
             script.contains("git clone --no-hardlinks -- '-repo.git' '/agentd/workspace/repo'"),
             "git clone should terminate options before the repo URL: {script}"
+        );
+    }
+
+    #[test]
+    fn toml_string_escapes_control_characters_into_valid_toml() {
+        let original = "before\x08middle\x0cafter\0tail";
+        let encoded = toml_string(original);
+
+        assert!(
+            encoded.contains("\\b"),
+            "backspace should use the TOML named escape: {encoded:?}"
+        );
+        assert!(
+            encoded.contains("\\f"),
+            "form feed should use the TOML named escape: {encoded:?}"
+        );
+        assert!(
+            encoded.contains("\\u0000"),
+            "null should use a unicode escape: {encoded:?}"
+        );
+
+        let document = format!("value = {encoded}\n");
+        let parsed: toml::Value =
+            toml::from_str(&document).expect("escaped string should parse as TOML");
+
+        assert_eq!(
+            parsed.get("value").and_then(toml::Value::as_str),
+            Some(original),
+            "TOML parsing should round-trip the original control characters"
         );
     }
 
