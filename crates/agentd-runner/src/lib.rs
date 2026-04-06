@@ -248,8 +248,18 @@ fn validate_invocation(invocation: &SessionInvocation) -> Result<(), RunnerError
 }
 
 fn is_supported_repo_url(repo_url: &str) -> bool {
+    if repo_url.contains(['?', '#']) {
+        return false;
+    }
+
     repo_url_authority(repo_url)
-        .map(|authority| !authority.is_empty() && !authority.starts_with('/'))
+        .zip(repo_url_path(repo_url))
+        .map(|(authority, path)| {
+            !authority.is_empty()
+                && !authority.starts_with('/')
+                && path.starts_with('/')
+                && path.len() > 1
+        })
         .unwrap_or(false)
 }
 
@@ -267,6 +277,16 @@ fn repo_url_authority(repo_url: &str) -> Option<&str> {
     let remainder = &repo_url[prefix.len()..];
     let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
     Some(&remainder[..authority_end])
+}
+
+fn repo_url_path(repo_url: &str) -> Option<&str> {
+    let prefix = SUPPORTED_REPO_URL_PREFIXES
+        .iter()
+        .find(|prefix| repo_url.starts_with(**prefix))?;
+
+    let remainder = &repo_url[prefix.len()..];
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    Some(&remainder[authority_end..])
 }
 
 fn unsupported_repo_url_error() -> RunnerError {
@@ -1089,9 +1109,12 @@ mod tests {
             "https://",
             "http://",
             "git://",
+            "https://github.com",
             "http:///repo.git",
             "https://?ref=main",
             "https://#readme",
+            "https://example.com/repo.git?token=secret",
+            "https://example.com/repo.git#readme",
             "example.com:agentd.git",
             "git@example.com",
             "@example.com:agentd.git",
