@@ -86,7 +86,7 @@ impl fmt::Display for RunnerError {
             }
             RunnerError::InvalidEnvironmentName { name } => write!(
                 f,
-                "environment variable names must not be empty and must not contain '=': {name}"
+                "environment variable names must not be empty and must not contain ',' or '=': {name}"
             ),
             RunnerError::ReservedEnvironmentName { name } => {
                 write!(
@@ -166,8 +166,12 @@ pub fn run_session(
     }
 
     let start_result = match invocation.timeout {
-        Some(timeout) => run_container_with_timeout(&resources.container_name, timeout),
-        None => run_container_to_completion(&resources.container_name),
+        Some(timeout) => run_container_with_timeout(
+            &resources.container_name,
+            &resources.secret_bindings,
+            timeout,
+        ),
+        None => run_container_to_completion(&resources.container_name, &resources.secret_bindings),
     };
 
     let cleanup_result = cleanup_session_resources(&resources);
@@ -192,7 +196,7 @@ fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     }
 
     for variable in &spec.environment {
-        if variable.name.is_empty() || variable.name.contains('=') {
+        if variable.name.is_empty() || variable.name.contains('=') || variable.name.contains(',') {
             return Err(RunnerError::InvalidEnvironmentName {
                 name: variable.name.clone(),
             });
@@ -252,9 +256,13 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script
 }
 
-fn run_container_to_completion(container_name: &str) -> Result<SessionOutcome, RunnerError> {
+fn run_container_to_completion(
+    container_name: &str,
+    secret_bindings: &[SecretBinding],
+) -> Result<SessionOutcome, RunnerError> {
     let mut start = start_attached_container(container_name)?;
-    let status = start.child.wait()?;
+    let status = wait_for_container_exit(&mut start.child, container_name, secret_bindings, None)?
+        .expect("container wait without timeout should not return a timeout");
     let stderr = finish_captured_stderr(start.stderr_thread)?;
 
     classify_attached_start_result(start.args, container_name, status, stderr)
@@ -262,11 +270,17 @@ fn run_container_to_completion(container_name: &str) -> Result<SessionOutcome, R
 
 fn run_container_with_timeout(
     container_name: &str,
+    secret_bindings: &[SecretBinding],
     timeout: Duration,
 ) -> Result<SessionOutcome, RunnerError> {
     let mut start = start_attached_container(container_name)?;
 
-    match wait_for_child(&mut start.child, timeout)? {
+    match wait_for_container_exit(
+        &mut start.child,
+        container_name,
+        secret_bindings,
+        Some(timeout),
+    )? {
         Some(status) => {
             let stderr = finish_captured_stderr(start.stderr_thread)?;
             classify_attached_start_result(start.args, container_name, status, stderr)
@@ -280,13 +294,26 @@ fn run_container_with_timeout(
     }
 }
 
-fn wait_for_child(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>, RunnerError> {
-    let deadline = Instant::now() + timeout;
+fn wait_for_container_exit(
+    child: &mut Child,
+    container_name: &str,
+    secret_bindings: &[SecretBinding],
+    timeout: Option<Duration>,
+) -> Result<Option<ExitStatus>, RunnerError> {
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    let mut secrets_released = secret_bindings.is_empty();
+
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
         }
-        if Instant::now() >= deadline {
+
+        if !secrets_released && inspect_container_status(container_name)? == "running" {
+            cleanup_podman_secrets(secret_bindings)?;
+            secrets_released = true;
+        }
+
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(None);
         }
         thread::sleep(Duration::from_millis(50));
@@ -443,6 +470,18 @@ fn exit_code_to_outcome(exit_code: i32) -> SessionOutcome {
         0 => SessionOutcome::Succeeded,
         exit_code => SessionOutcome::Failed { exit_code },
     }
+}
+
+fn inspect_container_status(container_name: &str) -> Result<String, RunnerError> {
+    run_podman_command(vec![
+        "inspect".to_string(),
+        "--type".to_string(),
+        "container".to_string(),
+        "--format".to_string(),
+        "{{.State.Status}}".to_string(),
+        container_name.to_string(),
+    ])
+    .map(|output| output.trim().to_string())
 }
 
 fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1] {
@@ -766,6 +805,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_spec_rejects_environment_names_containing_commas() {
+        let error = validate_spec(&SessionSpec {
+            agent_name: "agent".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir: PathBuf::from("/tmp/methodology"),
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "TOKEN,EXTRA".to_string(),
+                value: "secret".to_string(),
+            }],
+        })
+        .expect_err("comma-delimited environment names should be rejected");
+
+        match error {
+            RunnerError::InvalidEnvironmentName { name } => {
+                assert_eq!(name, "TOKEN,EXTRA");
+            }
+            other => panic!("expected InvalidEnvironmentName, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn attached_start_classifies_exit_code_125_as_runner_error() {
         let error = classify_attached_start_result_with_inspector(
             vec![
@@ -855,7 +916,7 @@ mod tests {
     fn run_session_does_not_pass_resolved_environment_values_via_podman_create_arguments() {
         let _guard = fake_podman_lock()
             .lock()
-            .expect("fake podman lock should be acquired");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fixture = FakePodmanFixture::new();
         fixture.write_script(
             r#"#!/bin/sh
@@ -885,15 +946,43 @@ case "$command_name" in
         ;;
     create)
         printf '%s\n' "$*" > "$log_root/create-args.log"
+        printf 'created' > "$log_root/container-state"
         ;;
     start)
+        printf 'running' > "$log_root/container-state"
         exit 0
         ;;
     rm)
         exit 0
         ;;
     inspect)
-        exit 125
+        format_value=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --type)
+                    shift 2
+                    ;;
+                --format)
+                    format_value="$2"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+        state="$(cat "$log_root/container-state" 2>/dev/null || printf 'created')"
+        case "$format_value" in
+            "{{.State.Status}}")
+                printf '%s\n' "$state"
+                ;;
+            "{{.State.Status}} {{.State.ExitCode}}")
+                printf '%s 0\n' "$state"
+                ;;
+            *)
+                exit 97
+                ;;
+        esac
         ;;
     *)
         echo "unexpected podman command: $command_name" >&2
@@ -936,6 +1025,124 @@ esac
             "podman secret create should be invoked before container create: {secret_args}"
         );
         assert_eq!(fixture.read_log("secret-value.log"), "test-token");
+    }
+
+    #[test]
+    fn run_session_releases_session_secrets_after_container_reaches_running_state() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            create)
+                printf 'create %s\n' "$*" >> "$log_root/secret-commands.log"
+                cat > "$log_root/secret-value.log"
+                ;;
+            rm)
+                printf 'rm %s\n' "$*" >> "$log_root/secret-commands.log"
+                : > "$log_root/secret-removed"
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    create)
+        printf '%s\n' "$*" > "$log_root/create-args.log"
+        printf 'created' > "$log_root/container-state"
+        ;;
+    start)
+        printf 'running' > "$log_root/container-state"
+        deadline=$(( $(date +%s) + 3 ))
+        while [ ! -f "$log_root/secret-removed" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "secret was not removed while container was running" >&2
+                exit 42
+            fi
+            sleep 0.1
+        done
+        exit 0
+        ;;
+    rm)
+        exit 0
+        ;;
+    inspect)
+        format_value=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --type)
+                    shift 2
+                    ;;
+                --format)
+                    format_value="$2"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+        state="$(cat "$log_root/container-state" 2>/dev/null || printf 'created')"
+        case "$format_value" in
+            "{{.State.Status}}")
+                printf '%s\n' "$state"
+                ;;
+            "{{.State.Status}} {{.State.ExitCode}}")
+                printf '%s 0\n' "$state"
+                ;;
+            *)
+                echo "unexpected podman inspect format: $format_value" >&2
+                exit 97
+                ;;
+        esac
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let outcome = fixture.run_with_fake_podman(SessionSpec {
+            agent_name: "agent".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir,
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "GITHUB_TOKEN".to_string(),
+                value: "test-token".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            outcome.expect("session should succeed with fake podman"),
+            SessionOutcome::Succeeded
+        );
+
+        let secret_args = fixture.read_log("secret-commands.log");
+        assert!(
+            secret_args.contains("create"),
+            "podman secret create should be invoked: {secret_args}"
+        );
+        assert!(
+            secret_args.contains("rm"),
+            "podman secret rm should run after the container reaches running: {secret_args}"
+        );
     }
 
     fn fake_podman_lock() -> &'static Mutex<()> {

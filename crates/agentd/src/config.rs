@@ -83,6 +83,12 @@ impl Config {
                     Some(raw_agent.name.as_str()),
                     None,
                 )?;
+                if raw_credential.name.contains(',') {
+                    return Err(ConfigError::InvalidCredentialName {
+                        agent: raw_agent.name.clone(),
+                        name: raw_credential.name,
+                    });
+                }
                 validate_non_empty(
                     "credentials.source",
                     &raw_credential.source,
@@ -195,6 +201,10 @@ pub enum ConfigError {
         agent: String,
         name: String,
     },
+    InvalidCredentialName {
+        agent: String,
+        name: String,
+    },
     EmptyField {
         field: &'static str,
         agent: Option<String>,
@@ -223,6 +233,12 @@ impl fmt::Display for ConfigError {
                 write!(
                     f,
                     "agent '{agent}' defines duplicate credential name '{name}'"
+                )
+            }
+            ConfigError::InvalidCredentialName { agent, name } => {
+                write!(
+                    f,
+                    "agent '{agent}' defines invalid credential name '{name}'; credential names must not contain ','"
                 )
             }
             ConfigError::EmptyField {

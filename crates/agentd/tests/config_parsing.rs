@@ -304,6 +304,34 @@ source = "op://agentd/github/token"
 }
 
 #[test]
+fn rejects_credential_names_containing_commas() {
+    let error = Config::from_str(
+        r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+
+[[agents.credentials]]
+name = "TOKEN,EXTRA"
+source = "op://agentd/github/token"
+"#,
+    )
+    .expect_err("comma-delimited credential names should be rejected");
+
+    match error {
+        ConfigError::InvalidCredentialName { agent, name } => {
+            assert_eq!(agent, "codex");
+            assert_eq!(name, "TOKEN,EXTRA");
+        }
+        other => panic!("expected invalid credential name error, got {other}"),
+    }
+}
+
+#[test]
 fn rejects_empty_command_arrays_and_empty_command_elements() {
     let empty_command_error = Config::from_str(
         r#"

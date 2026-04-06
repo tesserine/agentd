@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use agentd_runner::{
     ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec, run_session,
@@ -12,6 +14,9 @@ fn succeeds_without_timeout_and_cleans_up_container() {
     if skip_if_podman_unavailable("succeeds_without_timeout_and_cleans_up_container") {
         return;
     }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("success-agent");
     let image = fixture.build_image();
@@ -58,6 +63,9 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
     ) {
         return;
     }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("failure-agent");
     let image = fixture.build_image();
@@ -99,6 +107,9 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
     ) {
         return;
     }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("failure-agent-125");
     let image = fixture.build_image();
@@ -138,6 +149,9 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
     if skip_if_podman_unavailable("succeeds_when_methodology_dir_path_contains_commas") {
         return;
     }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new_with_root_prefix(
         "comma-methodology-agent",
@@ -180,6 +194,9 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
     if skip_if_podman_unavailable("times_out_when_a_timeout_is_provided_and_cleans_up_container") {
         return;
     }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("timeout-agent");
     let image = fixture.build_image();
@@ -210,6 +227,58 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
     .expect("session should run");
 
     assert_eq!(outcome, SessionOutcome::TimedOut);
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn releases_session_secret_after_container_reaches_running_state() {
+    if skip_if_podman_unavailable("releases_session_secret_after_container_reaches_running_state") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("running-secret-agent");
+    let image = fixture.build_image();
+    let methodology_dir = fixture.methodology_dir();
+
+    let session = thread::spawn(move || {
+        run_session(
+            SessionSpec {
+                agent_name: "running-secret-agent".to_string(),
+                base_image: image,
+                methodology_dir,
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: vec![
+                    ResolvedEnvironmentVariable {
+                        name: "GITHUB_TOKEN".to_string(),
+                        value: "test-token".to_string(),
+                    },
+                    ResolvedEnvironmentVariable {
+                        name: "RUNA_TEST_BEHAVIOR".to_string(),
+                        value: "sleep-short".to_string(),
+                    },
+                ],
+            },
+            SessionInvocation {
+                repo_url: "/srv/test-repo.git".to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        )
+    });
+
+    fixture.wait_for_runner_container_to_be_running(Duration::from_secs(5));
+    fixture.wait_for_runner_secrets_to_be_released(Duration::from_secs(5));
+
+    let outcome = session
+        .join()
+        .expect("session thread should complete")
+        .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Succeeded);
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -306,6 +375,63 @@ impl SessionFixture {
             "runner left secrets behind for {expected_fragment}: {names}"
         );
     }
+
+    fn wait_for_runner_container_to_be_running(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let expected_prefix = format!("agentd-{}-", self.agent_name);
+
+        loop {
+            let output = Command::new("podman")
+                .args(["ps", "--format", "{{.Names}}"])
+                .output()
+                .expect("podman ps should run");
+            assert!(
+                output.status.success(),
+                "podman ps failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            let names = String::from_utf8(output.stdout).expect("podman ps output should be utf-8");
+            if names.lines().any(|name| name.starts_with(&expected_prefix)) {
+                return;
+            }
+
+            assert!(
+                Instant::now() < deadline,
+                "runner container with prefix {expected_prefix} did not reach running state"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn wait_for_runner_secrets_to_be_released(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let expected_fragment = format!("agentd-{}-", self.agent_name);
+
+        loop {
+            let output = Command::new("podman")
+                .args(["secret", "ls", "--format", "{{.Name}}"])
+                .output()
+                .expect("podman secret ls should run");
+            assert!(
+                output.status.success(),
+                "podman secret ls failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            let names =
+                String::from_utf8(output.stdout).expect("podman secret ls output should be utf-8");
+            if !names.lines().any(|name| name.contains(&expected_fragment)) {
+                return;
+            }
+
+            assert!(
+                Instant::now() < deadline,
+                "runner left secrets behind for {expected_fragment}: {names}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
 }
 
 impl Drop for SessionFixture {
@@ -334,6 +460,11 @@ fn podman_available() -> bool {
         Ok(status) => status.success(),
         Err(_) => false,
     }
+}
+
+fn podman_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -449,6 +580,11 @@ EOF
 
         if [ "${RUNA_TEST_BEHAVIOR:-}" = "sleep" ]; then
             sleep 30
+            exit 0
+        fi
+
+        if [ "${RUNA_TEST_BEHAVIOR:-}" = "sleep-short" ]; then
+            sleep 5
             exit 0
         fi
 
