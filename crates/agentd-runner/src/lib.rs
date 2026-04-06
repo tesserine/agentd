@@ -655,6 +655,10 @@ fn prepare_session_resources(
     };
 
     for (index, variable) in spec.environment.iter().enumerate() {
+        if variable.value.is_empty() {
+            continue;
+        }
+
         let secret_name = format!("{SESSION_SECRET_PREFIX}{session_id}-{index}");
         if let Err(error) = create_podman_secret(&secret_name, &variable.value) {
             let _ = cleanup_session_resources(&resources);
@@ -772,14 +776,30 @@ fn build_create_container_args(
             METHODOLOGY_MOUNT_PATH
         ),
     ];
+    let mut secret_bindings = resources.secret_bindings.iter();
 
-    for binding in &resources.secret_bindings {
+    for variable in &spec.environment {
+        if variable.value.is_empty() {
+            args.push("--env".to_string());
+            args.push(format!("{}=", variable.name));
+            continue;
+        }
+
+        let binding = secret_bindings
+            .next()
+            .expect("non-empty environment values should have matching secret bindings");
+        debug_assert_eq!(binding.target_name, variable.name);
+
         args.push("--secret".to_string());
         args.push(format!(
             "{},type=env,target={}",
             binding.secret_name, binding.target_name
         ));
     }
+    debug_assert!(
+        secret_bindings.next().is_none(),
+        "all secret bindings should be consumed when building create args"
+    );
 
     for (name, value) in runner_managed_environment(spec) {
         args.push("--env".to_string());
@@ -1573,6 +1593,152 @@ esac
         assert!(
             secret_args.contains("create"),
             "podman secret create should be invoked before container create: {secret_args}"
+        );
+        assert_eq!(fixture.read_log("secret-value.log"), "test-token");
+    }
+
+    #[test]
+    fn run_session_injects_empty_environment_values_via_direct_env_args() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            create)
+                secret_input="$log_root/secret-input"
+                cat > "$secret_input"
+                if [ ! -s "$secret_input" ]; then
+                    echo "secret data must be larger than 0" >&2
+                    exit 96
+                fi
+                printf 'create %s\n' "$*" >> "$log_root/secret-commands.log"
+                cat "$secret_input" > "$log_root/secret-value.log"
+                ;;
+            rm)
+                printf 'rm %s\n' "$*" >> "$log_root/secret-commands.log"
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    create)
+        printf '%s\n' "$*" > "$log_root/create-args.log"
+        printf 'created' > "$log_root/container-state"
+        ;;
+    start)
+        printf 'running' > "$log_root/container-state"
+        exit 0
+        ;;
+    rm)
+        exit 0
+        ;;
+    inspect)
+        format_value=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --type)
+                    shift 2
+                    ;;
+                --format)
+                    format_value="$2"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+        state="$(cat "$log_root/container-state" 2>/dev/null || printf 'created')"
+        case "$format_value" in
+            "{{.State.Status}}")
+                printf '%s\n' "$state"
+                ;;
+            "{{.State.Status}} {{.State.ExitCode}}")
+                printf '%s 0\n' "$state"
+                ;;
+            *)
+                exit 97
+                ;;
+        esac
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let outcome = fixture.run_with_fake_podman(SessionSpec {
+            agent_name: "agent".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir,
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![
+                ResolvedEnvironmentVariable {
+                    name: "EMPTY_VALUE".to_string(),
+                    value: String::new(),
+                },
+                ResolvedEnvironmentVariable {
+                    name: "GITHUB_TOKEN".to_string(),
+                    value: "test-token".to_string(),
+                },
+            ],
+        });
+
+        assert_eq!(
+            outcome.expect("session should succeed with mixed empty and non-empty environment"),
+            SessionOutcome::Succeeded
+        );
+
+        let create_args = fixture.read_log("create-args.log");
+        assert!(
+            create_args.contains("--env EMPTY_VALUE="),
+            "empty environment values should be injected via --env: {create_args}"
+        );
+        assert!(
+            !create_args.contains("target=EMPTY_VALUE"),
+            "empty environment values should not use podman secrets: {create_args}"
+        );
+        assert!(
+            !create_args.contains("GITHUB_TOKEN=test-token"),
+            "non-empty environment values must not appear inline in podman create args: {create_args}"
+        );
+        assert!(
+            create_args.contains("--secret"),
+            "non-empty environment values should still use podman secrets: {create_args}"
+        );
+
+        let secret_commands = fixture.read_log("secret-commands.log");
+        assert_eq!(
+            secret_commands
+                .lines()
+                .filter(|line| line.starts_with("create "))
+                .count(),
+            1,
+            "only non-empty environment values should create podman secrets: {secret_commands}"
+        );
+        assert!(
+            secret_commands
+                .lines()
+                .filter(|line| line.starts_with("rm "))
+                .all(|line| line.contains("agentd-secret-") && !line.contains("EMPTY_VALUE")),
+            "cleanup should only remove secrets that were actually created: {secret_commands}"
         );
         assert_eq!(fixture.read_log("secret-value.log"), "test-token");
     }

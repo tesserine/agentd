@@ -60,6 +60,52 @@ fn succeeds_without_timeout_and_cleans_up_container() {
 }
 
 #[test]
+fn succeeds_with_empty_and_non_empty_environment_values() {
+    if skip_if_podman_unavailable("succeeds_with_empty_and_non_empty_environment_values") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("mixed-env-agent");
+    let image = fixture.build_image();
+
+    let outcome = run_session(
+        SessionSpec {
+            agent_name: "mixed-env-agent".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![
+                ResolvedEnvironmentVariable {
+                    name: "GITHUB_TOKEN".to_string(),
+                    value: "test-token".to_string(),
+                },
+                ResolvedEnvironmentVariable {
+                    name: "EMPTY_SESSION_ENV".to_string(),
+                    value: String::new(),
+                },
+                ResolvedEnvironmentVariable {
+                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    value: "success-empty-env".to_string(),
+                },
+            ],
+        },
+        SessionInvocation {
+            repo_url: TEST_REMOTE_REPO_URL.to_string(),
+            work_unit: Some("task-42".to_string()),
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Succeeded);
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
 fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
     if skip_if_podman_unavailable(
         "returns_failed_exit_code_without_timeout_and_cleans_up_container",
@@ -623,6 +669,13 @@ EOF
         grep -F 'command = ["codex", "exec"' .runa/config.toml >/dev/null
 
         if [ "${RUNA_TEST_BEHAVIOR:-success}" = "success" ]; then
+            [ "$1" = "--work-unit" ]
+            [ "$2" = "task-42" ]
+            exit 0
+        fi
+
+        if [ "${RUNA_TEST_BEHAVIOR:-}" = "success-empty-env" ]; then
+            [ "${EMPTY_SESSION_ENV-__missing__}" = "" ]
             [ "$1" = "--work-unit" ]
             [ "$2" = "task-42" ]
             exit 0

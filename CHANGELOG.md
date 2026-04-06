@@ -17,3 +17,4 @@ All notable changes to this project will be documented in this file.
 - Updated repository documentation to describe methodology skills as externally provided rather than vendored in `agentd`.
 - Tightened static agent config parsing so file-loaded `methodology_dir` values resolve from the config file's absolute directory and agent or credential names with leading or trailing whitespace are rejected.
 - Narrowed `agentd-runner` repository checkout to public `https://`, `http://`, and `git://` `repo_url` forms only, rejecting local paths, SSH-style URLs, and credential-bearing URLs up front while authenticated private clone support remains unsupported until issue #32 lands.
+- Updated `agentd-runner` environment injection so empty resolved values are passed as direct `NAME=` assignments while non-empty values continue through Podman-managed secrets, avoiding Podman's zero-byte secret rejection without exposing non-empty secrets in `podman create` arguments.

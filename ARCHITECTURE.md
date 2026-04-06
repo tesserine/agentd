@@ -113,7 +113,7 @@ From inside the environment, an agent should see:
 
 ## 6. Credential Flow
 
-Credentials are declared by agent configuration and sourced from an operator-managed secret store outside `agentd-runner`. During session setup, the runner receives already-resolved credential values from its caller, creates Podman-managed ephemeral secrets from them, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
+Credentials are declared by agent configuration and sourced from an operator-managed secret store outside `agentd-runner`. During session setup, the runner receives already-resolved credential values from its caller, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
 
 Isolation is per agent: one agent receives only its own declared credentials. Sharing access to the same external service still requires separate credential declarations per agent so compromise remains scoped.
 
