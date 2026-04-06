@@ -168,7 +168,9 @@ pub fn run_session(
     let resources = prepare_session_resources(&container_name, &spec, &session_id)?;
 
     if let Err(error) = create_container(&resources, &spec, &invocation) {
-        let _ = cleanup_session_resources(&resources);
+        if let Err(cleanup_error) = cleanup_session_resources(&resources) {
+            log_cleanup_failure("container creation", &cleanup_error);
+        }
         return Err(error);
     }
 
@@ -187,7 +189,10 @@ pub fn run_session(
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(_cleanup_error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            log_cleanup_failure("session execution", &cleanup_error);
+            Err(error)
+        }
     }
 }
 
@@ -271,11 +276,20 @@ fn run_container_to_completion(
     secret_bindings: &[SecretBinding],
 ) -> Result<SessionOutcome, RunnerError> {
     let mut start = start_attached_container(container_name)?;
-    let status = wait_for_container_exit(&mut start.child, container_name, secret_bindings, None)?
-        .expect("container wait without timeout should not return a timeout");
-    let stderr = finish_captured_stderr(start.stderr_thread)?;
+    let wait_result =
+        wait_for_container_exit(&mut start.child, container_name, secret_bindings, None);
 
-    classify_attached_start_result(start.args, container_name, status, stderr)
+    match wait_result {
+        Ok(Some(status)) => {
+            let (args, stderr) = finalize_attached_start(start)?;
+            classify_attached_start_result(args, container_name, status, stderr)
+        }
+        Ok(None) => unreachable!("container wait without timeout should not return a timeout"),
+        Err(error) => {
+            finalize_attached_start(start)?;
+            Err(error)
+        }
+    }
 }
 
 fn run_container_with_timeout(
@@ -284,24 +298,52 @@ fn run_container_with_timeout(
     timeout: Duration,
 ) -> Result<SessionOutcome, RunnerError> {
     let mut start = start_attached_container(container_name)?;
-
-    match wait_for_container_exit(
+    let wait_result = wait_for_container_exit(
         &mut start.child,
         container_name,
         secret_bindings,
         Some(timeout),
-    )? {
-        Some(status) => {
-            let stderr = finish_captured_stderr(start.stderr_thread)?;
-            classify_attached_start_result(start.args, container_name, status, stderr)
+    );
+
+    match wait_result {
+        Ok(Some(status)) => {
+            let (args, stderr) = finalize_attached_start(start)?;
+            classify_attached_start_result(args, container_name, status, stderr)
         }
-        None => {
+        Ok(None) => {
             cleanup_container(container_name)?;
-            let _ = start.child.wait();
-            let _ = finish_captured_stderr(start.stderr_thread)?;
+            finalize_attached_start(start)?;
             Ok(SessionOutcome::TimedOut)
         }
+        Err(error) => {
+            finalize_attached_start(start)?;
+            Err(error)
+        }
     }
+}
+
+fn finalize_attached_start(
+    mut start: AttachedPodmanStart,
+) -> Result<(Vec<String>, String), RunnerError> {
+    start.child.wait()?;
+    let stderr = finish_captured_stderr(start.stderr_thread)?;
+    Ok((start.args, stderr))
+}
+
+fn log_cleanup_failure(stage: &str, error: &RunnerError) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = log_cleanup_failure_to(&mut stderr, stage, error);
+}
+
+fn log_cleanup_failure_to<W>(
+    writer: &mut W,
+    stage: &str,
+    error: &RunnerError,
+) -> std::io::Result<()>
+where
+    W: Write,
+{
+    writeln!(writer, "cleanup after {stage} failed: {error}")
 }
 
 fn wait_for_container_exit(
@@ -1547,6 +1589,398 @@ esac
             secret_args.contains("rm"),
             "podman secret rm should run after the container reaches running: {secret_args}"
         );
+    }
+
+    #[test]
+    fn run_container_to_completion_reaps_attached_child_when_wait_for_container_exit_errors() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    start)
+        printf '%s\n' "$$" > "$log_root/start.pid"
+        sleep 0.3
+        exit 0
+        ;;
+    inspect)
+        echo "inspect failed while attached start was still running" >&2
+        exit 41
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let started_at = Instant::now();
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_container_to_completion(
+                    "container",
+                    &[SecretBinding {
+                        secret_name: "secret".to_string(),
+                        target_name: "GITHUB_TOKEN".to_string(),
+                    }],
+                )
+            })
+            .expect_err("inspect failure should surface as a runner error");
+        let elapsed = started_at.elapsed();
+
+        match error {
+            RunnerError::PodmanCommandFailed { args, status, .. } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "inspect".to_string(),
+                        "--type".to_string(),
+                        "container".to_string(),
+                        "--format".to_string(),
+                        "{{.State.Status}}".to_string(),
+                        "container".to_string(),
+                    ]
+                );
+                assert_eq!(status.code(), Some(41));
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "attached start should be awaited before returning wait errors, returned after {elapsed:?}"
+        );
+
+        let pid = fixture
+            .read_log("start.pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fake podman start should record its pid");
+        assert_process_is_reaped(pid);
+    }
+
+    #[test]
+    fn run_container_with_timeout_reaps_attached_child_when_wait_for_container_exit_errors() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    start)
+        printf '%s\n' "$$" > "$log_root/start.pid"
+        sleep 0.3
+        exit 0
+        ;;
+    inspect)
+        echo "inspect failed while attached start was still running" >&2
+        exit 43
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let started_at = Instant::now();
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_container_with_timeout(
+                    "container",
+                    &[SecretBinding {
+                        secret_name: "secret".to_string(),
+                        target_name: "GITHUB_TOKEN".to_string(),
+                    }],
+                    Duration::from_secs(5),
+                )
+            })
+            .expect_err("inspect failure should surface as a runner error");
+        let elapsed = started_at.elapsed();
+
+        match error {
+            RunnerError::PodmanCommandFailed { args, status, .. } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "inspect".to_string(),
+                        "--type".to_string(),
+                        "container".to_string(),
+                        "--format".to_string(),
+                        "{{.State.Status}}".to_string(),
+                        "container".to_string(),
+                    ]
+                );
+                assert_eq!(status.code(), Some(43));
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "attached start should be awaited before returning wait errors, returned after {elapsed:?}"
+        );
+
+        let pid = fixture
+            .read_log("start.pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fake podman start should record its pid");
+        assert_process_is_reaped(pid);
+    }
+
+    #[test]
+    fn cleanup_failure_logs_include_container_creation_stage() {
+        let mut output = Vec::new();
+
+        log_cleanup_failure_to(
+            &mut output,
+            "container creation",
+            &RunnerError::InvalidAgentName,
+        )
+        .expect("cleanup failure log should be written");
+
+        assert_eq!(
+            String::from_utf8(output).expect("cleanup log should be utf-8"),
+            "cleanup after container creation failed: agent_name must not be empty\n"
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_logs_include_session_execution_stage() {
+        let mut output = Vec::new();
+
+        log_cleanup_failure_to(
+            &mut output,
+            "session execution",
+            &RunnerError::InvalidBaseImage,
+        )
+        .expect("cleanup failure log should be written");
+
+        assert_eq!(
+            String::from_utf8(output).expect("cleanup log should be utf-8"),
+            "cleanup after session execution failed: base_image must not be empty\n"
+        );
+    }
+
+    #[test]
+    fn run_session_returns_create_error_when_cleanup_after_create_also_fails() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+command_name="$1"
+shift
+
+case "$command_name" in
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            create)
+                cat > /dev/null
+                exit 0
+                ;;
+            rm)
+                echo "secret cleanup failed after create failure" >&2
+                exit 29
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    create)
+        echo "container create failed" >&2
+        exit 31
+        ;;
+    rm)
+        exit 0
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_session(
+                    SessionSpec {
+                        agent_name: "agent".to_string(),
+                        base_image: "image".to_string(),
+                        methodology_dir,
+                        agent_command: vec!["codex".to_string(), "exec".to_string()],
+                        environment: vec![ResolvedEnvironmentVariable {
+                            name: "GITHUB_TOKEN".to_string(),
+                            value: "test-token".to_string(),
+                        }],
+                    },
+                    SessionInvocation {
+                        repo_url: "repo".to_string(),
+                        work_unit: None,
+                        timeout: None,
+                    },
+                )
+            })
+            .expect_err("create failure should remain the returned error");
+
+        match error {
+            RunnerError::PodmanCommandFailed { args, status, .. } => {
+                assert_eq!(args.first().map(String::as_str), Some("create"));
+                assert_eq!(status.code(), Some(31));
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_session_returns_run_error_when_cleanup_after_run_also_fails() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            create)
+                cat > /dev/null
+                exit 0
+                ;;
+            rm)
+                rm_count_file="$log_root/secret-rm-count"
+                rm_count=0
+                if [ -f "$rm_count_file" ]; then
+                    rm_count="$(cat "$rm_count_file")"
+                fi
+                rm_count=$((rm_count + 1))
+                printf '%s' "$rm_count" > "$rm_count_file"
+                if [ "$rm_count" -gt 1 ]; then
+                    echo "secret cleanup failed after run failure" >&2
+                    exit 29
+                fi
+                exit 0
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    create)
+        printf 'created' > "$log_root/container-state"
+        exit 0
+        ;;
+    start)
+        printf 'running' > "$log_root/container-state"
+        echo "attached start failed" >&2
+        exit 125
+        ;;
+    rm)
+        exit 0
+        ;;
+    inspect)
+        format_value=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --type)
+                    shift 2
+                    ;;
+                --format)
+                    format_value="$2"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+        case "$format_value" in
+            "{{.State.Status}}")
+                printf 'running\n'
+                ;;
+            "{{.State.Status}} {{.State.ExitCode}}")
+                printf 'running 0\n'
+                ;;
+            *)
+                echo "unexpected podman inspect format: $format_value" >&2
+                exit 97
+                ;;
+        esac
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_session(
+                    SessionSpec {
+                        agent_name: "agent".to_string(),
+                        base_image: "image".to_string(),
+                        methodology_dir,
+                        agent_command: vec!["codex".to_string(), "exec".to_string()],
+                        environment: vec![ResolvedEnvironmentVariable {
+                            name: "GITHUB_TOKEN".to_string(),
+                            value: "test-token".to_string(),
+                        }],
+                    },
+                    SessionInvocation {
+                        repo_url: "repo".to_string(),
+                        work_unit: None,
+                        timeout: None,
+                    },
+                )
+            })
+            .expect_err("run failure should remain the returned error");
+
+        match error {
+            RunnerError::PodmanCommandFailed { args, status, .. } => {
+                assert_eq!(args.first().map(String::as_str), Some("start"));
+                assert_eq!(status.code(), Some(125));
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
