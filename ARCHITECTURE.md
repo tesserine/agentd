@@ -85,7 +85,7 @@ The runner prepares the execution environment:
 2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only and initializes runa from `manifest.toml` at the mount root.
-5. Clones the requested repository into an ephemeral workspace inside the container and writes the configured agent command into runa's project config. This clone step is a plain in-container `git clone`: it accepts only remote repository URLs, does not wire injected environment credentials into git, and therefore requires pre-authenticated URLs or host-level git credential configuration for private HTTPS repositories until issue #32 lands.
+5. Clones the requested repository into an ephemeral workspace inside the container and writes the configured agent command into runa's project config. This clone step is a plain in-container `git clone`: it currently accepts only public `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and does not wire injected environment credentials into git. Authenticated private-repository clone support remains deferred to issue #32.
 
 ### Phase 3: Execution (`agentd-runner`)
 

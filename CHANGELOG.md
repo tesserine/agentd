@@ -16,4 +16,4 @@ All notable changes to this project will be documented in this file.
 - Replaced the old skill-focused GitHub Actions workflow with a Rust workspace CI workflow that runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace`, and `cargo test --workspace`.
 - Updated repository documentation to describe methodology skills as externally provided rather than vendored in `agentd`.
 - Tightened static agent config parsing so file-loaded `methodology_dir` values resolve from the config file's absolute directory and agent or credential names with leading or trailing whitespace are rejected.
-- Narrowed `agentd-runner` repository checkout to supported remote `repo_url` forms only, rejecting local paths up front and documenting that private HTTPS clone authentication remains unsupported until issue #32 lands.
+- Narrowed `agentd-runner` repository checkout to public `https://`, `http://`, and `git://` `repo_url` forms only, rejecting local paths, SSH-style URLs, and credential-bearing URLs up front while authenticated private clone support remains unsupported until issue #32 lands.
