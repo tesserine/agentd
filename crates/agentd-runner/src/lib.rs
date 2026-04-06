@@ -355,7 +355,7 @@ fn run_container_to_completion(
         }
         Ok(None) => unreachable!("container wait without timeout should not return a timeout"),
         Err(error) => {
-            finalize_attached_start(start)?;
+            cleanup_and_finalize_attached_start_after_wait_error(container_name, start);
             Err(error)
         }
     }
@@ -388,9 +388,22 @@ fn run_container_with_timeout(
             Ok(SessionOutcome::TimedOut)
         }
         Err(error) => {
-            finalize_attached_start(start)?;
+            cleanup_and_finalize_attached_start_after_wait_error(container_name, start);
             Err(error)
         }
+    }
+}
+
+fn cleanup_and_finalize_attached_start_after_wait_error(
+    container_name: &str,
+    start: AttachedPodmanStart,
+) {
+    if let Err(error) = cleanup_container(container_name) {
+        log_cleanup_failure("session execution", &error);
+    }
+
+    if let Err(error) = finalize_attached_start(start).map(|_| ()) {
+        log_attached_start_finalization_failure("session execution", &error);
     }
 }
 
@@ -407,6 +420,11 @@ fn log_cleanup_failure(stage: &str, error: &RunnerError) {
     let _ = log_cleanup_failure_to(&mut stderr, stage, error);
 }
 
+fn log_attached_start_finalization_failure(stage: &str, error: &RunnerError) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = log_attached_start_finalization_failure_to(&mut stderr, stage, error);
+}
+
 fn log_cleanup_failure_to<W>(
     writer: &mut W,
     stage: &str,
@@ -416,6 +434,20 @@ where
     W: Write,
 {
     writeln!(writer, "cleanup after {stage} failed: {error}")
+}
+
+fn log_attached_start_finalization_failure_to<W>(
+    writer: &mut W,
+    stage: &str,
+    error: &RunnerError,
+) -> std::io::Result<()>
+where
+    W: Write,
+{
+    writeln!(
+        writer,
+        "attached start finalization after {stage} failed: {error}"
+    )
 }
 
 fn wait_for_container_exit(
@@ -2330,7 +2362,19 @@ shift
 case "$command_name" in
     start)
         printf '%s\n' "$$" > "$log_root/start.pid"
-        sleep 0.3
+        deadline=$(( $(date +%s) + 3 ))
+        while [ ! -f "$log_root/rm-called" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                sleep 1
+                exit 0
+            fi
+            sleep 0.05
+        done
+        exit 0
+        ;;
+    rm)
+        printf '%s\n' "$*" >> "$log_root/rm-commands.log"
+        : > "$log_root/rm-called"
         exit 0
         ;;
     inspect)
@@ -2378,8 +2422,13 @@ esac
         }
 
         assert!(
-            elapsed >= Duration::from_millis(100),
-            "attached start should be awaited before returning wait errors, returned after {elapsed:?}"
+            elapsed < Duration::from_millis(750),
+            "wait errors should return promptly after forcing container cleanup, returned after {elapsed:?}"
+        );
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "--force --ignore container\n",
+            "wait-error cleanup should force-remove the container before reaping the attached start"
         );
 
         let pid = fixture
@@ -2407,7 +2456,19 @@ shift
 case "$command_name" in
     start)
         printf '%s\n' "$$" > "$log_root/start.pid"
-        sleep 0.3
+        deadline=$(( $(date +%s) + 3 ))
+        while [ ! -f "$log_root/rm-called" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                sleep 1
+                exit 0
+            fi
+            sleep 0.05
+        done
+        exit 0
+        ;;
+    rm)
+        printf '%s\n' "$*" >> "$log_root/rm-commands.log"
+        : > "$log_root/rm-called"
         exit 0
         ;;
     inspect)
@@ -2456,8 +2517,108 @@ esac
         }
 
         assert!(
-            elapsed >= Duration::from_millis(100),
-            "attached start should be awaited before returning wait errors, returned after {elapsed:?}"
+            elapsed < Duration::from_millis(750),
+            "wait errors should return promptly after forcing container cleanup, returned after {elapsed:?}"
+        );
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "--force --ignore container\n",
+            "wait-error cleanup should force-remove the container before reaping the attached start"
+        );
+
+        let pid = fixture
+            .read_log("start.pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fake podman start should record its pid");
+        assert_process_is_reaped(pid);
+    }
+
+    #[test]
+    fn run_container_to_completion_returns_wait_error_when_wait_error_cleanup_fails() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    start)
+        printf '%s\n' "$$" > "$log_root/start.pid"
+        deadline=$(( $(date +%s) + 3 ))
+        while [ ! -f "$log_root/rm-attempted" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                sleep 1
+                exit 0
+            fi
+            sleep 0.05
+        done
+        exit 0
+        ;;
+    rm)
+        printf '%s\n' "$*" >> "$log_root/rm-commands.log"
+        : > "$log_root/rm-attempted"
+        echo "rm failed while handling wait error" >&2
+        exit 47
+        ;;
+    inspect)
+        echo "inspect failed while attached start was still running" >&2
+        exit 45
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let started_at = Instant::now();
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_container_to_completion(
+                    "container",
+                    &[SecretBinding {
+                        secret_name: "secret".to_string(),
+                        target_name: "GITHUB_TOKEN".to_string(),
+                    }],
+                )
+            })
+            .expect_err("inspect failure should remain the returned error when cleanup fails");
+        let elapsed = started_at.elapsed();
+
+        match error {
+            RunnerError::PodmanCommandFailed { args, status, .. } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "inspect".to_string(),
+                        "--type".to_string(),
+                        "container".to_string(),
+                        "--format".to_string(),
+                        "{{.State.Status}}".to_string(),
+                        "container".to_string(),
+                    ]
+                );
+                assert_eq!(status.code(), Some(45));
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "wait errors should still return promptly when forced cleanup fails, returned after {elapsed:?}"
+        );
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "--force --ignore container\n",
+            "wait-error cleanup should still attempt force removal before reaping the attached start"
         );
 
         let pid = fixture
