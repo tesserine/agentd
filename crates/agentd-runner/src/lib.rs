@@ -1,14 +1,18 @@
 //! Session lifecycle management for agentd.
 
+use getrandom::fill as fill_random_bytes;
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
+const ATTACHED_STDERR_TAIL_LIMIT: usize = 64 * 1024;
+const ATTACHED_STDERR_TRUNCATION_NOTICE: &str = "[stderr truncated to last 65536 bytes]\n";
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
@@ -151,12 +155,9 @@ pub fn run_session(
 ) -> Result<SessionOutcome, RunnerError> {
     validate_spec(&spec)?;
     validate_invocation(&invocation)?;
+    let session_id = unique_suffix()?;
 
-    let container_name = format!(
-        "agentd-{}-{}",
-        sanitize_name(&spec.agent_name),
-        unique_suffix()
-    );
+    let container_name = format!("agentd-{}-{}", sanitize_name(&spec.agent_name), session_id);
     let manifest_path = spec.methodology_dir.join("manifest.toml");
     if !manifest_path.is_file() {
         return Err(RunnerError::MissingMethodologyManifest {
@@ -164,7 +165,7 @@ pub fn run_session(
         });
     }
 
-    let resources = prepare_session_resources(&container_name, &spec)?;
+    let resources = prepare_session_resources(&container_name, &spec, &session_id)?;
 
     if let Err(error) = create_container(&resources, &spec, &invocation) {
         let _ = cleanup_session_resources(&resources);
@@ -366,24 +367,33 @@ fn run_podman_command_with_input(
     }
 
     let mut child = command.spawn()?;
-    if let Some(stdin_data) = stdin_data {
-        let mut stdin = child
-            .stdin
-            .take()
-            .expect("podman stdin should be piped when input is provided");
-        stdin.write_all(stdin_data)?;
-    }
+    let write_error = if let Some(stdin_data) = stdin_data {
+        let write_result = {
+            let mut stdin = child
+                .stdin
+                .take()
+                .expect("podman stdin should be piped when input is provided");
+            stdin.write_all(stdin_data)
+        };
+        write_result.err()
+    } else {
+        None
+    };
 
     let output = child.wait_with_output()?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    if !output.status.success() {
+        return Err(RunnerError::PodmanCommandFailed {
+            args,
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
     }
 
-    Err(RunnerError::PodmanCommandFailed {
-        args,
-        status: output.status,
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    if let Some(write_error) = write_error {
+        return Err(RunnerError::Io(write_error));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn start_attached_container(container_name: &str) -> Result<AttachedPodmanStart, RunnerError> {
@@ -518,8 +528,10 @@ fn is_reserved_environment_name(name: &str) -> bool {
 fn prepare_session_resources(
     container_name: &str,
     spec: &SessionSpec,
+    session_id: &str,
 ) -> Result<SessionResources, RunnerError> {
-    let methodology_staging_dir = create_methodology_staging_dir(&spec.methodology_dir)?;
+    let methodology_staging_dir =
+        create_methodology_staging_dir(&spec.methodology_dir, session_id)?;
     let methodology_mount_source = methodology_staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
     let mut resources = SessionResources {
         container_name: container_name.to_string(),
@@ -543,10 +555,12 @@ fn prepare_session_resources(
     Ok(resources)
 }
 
-fn create_methodology_staging_dir(methodology_dir: &Path) -> Result<PathBuf, RunnerError> {
+fn create_methodology_staging_dir(
+    methodology_dir: &Path,
+    session_id: &str,
+) -> Result<PathBuf, RunnerError> {
     let canonical_methodology_dir = methodology_dir.canonicalize()?;
-    let staging_dir =
-        safe_staging_root().join(format!("{SESSION_STAGE_PREFIX}{}", unique_suffix()));
+    let staging_dir = safe_staging_root().join(format!("{SESSION_STAGE_PREFIX}{session_id}"));
     fs::create_dir_all(&staging_dir)?;
     let staged_link = staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
 
@@ -701,9 +715,17 @@ fn forward_and_capture_stderr<T>(mut stderr: T) -> std::io::Result<String>
 where
     T: Read,
 {
-    let mut collected = Vec::new();
-    let mut buffer = [0_u8; 4096];
     let mut host_stderr = std::io::stderr().lock();
+    forward_and_capture_stderr_to(&mut stderr, &mut host_stderr)
+}
+
+fn forward_and_capture_stderr_to<T, U>(mut stderr: T, mut host_stderr: U) -> std::io::Result<String>
+where
+    T: Read,
+    U: Write,
+{
+    let mut collected = StderrTailBuffer::new(ATTACHED_STDERR_TAIL_LIMIT);
+    let mut buffer = [0_u8; 4096];
 
     loop {
         let bytes_read = stderr.read(&mut buffer)?;
@@ -714,10 +736,58 @@ where
         let chunk = &buffer[..bytes_read];
         host_stderr.write_all(chunk)?;
         host_stderr.flush()?;
-        collected.extend_from_slice(chunk);
+        collected.push(chunk);
     }
 
-    Ok(String::from_utf8_lossy(&collected).into_owned())
+    Ok(collected.into_string())
+}
+
+struct StderrTailBuffer {
+    bytes: VecDeque<u8>,
+    limit: usize,
+    truncated: bool,
+}
+
+impl StderrTailBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: VecDeque::with_capacity(limit),
+            limit,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.len() >= self.limit {
+            self.bytes.clear();
+            self.bytes
+                .extend(chunk[chunk.len() - self.limit..].iter().copied());
+            self.truncated = true;
+            return;
+        }
+
+        let overflow = self
+            .bytes
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(self.limit);
+        if overflow > 0 {
+            self.bytes.drain(..overflow);
+            self.truncated = true;
+        }
+
+        self.bytes.extend(chunk.iter().copied());
+    }
+
+    fn into_string(self) -> String {
+        let stderr =
+            String::from_utf8_lossy(&self.bytes.into_iter().collect::<Vec<_>>()).into_owned();
+        if self.truncated {
+            return format!("{ATTACHED_STDERR_TRUNCATION_NOTICE}{stderr}");
+        }
+
+        stderr
+    }
 }
 
 fn sanitize_name(value: &str) -> String {
@@ -738,15 +808,29 @@ fn sanitize_name(value: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
-fn unique_suffix() -> String {
-    format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after the unix epoch")
-            .as_nanos()
-    )
+fn unique_suffix() -> Result<String, RunnerError> {
+    unique_suffix_with(|bytes| fill_random_bytes(bytes).map_err(std::io::Error::other))
+}
+
+fn unique_suffix_with<F>(fill_random: F) -> Result<String, RunnerError>
+where
+    F: FnOnce(&mut [u8]) -> std::io::Result<()>,
+{
+    let mut bytes = [0_u8; 16];
+    fill_random(&mut bytes)?;
+    Ok(hex_encode(&bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+
+    encoded
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1023,6 +1107,25 @@ esac
     }
 
     #[test]
+    fn attached_start_stderr_retains_only_bounded_tail() {
+        let payload = "x".repeat((64 * 1024) + 128);
+        let mut forwarded = Vec::new();
+
+        let captured =
+            forward_and_capture_stderr_to(std::io::Cursor::new(payload.as_bytes()), &mut forwarded)
+                .expect("stderr forwarding should succeed");
+
+        let expected_tail = "x".repeat(64 * 1024);
+        assert!(captured.starts_with("[stderr truncated to last 65536 bytes]\n"));
+        assert!(captured.ends_with(&expected_tail));
+        assert_eq!(
+            captured.len(),
+            "[stderr truncated to last 65536 bytes]\n".len() + expected_tail.len()
+        );
+        assert_eq!(forwarded, payload.as_bytes());
+    }
+
+    #[test]
     fn run_session_does_not_pass_resolved_environment_values_via_podman_create_arguments() {
         let _guard = fake_podman_lock()
             .lock()
@@ -1135,6 +1238,140 @@ esac
             "podman secret create should be invoked before container create: {secret_args}"
         );
         assert_eq!(fixture.read_log("secret-value.log"), "test-token");
+    }
+
+    #[test]
+    fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_names() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            create)
+                printf 'create %s\n' "$*" >> "$log_root/secret-commands.log"
+                cat > /dev/null
+                ;;
+            rm)
+                printf 'rm %s\n' "$*" >> "$log_root/secret-commands.log"
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    create)
+        printf '%s\n' "$*" > "$log_root/create-args.log"
+        printf 'created' > "$log_root/container-state"
+        ;;
+    start)
+        printf 'running' > "$log_root/container-state"
+        exit 0
+        ;;
+    rm)
+        exit 0
+        ;;
+    inspect)
+        format_value=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --type)
+                    shift 2
+                    ;;
+                --format)
+                    format_value="$2"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+        state="$(cat "$log_root/container-state" 2>/dev/null || printf 'created')"
+        case "$format_value" in
+            "{{.State.Status}}")
+                printf '%s\n' "$state"
+                ;;
+            "{{.State.Status}} {{.State.ExitCode}}")
+                printf '%s 0\n' "$state"
+                ;;
+            *)
+                exit 97
+                ;;
+        esac
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let outcome = fixture.run_with_fake_podman(SessionSpec {
+            agent_name: "agent".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir,
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "GITHUB_TOKEN".to_string(),
+                value: "test-token".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            outcome.expect("session should succeed with fake podman"),
+            SessionOutcome::Succeeded
+        );
+
+        let create_args = fixture.read_log("create-args.log");
+        let container_name = argument_value(&create_args, "--name")
+            .expect("podman create should receive a container name");
+        let mount_value = argument_value(&create_args, "--mount")
+            .expect("podman create should receive a methodology mount");
+        let mount_source = mount_src_value(&mount_value).expect("mount should include src");
+        let stage_dir_name = Path::new(&mount_source)
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .expect("mount source should live under the runner staging directory");
+        let secret_args = fixture.read_log("secret-commands.log");
+        let secret_name = secret_args
+            .split_whitespace()
+            .nth(1)
+            .expect("secret create should include a secret name");
+
+        let container_suffix = container_name
+            .strip_prefix("agentd-agent-")
+            .expect("container name should include agent prefix");
+        let stage_suffix = stage_dir_name
+            .strip_prefix(SESSION_STAGE_PREFIX)
+            .expect("staging dir should include session stage prefix");
+
+        assert_eq!(stage_suffix, container_suffix);
+        assert_eq!(
+            secret_name,
+            format!("{SESSION_SECRET_PREFIX}{container_name}-0")
+        );
+        assert_eq!(container_suffix.len(), 32);
+        assert!(
+            container_suffix.chars().all(|character| {
+                character.is_ascii_digit() || ('a'..='f').contains(&character)
+            })
+        );
     }
 
     #[test]
@@ -1255,6 +1492,53 @@ esac
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn podman_commands_with_input_reap_failed_children_before_returning() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+printf '%s\n' "$$" > "$log_root/podman.pid"
+exit 17
+"#,
+        );
+
+        let stdin_data = vec![b'x'; 8 * 1024 * 1024];
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_podman_command_with_input(
+                    vec![
+                        "secret".to_string(),
+                        "create".to_string(),
+                        "secret-name".to_string(),
+                        "-".to_string(),
+                    ],
+                    Some(&stdin_data),
+                )
+            })
+            .expect_err("failed podman commands should surface an error");
+
+        match error {
+            RunnerError::PodmanCommandFailed { status, .. } => {
+                assert_eq!(status.code(), Some(17));
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+
+        let pid = fixture
+            .read_log("podman.pid")
+            .trim()
+            .parse::<u32>()
+            .expect("fake podman script should record its pid");
+        assert_process_is_reaped(pid);
+    }
+
     fn fake_podman_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -1349,6 +1633,23 @@ esac
         }
     }
 
+    fn argument_value(command_line: &str, flag: &str) -> Option<String> {
+        let mut parts = command_line.split_whitespace();
+        while let Some(part) = parts.next() {
+            if part == flag {
+                return parts.next().map(str::to_string);
+            }
+        }
+
+        None
+    }
+
+    fn mount_src_value(mount: &str) -> Option<String> {
+        mount
+            .split(',')
+            .find_map(|component| component.strip_prefix("src=").map(str::to_string))
+    }
+
     impl Drop for FakePodmanFixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
@@ -1360,6 +1661,25 @@ esac
         use std::os::unix::process::ExitStatusExt;
 
         ExitStatusExt::from_raw(code << 8)
+    }
+
+    #[cfg(unix)]
+    fn assert_process_is_reaped(pid: u32) {
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps should run");
+
+        if !output.status.success() {
+            return;
+        }
+
+        let status = String::from_utf8(output.stdout).expect("ps output should be utf-8");
+        assert!(
+            !status.trim().starts_with('Z'),
+            "expected process {pid} to be reaped, got state {:?}",
+            status.trim()
+        );
     }
 
     #[cfg(windows)]
