@@ -81,11 +81,11 @@ The scheduler determines when an agent should run. Triggers may come from time-b
 
 The runner prepares the execution environment:
 
-1. Creates an ephemeral Podman container from the agent's configured base image.
+1. Creates an ephemeral Podman container from the agent's configured base image. That image must provide a POSIX-compatible shell at `/bin/sh` because the runner's container entrypoint executes through that path.
 2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only and initializes runa from `manifest.toml` at the mount root.
-5. Clones the requested repository into an ephemeral workspace inside the container and writes the configured agent command into runa's project config. This clone step is a plain in-container `git clone`: it currently accepts only public `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and does not wire injected environment credentials into git. Authenticated private-repository clone support remains deferred to issue #32.
+5. Clones the requested repository into an ephemeral workspace inside the container and writes the configured agent command into runa's project config. This clone step is a plain in-container `git clone`: the base image must provide `git` in `PATH`, it currently accepts only public `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and does not wire injected environment credentials into git. Base images that lack either `/bin/sh` or `git` (for example distroless images) are not supported. Authenticated private-repository clone support remains deferred to issue #32.
 
 ### Phase 3: Execution (`agentd-runner`)
 
