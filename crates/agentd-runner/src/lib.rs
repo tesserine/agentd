@@ -433,7 +433,10 @@ fn wait_for_container_exit(
         }
 
         if !secrets_released && inspect_container_status(container_name)? == "running" {
-            cleanup_podman_secrets(secret_bindings)?;
+            match cleanup_podman_secrets(secret_bindings) {
+                Ok(()) => {}
+                Err(error) => log_cleanup_failure("secret release", &error),
+            }
             secrets_released = true;
         }
 
@@ -806,6 +809,8 @@ fn build_create_container_args(
         args.push(format!("{name}={value}"));
     }
 
+    args.push("--user".to_string());
+    args.push("0:0".to_string());
     args.push(spec.base_image.clone());
     args.push("sh".to_string());
     args.push("-lc".to_string());
@@ -1257,6 +1262,49 @@ mod tests {
         assert!(
             mount_value.contains("relabel=shared"),
             "methodology bind mount should include shared SELinux relabeling: {mount_value}"
+        );
+    }
+
+    #[test]
+    fn create_container_args_force_root_user_before_image_argument() {
+        let args = build_create_container_args(
+            &SessionResources {
+                container_name: "agentd-agent-session".to_string(),
+                methodology_staging_dir: PathBuf::from("/tmp/staging"),
+                methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+                secret_bindings: Vec::new(),
+            },
+            &SessionSpec {
+                agent_name: "agent".to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            },
+            &SessionInvocation {
+                repo_url: VALID_REMOTE_REPO_URL.to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        );
+
+        let user_index = args
+            .iter()
+            .position(|arg| arg == "--user")
+            .expect("podman create should receive --user");
+        assert_eq!(
+            args.get(user_index + 1).map(String::as_str),
+            Some("0:0"),
+            "podman create should run as root"
+        );
+
+        let image_index = args
+            .iter()
+            .position(|arg| arg == "image")
+            .expect("podman create should include the base image");
+        assert!(
+            user_index < image_index,
+            "--user should be injected before the image argument: {args:?}"
         );
     }
 
@@ -1995,6 +2043,240 @@ esac
             secret_args.contains("rm"),
             "podman secret rm should run after the container reaches running: {secret_args}"
         );
+    }
+
+    #[test]
+    fn run_session_continues_when_secret_release_fails_after_container_reaches_running_state() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            create)
+                printf 'create %s\n' "$*" >> "$log_root/secret-commands.log"
+                cat > "$log_root/secret-value.log"
+                ;;
+            rm)
+                printf 'rm %s\n' "$*" >> "$log_root/secret-commands.log"
+                if [ ! -f "$log_root/secret-rm-failed-once" ]; then
+                    : > "$log_root/secret-rm-failed-once"
+                    : > "$log_root/secret-rm-attempted"
+                    echo "secret cleanup failed after container reached running" >&2
+                    exit 29
+                fi
+                : > "$log_root/secret-removed"
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    create)
+        printf '%s\n' "$*" > "$log_root/create-args.log"
+        printf 'created' > "$log_root/container-state"
+        ;;
+    start)
+        printf 'running' > "$log_root/container-state"
+        deadline=$(( $(date +%s) + 3 ))
+        while [ ! -f "$log_root/secret-rm-attempted" ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "secret release was not attempted while container was running" >&2
+                exit 42
+            fi
+            sleep 0.1
+        done
+        exit 0
+        ;;
+    rm)
+        exit 0
+        ;;
+    inspect)
+        format_value=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --type)
+                    shift 2
+                    ;;
+                --format)
+                    format_value="$2"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+        state="$(cat "$log_root/container-state" 2>/dev/null || printf 'created')"
+        case "$format_value" in
+            "{{.State.Status}}")
+                printf '%s\n' "$state"
+                ;;
+            "{{.State.Status}} {{.State.ExitCode}}")
+                printf '%s 0\n' "$state"
+                ;;
+            *)
+                echo "unexpected podman inspect format: $format_value" >&2
+                exit 97
+                ;;
+        esac
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let outcome = fixture.run_with_fake_podman(SessionSpec {
+            agent_name: "agent".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir,
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "GITHUB_TOKEN".to_string(),
+                value: "test-token".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            outcome.expect("session should still succeed when secret release fails"),
+            SessionOutcome::Succeeded
+        );
+
+        let secret_args = fixture.read_log("secret-commands.log");
+        assert_eq!(
+            secret_args
+                .lines()
+                .filter(|line| line.starts_with("rm "))
+                .count(),
+            2,
+            "secret cleanup should fail once during execution and then succeed during final cleanup: {secret_args}"
+        );
+    }
+
+    #[test]
+    fn wait_for_container_exit_returns_timeout_when_secret_release_fails() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.write_script(
+            r#"#!/bin/sh
+set -eu
+
+log_root="${AGENTD_FAKE_PODMAN_LOG_DIR:?}"
+command_name="$1"
+shift
+
+case "$command_name" in
+    secret)
+        subcommand="$1"
+        shift
+        case "$subcommand" in
+            rm)
+                printf 'rm %s\n' "$*" >> "$log_root/secret-commands.log"
+                echo "secret cleanup failed while attached start was still running" >&2
+                exit 29
+                ;;
+            *)
+                echo "unexpected podman secret subcommand: $subcommand" >&2
+                exit 98
+                ;;
+        esac
+        ;;
+    inspect)
+        format_value=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --type)
+                    shift 2
+                    ;;
+                --format)
+                    format_value="$2"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+        case "$format_value" in
+            "{{.State.Status}}")
+                printf 'running\n'
+                ;;
+            "{{.State.Status}} {{.State.ExitCode}}")
+                printf 'running 0\n'
+                ;;
+            *)
+                echo "unexpected podman inspect format: $format_value" >&2
+                exit 97
+                ;;
+        esac
+        ;;
+    *)
+        echo "unexpected podman command: $command_name" >&2
+        exit 99
+        ;;
+esac
+"#,
+        );
+
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 0.3"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("child process should start");
+
+        let started_at = Instant::now();
+        let outcome = fixture
+            .run_with_fake_podman_env(|| {
+                wait_for_container_exit(
+                    &mut child,
+                    "container",
+                    &[SecretBinding {
+                        secret_name: "secret".to_string(),
+                        target_name: "GITHUB_TOKEN".to_string(),
+                    }],
+                    Some(Duration::from_millis(50)),
+                )
+            })
+            .expect("secret release failure should not surface as a runner error");
+        let elapsed = started_at.elapsed();
+
+        assert_eq!(outcome, None);
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "wait loop should return on timeout without blocking on secret release failure, returned after {elapsed:?}"
+        );
+
+        let secret_args = fixture.read_log("secret-commands.log");
+        assert_eq!(
+            secret_args
+                .lines()
+                .filter(|line| line.starts_with("rm "))
+                .count(),
+            1,
+            "secret cleanup should only be attempted once: {secret_args}"
+        );
+
+        let _ = child.kill();
+        child.wait().expect("child process should be reaped");
     }
 
     #[test]
