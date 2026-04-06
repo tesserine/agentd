@@ -242,7 +242,7 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
         "set -eu\n\
          mkdir -p /agentd/workspace\n\
          rm -rf /agentd/workspace/repo\n\
-         git clone --no-hardlinks ",
+         git clone --no-hardlinks -- ",
     );
     script.push_str(&shell_quote(&invocation.repo_url));
     script.push(' ');
@@ -984,6 +984,29 @@ mod tests {
         assert!(
             mount_value.contains("relabel=shared"),
             "methodology bind mount should include shared SELinux relabeling: {mount_value}"
+        );
+    }
+
+    #[test]
+    fn build_container_script_terminates_git_clone_options_before_repo_url() {
+        let script = build_container_script(
+            &SessionSpec {
+                agent_name: "agent".to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            },
+            &SessionInvocation {
+                repo_url: "-repo.git".to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        );
+
+        assert!(
+            script.contains("git clone --no-hardlinks -- '-repo.git' '/agentd/workspace/repo'"),
+            "git clone should terminate options before the repo URL: {script}"
         );
     }
 

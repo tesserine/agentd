@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -270,8 +271,8 @@ fn releases_session_secret_after_container_reaches_running_state() {
         )
     });
 
-    fixture.wait_for_runner_container_to_be_running(Duration::from_secs(5));
-    fixture.wait_for_runner_secrets_to_be_released(Duration::from_secs(5));
+    let session_id = fixture.wait_for_runner_container_to_be_running(Duration::from_secs(5));
+    fixture.wait_for_runner_secrets_to_be_released(&session_id, Duration::from_secs(5));
 
     let outcome = session
         .join()
@@ -286,6 +287,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
 struct SessionFixture {
     root: PathBuf,
     agent_name: String,
+    baseline_runner_secret_names: BTreeSet<String>,
 }
 
 impl SessionFixture {
@@ -308,6 +310,7 @@ impl SessionFixture {
         Self {
             root,
             agent_name: agent_name.to_string(),
+            baseline_runner_secret_names: list_runner_secret_names(),
         }
     }
 
@@ -357,43 +360,29 @@ impl SessionFixture {
     }
 
     fn assert_no_runner_secret_left_behind(&self) {
-        let output = Command::new("podman")
-            .args(["secret", "ls", "--format", "{{.Name}}"])
-            .output()
-            .expect("podman secret ls should run");
+        let current_runner_secret_names = list_runner_secret_names();
+        let leaked_secret_names = current_runner_secret_names
+            .difference(&self.baseline_runner_secret_names)
+            .cloned()
+            .collect::<Vec<_>>();
         assert!(
-            output.status.success(),
-            "podman secret ls failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let names =
-            String::from_utf8(output.stdout).expect("podman secret ls output should be utf-8");
-        let expected_fragment = format!("agentd-{}-", self.agent_name);
-        assert!(
-            !names.lines().any(|name| name.contains(&expected_fragment)),
-            "runner left secrets behind for {expected_fragment}: {names}"
+            leaked_secret_names.is_empty(),
+            "runner left secrets behind: {}",
+            leaked_secret_names.join("\n")
         );
     }
 
-    fn wait_for_runner_container_to_be_running(&self, timeout: Duration) {
+    fn wait_for_runner_container_to_be_running(&self, timeout: Duration) -> String {
         let deadline = Instant::now() + timeout;
         let expected_prefix = format!("agentd-{}-", self.agent_name);
 
         loop {
-            let output = Command::new("podman")
-                .args(["ps", "--format", "{{.Names}}"])
-                .output()
-                .expect("podman ps should run");
-            assert!(
-                output.status.success(),
-                "podman ps failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-
-            let names = String::from_utf8(output.stdout).expect("podman ps output should be utf-8");
-            if names.lines().any(|name| name.starts_with(&expected_prefix)) {
-                return;
+            let running_container_names = list_running_container_names();
+            if let Some(session_id) = running_container_names
+                .iter()
+                .find_map(|name| name.strip_prefix(&expected_prefix))
+            {
+                return session_id.to_string();
             }
 
             assert!(
@@ -404,30 +393,38 @@ impl SessionFixture {
         }
     }
 
-    fn wait_for_runner_secrets_to_be_released(&self, timeout: Duration) {
+    fn wait_for_runner_secrets_to_be_released(&self, session_id: &str, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let expected_fragment = format!("agentd-{}-", self.agent_name);
+        let expected_secret_prefix = format!("agentd-secret-{session_id}-");
+        let expected_container_prefix = format!("agentd-{}-{session_id}", self.agent_name);
 
         loop {
-            let output = Command::new("podman")
-                .args(["secret", "ls", "--format", "{{.Name}}"])
-                .output()
-                .expect("podman secret ls should run");
-            assert!(
-                output.status.success(),
-                "podman secret ls failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let matching_secret_names = list_runner_secret_names()
+                .into_iter()
+                .filter(|name| name.starts_with(&expected_secret_prefix))
+                .collect::<Vec<_>>();
+            let running_container_names = list_running_container_names();
+            let container_is_running = running_container_names
+                .iter()
+                .any(|name| name == &expected_container_prefix);
 
-            let names =
-                String::from_utf8(output.stdout).expect("podman secret ls output should be utf-8");
-            if !names.lines().any(|name| name.contains(&expected_fragment)) {
+            if matching_secret_names.is_empty() {
+                assert!(
+                    container_is_running,
+                    "runner secrets for {expected_secret_prefix} were only released after the container stopped"
+                );
                 return;
             }
 
             assert!(
+                container_is_running,
+                "runner left secrets behind until the container stopped: {}",
+                matching_secret_names.join("\n")
+            );
+            assert!(
                 Instant::now() < deadline,
-                "runner left secrets behind for {expected_fragment}: {names}"
+                "runner left secrets behind for {expected_secret_prefix}: {}",
+                matching_secret_names.join("\n")
             );
             thread::sleep(Duration::from_millis(50));
         }
@@ -478,6 +475,43 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     );
 
     std::env::temp_dir().join(unique)
+}
+
+fn list_running_container_names() -> Vec<String> {
+    let output = Command::new("podman")
+        .args(["ps", "--format", "{{.Names}}"])
+        .output()
+        .expect("podman ps should run");
+    assert!(
+        output.status.success(),
+        "podman ps failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout)
+        .expect("podman ps output should be utf-8")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn list_runner_secret_names() -> BTreeSet<String> {
+    let output = Command::new("podman")
+        .args(["secret", "ls", "--format", "{{.Name}}"])
+        .output()
+        .expect("podman secret ls should run");
+    assert!(
+        output.status.success(),
+        "podman secret ls failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout)
+        .expect("podman secret ls output should be utf-8")
+        .lines()
+        .filter(|name| name.starts_with("agentd-secret-"))
+        .map(str::to_string)
+        .collect()
 }
 
 fn write_test_repo(destination: &Path) {
