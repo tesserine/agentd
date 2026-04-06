@@ -204,7 +204,7 @@ fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if spec.agent_name.trim().is_empty() {
         return Err(RunnerError::InvalidAgentName);
     }
-    if spec.base_image.trim().is_empty() {
+    if spec.base_image.trim().is_empty() || spec.base_image != spec.base_image.trim() {
         return Err(RunnerError::InvalidBaseImage);
     }
     if spec.agent_command.is_empty() || spec.agent_command.iter().any(|arg| arg.is_empty()) {
@@ -379,14 +379,18 @@ fn run_container_with_timeout(
             let (args, stderr) = finalize_attached_start(start)?;
             classify_attached_start_result(args, container_name, status, stderr)
         }
-        Ok(None) => {
-            let cleanup_result = cleanup_container(container_name);
-            let finalize_result = finalize_attached_start(start).map(|_| ());
-
-            cleanup_result?;
-            finalize_result?;
-            Ok(SessionOutcome::TimedOut)
-        }
+        Ok(None) => match cleanup_container(container_name) {
+            Ok(()) => {
+                finalize_attached_start(start).map(|_| ())?;
+                Ok(SessionOutcome::TimedOut)
+            }
+            Err(error) => {
+                log_cleanup_failure("session execution", &error);
+                log_attached_start_finalization_skipped("session execution", &error);
+                std::mem::forget(start);
+                Ok(SessionOutcome::TimedOut)
+            }
+        },
         Err(error) => {
             cleanup_and_finalize_attached_start_after_wait_error(container_name, start);
             Err(error)
@@ -425,6 +429,11 @@ fn log_attached_start_finalization_failure(stage: &str, error: &RunnerError) {
     let _ = log_attached_start_finalization_failure_to(&mut stderr, stage, error);
 }
 
+fn log_attached_start_finalization_skipped(stage: &str, error: &RunnerError) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = log_attached_start_finalization_skipped_to(&mut stderr, stage, error);
+}
+
 fn log_cleanup_failure_to<W>(
     writer: &mut W,
     stage: &str,
@@ -447,6 +456,20 @@ where
     writeln!(
         writer,
         "attached start finalization after {stage} failed: {error}"
+    )
+}
+
+fn log_attached_start_finalization_skipped_to<W>(
+    writer: &mut W,
+    stage: &str,
+    error: &RunnerError,
+) -> std::io::Result<()>
+where
+    W: Write,
+{
+    writeln!(
+        writer,
+        "attached start finalization after {stage} skipped because cleanup failed: {error}"
     )
 }
 
@@ -886,8 +909,8 @@ fn forward_and_capture_stderr<T>(mut stderr: T) -> std::io::Result<String>
 where
     T: Read,
 {
-    let mut host_stderr = std::io::stderr().lock();
-    forward_and_capture_stderr_to(&mut stderr, &mut host_stderr)
+    let host_stderr = std::io::stderr();
+    forward_and_capture_stderr_to(&mut stderr, host_stderr)
 }
 
 fn forward_and_capture_stderr_to<T, U>(mut stderr: T, mut host_stderr: U) -> std::io::Result<String>
@@ -1130,6 +1153,25 @@ mod tests {
                 assert_eq!(name, "TOKEN=EXTRA");
             }
             other => panic!("expected InvalidEnvironmentName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_base_image_with_surrounding_whitespace() {
+        for base_image in [" image", "image ", " image "] {
+            let error = validate_spec(&SessionSpec {
+                agent_name: "agent".to_string(),
+                base_image: base_image.to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            })
+            .expect_err("base_image values with surrounding whitespace should be rejected");
+
+            assert!(
+                matches!(error, RunnerError::InvalidBaseImage),
+                "expected InvalidBaseImage for {base_image:?}, got {error:?}"
+            );
         }
     }
 
@@ -2630,8 +2672,8 @@ esac
     }
 
     #[test]
-    fn run_container_with_timeout_reaps_attached_child_when_cleanup_container_fails_after_timeout()
-    {
+    fn run_container_with_timeout_returns_timed_out_promptly_when_cleanup_container_fails_after_timeout()
+     {
         let _guard = fake_podman_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2651,6 +2693,7 @@ case "$command_name" in
         exit 0
         ;;
     rm)
+        printf '%s\n' "$*" >> "$log_root/rm-commands.log"
         echo "rm failed after timeout" >&2
         exit 47
         ;;
@@ -2666,40 +2709,24 @@ esac
         );
 
         let started_at = Instant::now();
-        let error = fixture
+        let outcome = fixture
             .run_with_fake_podman_env(|| {
                 run_container_with_timeout("container", &[], Duration::from_millis(50))
             })
-            .expect_err("timeout cleanup failure should surface as a runner error");
+            .expect("timeout cleanup failure should still return TimedOut promptly");
         let elapsed = started_at.elapsed();
 
-        match error {
-            RunnerError::PodmanCommandFailed { args, status, .. } => {
-                assert_eq!(
-                    args,
-                    vec![
-                        "rm".to_string(),
-                        "--force".to_string(),
-                        "--ignore".to_string(),
-                        "container".to_string(),
-                    ]
-                );
-                assert_eq!(status.code(), Some(47));
-            }
-            other => panic!("expected PodmanCommandFailed, got {other:?}"),
-        }
+        assert_eq!(outcome, SessionOutcome::TimedOut);
 
         assert!(
-            elapsed >= Duration::from_millis(100),
-            "attached start should be awaited before returning timeout cleanup errors, returned after {elapsed:?}"
+            elapsed < Duration::from_millis(250),
+            "timeout cleanup failures should return promptly without awaiting attached start exit, returned after {elapsed:?}"
         );
-
-        let pid = fixture
-            .read_log("start.pid")
-            .trim()
-            .parse::<u32>()
-            .expect("fake podman start should record its pid");
-        assert_process_is_reaped(pid);
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "--force --ignore container\n",
+            "timeout cleanup should still attempt force removal once before returning TimedOut"
+        );
     }
 
     #[test]
@@ -2733,6 +2760,23 @@ esac
         assert_eq!(
             String::from_utf8(output).expect("cleanup log should be utf-8"),
             "cleanup after session execution failed: base_image must not be empty\n"
+        );
+    }
+
+    #[test]
+    fn attached_start_finalization_skip_logs_include_session_execution_stage() {
+        let mut output = Vec::new();
+
+        log_attached_start_finalization_skipped_to(
+            &mut output,
+            "session execution",
+            &RunnerError::InvalidBaseImage,
+        )
+        .expect("finalization skip log should be written");
+
+        assert_eq!(
+            String::from_utf8(output).expect("finalization skip log should be utf-8"),
+            "attached start finalization after session execution skipped because cleanup failed: base_image must not be empty\n"
         );
     }
 
