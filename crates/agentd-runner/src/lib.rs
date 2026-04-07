@@ -10,10 +10,10 @@ mod validation;
 pub(crate) mod test_support;
 
 pub use types::{
-    EnvironmentNameValidationError, ResolvedEnvironmentVariable, RunnerError, SessionInvocation,
-    SessionOutcome, SessionSpec,
+    AgentNameValidationError, EnvironmentNameValidationError, ResolvedEnvironmentVariable,
+    RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
 };
-pub use validation::validate_environment_name;
+pub use validation::{validate_agent_name, validate_environment_name};
 
 use container::{
     create_container, log_cleanup_failure, run_container_to_completion, run_container_with_timeout,

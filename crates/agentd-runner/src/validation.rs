@@ -1,4 +1,7 @@
-use crate::types::{EnvironmentNameValidationError, RunnerError, SessionInvocation, SessionSpec};
+use crate::types::{
+    AgentNameValidationError, EnvironmentNameValidationError, RunnerError, SessionInvocation,
+    SessionSpec,
+};
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
 const RESERVED_AGENT_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
@@ -6,7 +9,7 @@ const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
 
 pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
-    if !is_valid_unix_username(&spec.agent_name) || is_reserved_agent_name(&spec.agent_name) {
+    if validate_agent_name(&spec.agent_name).is_err() {
         return Err(RunnerError::InvalidAgentName);
     }
     if spec.base_image.trim().is_empty() || spec.base_image != spec.base_image.trim() {
@@ -58,6 +61,17 @@ pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValida
     }
     if is_reserved_environment_name(name) {
         return Err(EnvironmentNameValidationError::Reserved);
+    }
+
+    Ok(())
+}
+
+pub fn validate_agent_name(name: &str) -> Result<(), AgentNameValidationError> {
+    if !is_valid_unix_username(name) {
+        return Err(AgentNameValidationError::Invalid);
+    }
+    if is_reserved_agent_name(name) {
+        return Err(AgentNameValidationError::Reserved);
     }
 
     Ok(())
@@ -256,7 +270,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_spec_rejects_invalid_or_reserved_agent_names() {
+    fn validate_agent_name_accepts_valid_unix_agent_names() {
+        for agent_name in [
+            "agent",
+            "agent-01",
+            "agent_01",
+            "agent-name_01",
+            &"a".repeat(32),
+        ] {
+            validate_agent_name(agent_name).unwrap_or_else(|error| {
+                panic!("expected {agent_name:?} to be accepted, got {error:?}")
+            });
+        }
+    }
+
+    #[test]
+    fn validate_agent_name_rejects_invalid_unix_usernames() {
         for agent_name in [
             "",
             "   ",
@@ -265,15 +294,36 @@ mod tests {
             "---",
             "_agent",
             "agent__name!",
-            "root",
-            "nobody",
-            "daemon",
-            "bin",
-            "sys",
-            "man",
-            "mail",
             &format!("a{}", "b".repeat(32)),
         ] {
+            let error = validate_agent_name(agent_name)
+                .expect_err("invalid unix usernames should be rejected");
+
+            assert_eq!(
+                error,
+                AgentNameValidationError::Invalid,
+                "expected Invalid for {agent_name:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_agent_name_rejects_reserved_names() {
+        for agent_name in ["root", "nobody", "daemon", "bin", "sys", "man", "mail"] {
+            let error =
+                validate_agent_name(agent_name).expect_err("reserved names should be rejected");
+
+            assert_eq!(
+                error,
+                AgentNameValidationError::Reserved,
+                "expected Reserved for {agent_name:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_spec_maps_invalid_or_reserved_agent_names_to_runner_error() {
+        for agent_name in ["123agent", "root"] {
             let error = validate_spec(&SessionSpec {
                 agent_name: agent_name.to_string(),
                 base_image: "image".to_string(),

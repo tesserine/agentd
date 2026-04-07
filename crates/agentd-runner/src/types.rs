@@ -38,6 +38,12 @@ pub enum EnvironmentNameValidationError {
     Reserved,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentNameValidationError {
+    Invalid,
+    Reserved,
+}
+
 #[derive(Debug)]
 pub enum RunnerError {
     MissingMethodologyManifest {
