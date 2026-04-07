@@ -57,7 +57,7 @@ pub fn run_session(
     let session_id = unique_suffix()?;
 
     let container_name = format!("agentd-{}-{}", spec.agent_name, session_id);
-    let resources = prepare_session_resources(&container_name, &spec, &session_id)?;
+    let resources = prepare_session_resources(&container_name, &spec, &invocation, &session_id)?;
 
     if let Err(error) = create_container(&resources, &spec, &invocation) {
         if let Err(cleanup_error) = cleanup_session_resources(&resources) {
@@ -70,13 +70,12 @@ pub fn run_session(
         return Err(error);
     }
 
+    let secret_bindings = resources.all_secret_bindings();
     let start_result = match invocation.timeout {
-        Some(timeout) => run_container_with_timeout(
-            &resources.container_name,
-            &resources.secret_bindings,
-            timeout,
-        ),
-        None => run_container_to_completion(&resources.container_name, &resources.secret_bindings),
+        Some(timeout) => {
+            run_container_with_timeout(&resources.container_name, &secret_bindings, timeout)
+        }
+        None => run_container_to_completion(&resources.container_name, &secret_bindings),
     };
 
     let cleanup_result = cleanup_session_resources(&resources);
@@ -98,7 +97,8 @@ pub fn run_session(
 
 fn cleanup_session_resources(resources: &SessionResources) -> Result<(), RunnerError> {
     let container_result = container::cleanup_container(&resources.container_name);
-    let secret_result = cleanup_podman_secrets(&resources.secret_bindings);
+    let secret_bindings = resources.all_secret_bindings();
+    let secret_result = cleanup_podman_secrets(&secret_bindings);
     let staging_result = cleanup_methodology_staging_dir(&resources.methodology_staging_dir);
 
     container_result?;

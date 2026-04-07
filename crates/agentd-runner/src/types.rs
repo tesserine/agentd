@@ -53,15 +53,18 @@ pub struct ResolvedEnvironmentVariable {
 
 /// Per-invocation parameters for a session launch.
 ///
-/// Describes the repository to clone, an optional work unit, and an optional
-/// timeout. Validated by [`run_session`](crate::run_session) before any
-/// resources are allocated.
+/// Describes the repository to clone, optional clone-only repository
+/// authentication, an optional work unit, and an optional timeout. Validated
+/// by [`run_session`](crate::run_session) before any resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInvocation {
     /// Remote repository URL cloned into the container workspace. Must use
     /// `https://`, `http://`, or `git://` scheme. Credential-bearing URLs
     /// are rejected.
     pub repo_url: String,
+    /// Optional bearer token used only for the runner-managed `git clone`
+    /// request. This token is not passed through to the agent runtime.
+    pub repo_token: Option<String>,
     /// Optional work unit identifier passed as `--work-unit` to `runa run`.
     pub work_unit: Option<String>,
     /// Optional session timeout. When set, the runner force-removes the

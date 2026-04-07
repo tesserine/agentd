@@ -49,6 +49,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -95,6 +96,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -139,6 +141,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         },
@@ -183,6 +186,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         },
@@ -228,6 +232,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -270,6 +275,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: None,
             timeout: Some(Duration::from_secs(1)),
         },
@@ -315,6 +321,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
             },
             SessionInvocation {
                 repo_url,
+                repo_token: None,
                 work_unit: None,
                 timeout: None,
             },
@@ -334,6 +341,46 @@ fn releases_session_secret_after_container_reaches_running_state() {
     fixture.assert_no_runner_secret_left_behind();
 }
 
+#[test]
+fn succeeds_with_repo_token_when_repo_http_requires_bearer_auth() {
+    if skip_if_podman_unavailable("succeeds_with_repo_token_when_repo_http_requires_bearer_auth") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new_with_required_repo_auth(
+        "private-repo-agent",
+        "Authorization: Bearer test-token",
+    );
+    let image = fixture.build_image();
+
+    let outcome = run_session(
+        SessionSpec {
+            agent_name: "private-repo-agent".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "RUNA_TEST_BEHAVIOR".to_string(),
+                value: "success-private-repo".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: Some("test-token".to_string()),
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Succeeded);
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
 struct SessionFixture {
     root: PathBuf,
     agent_name: String,
@@ -343,10 +390,26 @@ struct SessionFixture {
 
 impl SessionFixture {
     fn new(agent_name: &str) -> Self {
-        Self::new_with_root_prefix(agent_name, &format!("agentd-runner-{agent_name}"))
+        Self::new_with_repo_server(agent_name, &format!("agentd-runner-{agent_name}"), None)
+    }
+
+    fn new_with_required_repo_auth(agent_name: &str, authorization_header: &str) -> Self {
+        Self::new_with_repo_server(
+            agent_name,
+            &format!("agentd-runner-{agent_name}"),
+            Some(authorization_header),
+        )
     }
 
     fn new_with_root_prefix(agent_name: &str, root_prefix: &str) -> Self {
+        Self::new_with_repo_server(agent_name, root_prefix, None)
+    }
+
+    fn new_with_repo_server(
+        agent_name: &str,
+        root_prefix: &str,
+        required_authorization_header: Option<&str>,
+    ) -> Self {
         let root = unique_temp_dir(root_prefix);
         fs::create_dir_all(&root).expect("fixture root should be created");
 
@@ -366,7 +429,10 @@ impl SessionFixture {
             root,
             agent_name: agent_name.to_string(),
             baseline_runner_secret_names: list_runner_secret_names(),
-            repo_server: RepoHttpServer::start(repo_root),
+            repo_server: RepoHttpServer::start(
+                repo_root,
+                required_authorization_header.map(str::to_string),
+            ),
         }
     }
 
@@ -654,7 +720,7 @@ struct RepoHttpServer {
 }
 
 impl RepoHttpServer {
-    fn start(root: PathBuf) -> Self {
+    fn start(root: PathBuf, required_authorization_header: Option<String>) -> Self {
         let listener = TcpListener::bind(("0.0.0.0", 0))
             .expect("fixture repo HTTP server should bind an ephemeral port");
         listener
@@ -666,7 +732,14 @@ impl RepoHttpServer {
             .port();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_signal = Arc::clone(&shutdown);
-        let thread = thread::spawn(move || serve_repo_http(listener, root, shutdown_signal));
+        let thread = thread::spawn(move || {
+            serve_repo_http(
+                listener,
+                root,
+                shutdown_signal,
+                required_authorization_header,
+            )
+        });
 
         Self {
             port,
@@ -692,12 +765,24 @@ impl Drop for RepoHttpServer {
     }
 }
 
-fn serve_repo_http(listener: TcpListener, root: PathBuf, shutdown: Arc<AtomicBool>) {
+fn serve_repo_http(
+    listener: TcpListener,
+    root: PathBuf,
+    shutdown: Arc<AtomicBool>,
+    required_authorization_header: Option<String>,
+) {
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
                 let root = root.clone();
-                thread::spawn(move || handle_repo_http_request(stream, &root));
+                let required_authorization_header = required_authorization_header.clone();
+                thread::spawn(move || {
+                    handle_repo_http_request(
+                        stream,
+                        &root,
+                        required_authorization_header.as_deref(),
+                    )
+                });
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
@@ -707,17 +792,25 @@ fn serve_repo_http(listener: TcpListener, root: PathBuf, shutdown: Arc<AtomicBoo
     }
 }
 
-fn handle_repo_http_request(stream: TcpStream, root: &Path) {
+fn handle_repo_http_request(
+    stream: TcpStream,
+    root: &Path,
+    required_authorization_header: Option<&str>,
+) {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
         return;
     }
 
+    let mut authorization_header = None;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).is_err() || header == "\r\n" {
             break;
+        }
+        if let Some(value) = header.strip_prefix("Authorization:") {
+            authorization_header = Some(value.trim().to_string());
         }
     }
 
@@ -735,6 +828,21 @@ fn handle_repo_http_request(stream: TcpStream, root: &Path) {
             false,
         );
         return;
+    }
+
+    if let Some(expected) = required_authorization_header {
+        let request_authorization = authorization_header
+            .as_deref()
+            .map(|value| format!("Authorization: {value}"));
+        if request_authorization.as_deref() != Some(expected) {
+            write_http_response(
+                &mut stream,
+                "401 Unauthorized",
+                b"unauthorized",
+                method == "HEAD",
+            );
+            return;
+        }
     }
 
     let relative_path = path.trim_start_matches('/');
@@ -786,7 +894,9 @@ EOF
     run)
         [ -f /agentd/methodology/manifest.toml ]
         [ "${AGENT_NAME:-}" != "" ]
-        [ "${GITHUB_TOKEN:-}" = "${GITHUB_TOKEN:-test-token}" ]
+        if [ "${GITHUB_TOKEN+set}" = "set" ]; then
+            [ "${GITHUB_TOKEN}" = "test-token" ]
+        fi
         [ "$(id -u)" != "0" ]
         [ "$(id -un)" = "${AGENT_NAME}" ]
         [ "${HOME:-}" = "/home/${AGENT_NAME}" ]
@@ -808,6 +918,30 @@ EOF
             [ "${EMPTY_SESSION_ENV-__missing__}" = "" ]
             [ "$1" = "--work-unit" ]
             [ "$2" = "task-42" ]
+            exit 0
+        fi
+
+        if [ "${RUNA_TEST_BEHAVIOR:-}" = "success-private-repo" ]; then
+            if [ "$#" != "0" ]; then
+                echo "expected no runa args for private repo check, got: $*" >&2
+                exit 1
+            fi
+            if [ "${AGENTD_REPO_TOKEN-__missing__}" != "__missing__" ]; then
+                echo "repo token leaked into runa environment" >&2
+                exit 1
+            fi
+            if [ ! -f "${HOME}/repo/.git/config" ]; then
+                echo "expected repo config to exist after clone" >&2
+                exit 1
+            fi
+            if grep -F 'Authorization: Bearer test-token' "${HOME}/repo/.git/config" >/dev/null; then
+                echo "repo token persisted into .git/config" >&2
+                exit 1
+            fi
+            if grep -Fi 'extraheader' "${HOME}/repo/.git/config" >/dev/null; then
+                echo "http.extraHeader persisted into .git/config" >&2
+                exit 1
+            fi
             exit 0
         fi
 

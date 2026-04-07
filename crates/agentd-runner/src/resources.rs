@@ -6,7 +6,8 @@
 //! leaked secrets or stale directories when resource creation fails midway.
 
 use crate::podman::run_podman_command_with_input;
-use crate::types::{ResolvedEnvironmentVariable, RunnerError, SessionSpec};
+use crate::types::{RunnerError, SessionInvocation, SessionSpec};
+use crate::validation::REPO_TOKEN_ENV;
 use getrandom::fill as fill_random_bytes;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,7 +27,18 @@ pub(crate) struct SessionResources {
     pub(crate) container_name: String,
     pub(crate) methodology_staging_dir: PathBuf,
     pub(crate) methodology_mount_source: PathBuf,
-    pub(crate) secret_bindings: Vec<SecretBinding>,
+    pub(crate) environment_secret_bindings: Vec<SecretBinding>,
+    pub(crate) repo_token_secret_binding: Option<SecretBinding>,
+}
+
+impl SessionResources {
+    pub(crate) fn all_secret_bindings(&self) -> Vec<SecretBinding> {
+        let mut bindings = self.environment_secret_bindings.clone();
+        if let Some(binding) = &self.repo_token_secret_binding {
+            bindings.push(binding.clone());
+        }
+        bindings
+    }
 }
 
 pub(crate) fn unique_suffix() -> Result<String, RunnerError> {
@@ -36,6 +48,7 @@ pub(crate) fn unique_suffix() -> Result<String, RunnerError> {
 pub(crate) fn prepare_session_resources(
     container_name: &str,
     spec: &SessionSpec,
+    invocation: &SessionInvocation,
     session_id: &str,
 ) -> Result<SessionResources, RunnerError> {
     let manifest_path = spec.methodology_dir.join("manifest.toml");
@@ -52,7 +65,8 @@ pub(crate) fn prepare_session_resources(
         container_name: container_name.to_string(),
         methodology_staging_dir,
         methodology_mount_source,
-        secret_bindings: Vec::new(),
+        environment_secret_bindings: Vec::new(),
+        repo_token_secret_binding: None,
     };
 
     for (index, variable) in spec.environment.iter().enumerate() {
@@ -61,14 +75,31 @@ pub(crate) fn prepare_session_resources(
         }
 
         let secret_name = format!("{SESSION_SECRET_PREFIX}{session_id}-{index}");
-        if let Err(error) = create_podman_secret(&secret_name, variable) {
-            let _ = cleanup_podman_secrets(&resources.secret_bindings);
+        if let Err(error) = create_podman_secret(&secret_name, &variable.value) {
+            let _ = cleanup_podman_secrets(&resources.all_secret_bindings());
             let _ = cleanup_methodology_staging_dir(&resources.methodology_staging_dir);
             return Err(error);
         }
-        resources.secret_bindings.push(SecretBinding {
+        resources.environment_secret_bindings.push(SecretBinding {
             secret_name,
             target_name: variable.name.clone(),
+        });
+    }
+
+    if let Some(repo_token) = invocation
+        .repo_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+    {
+        let secret_name = format!("{SESSION_SECRET_PREFIX}{session_id}-repo-token");
+        if let Err(error) = create_podman_secret(&secret_name, repo_token) {
+            let _ = cleanup_podman_secrets(&resources.all_secret_bindings());
+            let _ = cleanup_methodology_staging_dir(&resources.methodology_staging_dir);
+            return Err(error);
+        }
+        resources.repo_token_secret_binding = Some(SecretBinding {
+            secret_name,
+            target_name: REPO_TOKEN_ENV.to_string(),
         });
     }
 
@@ -148,10 +179,7 @@ fn path_requires_mount_staging_alias(path: &Path) -> bool {
     path.to_string_lossy().contains(',')
 }
 
-fn create_podman_secret(
-    secret_name: &str,
-    variable: &ResolvedEnvironmentVariable,
-) -> Result<(), RunnerError> {
+fn create_podman_secret(secret_name: &str, value: &str) -> Result<(), RunnerError> {
     run_podman_command_with_input(
         vec![
             "secret".to_string(),
@@ -159,7 +187,7 @@ fn create_podman_secret(
             secret_name.to_string(),
             "-".to_string(),
         ],
-        Some(variable.value.as_bytes()),
+        Some(value.as_bytes()),
     )
     .map(|_| ())
 }

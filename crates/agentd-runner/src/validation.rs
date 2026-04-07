@@ -11,6 +11,7 @@ use crate::types::{
 };
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
+pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
 const RESERVED_AGENT_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
@@ -65,7 +66,7 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
 /// Validates an environment variable name against naming rules.
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
-/// runner-managed names (currently `AGENT_NAME`). Used both by
+/// runner-managed names (currently `AGENT_NAME` and `AGENTD_REPO_TOKEN`). Used both by
 /// [`run_session`](crate::run_session) during spec validation and by the
 /// configuration layer for credential name validation.
 pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValidationError> {
@@ -157,7 +158,7 @@ fn credential_bearing_repo_url_error() -> RunnerError {
 }
 
 fn is_reserved_environment_name(name: &str) -> bool {
-    matches!(name, AGENT_NAME_ENV)
+    matches!(name, AGENT_NAME_ENV | REPO_TOKEN_ENV)
 }
 
 fn is_reserved_agent_name(name: &str) -> bool {
@@ -190,20 +191,22 @@ mod tests {
 
     #[test]
     fn validate_spec_rejects_reserved_environment_names() {
-        let error = validate_spec(&SessionSpec {
-            environment: vec![ResolvedEnvironmentVariable {
-                name: "AGENT_NAME".to_string(),
-                value: "spoofed".to_string(),
-            }],
-            ..test_session_spec()
-        })
-        .expect_err("reserved runner environment names should be rejected");
+        for reserved_name in ["AGENT_NAME", REPO_TOKEN_ENV] {
+            let error = validate_spec(&SessionSpec {
+                environment: vec![ResolvedEnvironmentVariable {
+                    name: reserved_name.to_string(),
+                    value: "spoofed".to_string(),
+                }],
+                ..test_session_spec()
+            })
+            .expect_err("reserved runner environment names should be rejected");
 
-        match error {
-            RunnerError::ReservedEnvironmentName { name } => {
-                assert_eq!(name, "AGENT_NAME");
+            match error {
+                RunnerError::ReservedEnvironmentName { name } => {
+                    assert_eq!(name, reserved_name);
+                }
+                other => panic!("expected ReservedEnvironmentName, got {other:?}"),
             }
-            other => panic!("expected ReservedEnvironmentName, got {other:?}"),
         }
     }
 
@@ -372,6 +375,7 @@ mod tests {
         ] {
             validate_invocation(&SessionInvocation {
                 repo_url: repo_url.to_string(),
+                repo_token: None,
                 work_unit: None,
                 timeout: None,
             })
@@ -411,6 +415,7 @@ mod tests {
         ] {
             let error = validate_invocation(&SessionInvocation {
                 repo_url: repo_url.to_string(),
+                repo_token: None,
                 work_unit: None,
                 timeout: None,
             })
@@ -427,6 +432,7 @@ mod tests {
     fn validate_invocation_rejects_credential_bearing_repo_urls() {
         let error = validate_invocation(&SessionInvocation {
             repo_url: "https://user:token@example.com/repo.git".to_string(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         })
@@ -452,6 +458,7 @@ mod tests {
             },
             SessionInvocation {
                 repo_url: "/srv/test-repo.git".to_string(),
+                repo_token: None,
                 work_unit: None,
                 timeout: None,
             },
@@ -473,6 +480,7 @@ mod tests {
             },
             SessionInvocation {
                 repo_url: "https://user:token@example.com/repo.git".to_string(),
+                repo_token: None,
                 work_unit: None,
                 timeout: None,
             },
@@ -501,6 +509,7 @@ mod tests {
             },
             SessionInvocation {
                 repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
                 work_unit: None,
                 timeout: None,
             },

@@ -5,9 +5,11 @@ use crate::test_support::{
     exit_status, fake_podman_lock, test_session_spec,
 };
 use crate::{ResolvedEnvironmentVariable, SessionInvocation};
+use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const VALID_REMOTE_REPO_URL: &str = "https://example.com/agentd.git";
 
@@ -18,11 +20,13 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
-            secret_bindings: Vec::new(),
+            environment_secret_bindings: Vec::new(),
+            repo_token_secret_binding: None,
         },
         &test_session_spec(),
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         },
@@ -44,11 +48,13 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
-            secret_bindings: Vec::new(),
+            environment_secret_bindings: Vec::new(),
+            repo_token_secret_binding: None,
         },
         &test_session_spec(),
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         },
@@ -80,6 +86,7 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
     let spec = test_session_spec();
     let invocation = SessionInvocation {
         repo_url: VALID_REMOTE_REPO_URL.to_string(),
+        repo_token: None,
         work_unit: None,
         timeout: None,
     };
@@ -88,7 +95,8 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
-            secret_bindings: Vec::new(),
+            environment_secret_bindings: Vec::new(),
+            repo_token_secret_binding: None,
         },
         &spec,
         &invocation,
@@ -112,6 +120,7 @@ fn build_container_script_terminates_git_clone_options_before_repo_url() {
         &test_session_spec(),
         &SessionInvocation {
             repo_url: "-repo.git".to_string(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         },
@@ -126,6 +135,7 @@ fn build_container_script_disables_git_terminal_prompts() {
         &test_session_spec(),
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         },
@@ -143,6 +153,7 @@ fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unp
         },
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -158,6 +169,98 @@ fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unp
     assert!(script.contains("\nchown -R 'agent_name:agent_name' '/home/agent_name'\n"));
     assert!(script.contains("\nexport HOME='/home/agent_name'\n"));
     assert!(script.contains("exec gosu 'agent_name:agent_name' runa run --work-unit 'task-42'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn clone_command_passes_repo_token_to_git_via_environment_not_argv() {
+    let root = unique_test_dir("agentd-runner-clone-auth");
+    let bin_dir = root.join("bin");
+    let log_dir = root.join("logs");
+    fs::create_dir_all(&bin_dir).expect("fake git bin dir should be created");
+    fs::create_dir_all(&log_dir).expect("fake git log dir should be created");
+    install_fake_git(&bin_dir, &log_dir);
+
+    let command = build_clone_command(
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: Some("test-token".to_string()),
+            work_unit: None,
+            timeout: None,
+        },
+        "/tmp/repo",
+    );
+    let original_path = env::var_os("PATH").expect("PATH should exist");
+    let path =
+        env::join_paths(std::iter::once(bin_dir.clone()).chain(env::split_paths(&original_path)))
+            .expect("PATH should be extendable");
+
+    let status = Command::new("sh")
+        .args(["-c", &command])
+        .env("PATH", path)
+        .env(REPO_TOKEN_ENV, "test-token")
+        .status()
+        .expect("clone command should run");
+    assert!(status.success(), "clone command should succeed");
+
+    let git_argv =
+        fs::read_to_string(log_dir.join("git-argv.log")).expect("fake git should record argv");
+    let git_env =
+        fs::read_to_string(log_dir.join("git-env.log")).expect("fake git should record env");
+
+    assert!(git_argv.contains("clone --no-hardlinks --"));
+    assert!(git_argv.contains(VALID_REMOTE_REPO_URL));
+    assert!(git_argv.contains("/tmp/repo"));
+    assert!(!git_argv.contains("test-token"));
+    assert!(git_env.contains("GIT_CONFIG_COUNT=1"));
+    assert!(git_env.contains("GIT_CONFIG_KEY_0=http.extraHeader"));
+    assert!(git_env.contains("GIT_CONFIG_VALUE_0=Authorization: Bearer test-token"));
+    assert!(git_env.contains("GIT_TERMINAL_PROMPT=0"));
+    assert!(!git_env.contains(&format!("{REPO_TOKEN_ENV}=test-token")));
+}
+
+#[cfg(unix)]
+#[test]
+fn clone_command_omits_git_auth_environment_when_repo_token_is_absent() {
+    let root = unique_test_dir("agentd-runner-clone-public");
+    let bin_dir = root.join("bin");
+    let log_dir = root.join("logs");
+    fs::create_dir_all(&bin_dir).expect("fake git bin dir should be created");
+    fs::create_dir_all(&log_dir).expect("fake git log dir should be created");
+    install_fake_git(&bin_dir, &log_dir);
+
+    let command = build_clone_command(
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+        "/tmp/repo",
+    );
+    let original_path = env::var_os("PATH").expect("PATH should exist");
+    let path =
+        env::join_paths(std::iter::once(bin_dir.clone()).chain(env::split_paths(&original_path)))
+            .expect("PATH should be extendable");
+
+    let status = Command::new("sh")
+        .args(["-c", &command])
+        .env("PATH", path)
+        .status()
+        .expect("clone command should run");
+    assert!(status.success(), "clone command should succeed");
+
+    let git_argv =
+        fs::read_to_string(log_dir.join("git-argv.log")).expect("fake git should record argv");
+    let git_env =
+        fs::read_to_string(log_dir.join("git-env.log")).expect("fake git should record env");
+
+    assert!(git_argv.contains("clone --no-hardlinks --"));
+    assert!(!git_env.contains("GIT_CONFIG_COUNT=1"));
+    assert!(!git_env.contains("GIT_CONFIG_KEY_0=http.extraHeader"));
+    assert!(!git_env.contains("GIT_CONFIG_VALUE_0=Authorization: Bearer"));
+    assert!(git_env.contains("GIT_TERMINAL_PROMPT=0"));
+    assert!(!git_env.contains(REPO_TOKEN_ENV));
 }
 
 #[test]
@@ -437,6 +540,45 @@ fn run_session_does_not_pass_resolved_environment_values_via_podman_create_argum
     let secret_args = fixture.secret_commands();
     assert!(secret_args.contains("create"));
     assert_eq!(fixture.read_log("secret-value.log"), "test-token");
+}
+
+#[test]
+fn run_session_does_not_pass_repo_token_via_podman_create_arguments() {
+    let _guard = fake_podman_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fixture = FakePodmanFixture::new();
+    fixture.install(&FakePodmanScenario::new());
+
+    let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+    let outcome = fixture.run_with_fake_podman_env(|| {
+        crate::run_session(
+            crate::SessionSpec {
+                methodology_dir,
+                ..test_session_spec()
+            },
+            SessionInvocation {
+                repo_url: VALID_REMOTE_REPO_URL.to_string(),
+                repo_token: Some("repo-secret-token".to_string()),
+                work_unit: None,
+                timeout: None,
+            },
+        )
+    });
+
+    assert_eq!(
+        outcome.expect("session should succeed with repo token"),
+        SessionOutcome::Succeeded
+    );
+
+    let create_args = fixture.create_args();
+    assert!(!create_args.contains("repo-secret-token"));
+    assert!(create_args.contains("--secret"));
+    assert!(create_args.contains(&format!("target={REPO_TOKEN_ENV}")));
+
+    let secret_args = fixture.secret_commands();
+    assert!(secret_args.contains("create"));
+    assert_eq!(fixture.read_log("secret-value.log"), "repo-secret-token");
 }
 
 #[test]
@@ -898,6 +1040,7 @@ fn run_session_returns_run_error_when_cleanup_after_run_also_fails() {
                 },
                 SessionInvocation {
                     repo_url: VALID_REMOTE_REPO_URL.to_string(),
+                    repo_token: None,
                     work_unit: None,
                     timeout: None,
                 },
@@ -960,4 +1103,37 @@ fn mount_src_value(mount: &str) -> Option<String> {
     mount
         .split(',')
         .find_map(|component| component.strip_prefix("src=").map(str::to_string))
+}
+
+fn unique_test_dir(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time should be after the unix epoch")
+            .as_nanos()
+    ))
+}
+
+#[cfg(unix)]
+fn install_fake_git(bin_dir: &Path, log_dir: &Path) {
+    let script_path = bin_dir.join("git");
+    fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" > {argv}\nenv | sort > {env}\nexit 0\n",
+            argv = shell_quote(&log_dir.join("git-argv.log").display().to_string()),
+            env = shell_quote(&log_dir.join("git-env.log").display().to_string()),
+        ),
+    )
+    .expect("fake git script should be written");
+
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(&script_path)
+        .expect("fake git script metadata should be available")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).expect("fake git script should be executable");
 }
