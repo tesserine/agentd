@@ -11,7 +11,7 @@
 use crate::podman::{run_podman_command, run_podman_command_until};
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
-use crate::validation::runner_managed_environment;
+use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io::{Read, Write};
@@ -164,10 +164,8 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script.push_str(&shell_quote(username));
     script.push_str("\nrm -rf ");
     script.push_str(&shell_quote(&repo_dir));
-    script.push_str("\nGIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- ");
-    script.push_str(&shell_quote(&invocation.repo_url));
-    script.push(' ');
-    script.push_str(&shell_quote(&repo_dir));
+    script.push('\n');
+    script.push_str(&build_clone_command(invocation, &repo_dir));
     script.push_str("\ncd ");
     script.push_str(&shell_quote(&repo_dir));
     script.push_str("\nruna init --methodology ");
@@ -195,6 +193,40 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script
 }
 
+fn build_clone_command(invocation: &SessionInvocation, repo_dir: &str) -> String {
+    let mut command = String::new();
+
+    if invocation.repo_token.is_some() {
+        command.push_str("repo_token=${");
+        command.push_str(REPO_TOKEN_ENV);
+        command.push_str("-}\nunset ");
+        command.push_str(REPO_TOKEN_ENV);
+        command.push_str("\nif [ -n \"$repo_token\" ]; then\n");
+        command.push_str("GIT_CONFIG_COUNT=1 ");
+        command.push_str("GIT_CONFIG_KEY_0=http.extraHeader ");
+        command.push_str(
+            "GIT_CONFIG_VALUE_0=\"$(printf 'Authorization: Bearer %s' \"$repo_token\")\" ",
+        );
+        command.push_str("GIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- ");
+        command.push_str(&shell_quote(&invocation.repo_url));
+        command.push(' ');
+        command.push_str(&shell_quote(repo_dir));
+        command.push_str("\nelse\n");
+        command.push_str("GIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- ");
+        command.push_str(&shell_quote(&invocation.repo_url));
+        command.push(' ');
+        command.push_str(&shell_quote(repo_dir));
+        command.push_str("\nfi\nunset repo_token");
+        return command;
+    }
+
+    command.push_str("GIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- ");
+    command.push_str(&shell_quote(&invocation.repo_url));
+    command.push(' ');
+    command.push_str(&shell_quote(repo_dir));
+    command
+}
+
 fn build_create_container_args(
     resources: &SessionResources,
     spec: &SessionSpec,
@@ -211,7 +243,7 @@ fn build_create_container_args(
             METHODOLOGY_MOUNT_PATH
         ),
     ];
-    let mut secret_bindings = resources.secret_bindings.iter();
+    let mut secret_bindings = resources.environment_secret_bindings.iter();
 
     for variable in &spec.environment {
         if variable.value.is_empty() {
@@ -235,6 +267,14 @@ fn build_create_container_args(
         secret_bindings.next().is_none(),
         "all secret bindings should be consumed when building create args"
     );
+
+    if let Some(binding) = &resources.repo_token_secret_binding {
+        args.push("--secret".to_string());
+        args.push(format!(
+            "{},type=env,target={}",
+            binding.secret_name, binding.target_name
+        ));
+    }
 
     for (name, value) in runner_managed_environment(spec) {
         args.push("--env".to_string());

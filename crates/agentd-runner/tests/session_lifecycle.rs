@@ -49,6 +49,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -95,6 +96,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -139,6 +141,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         },
@@ -183,6 +186,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: None,
             timeout: None,
         },
@@ -228,6 +232,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -270,6 +275,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
+            repo_token: None,
             work_unit: None,
             timeout: Some(Duration::from_secs(1)),
         },
@@ -315,6 +321,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
             },
             SessionInvocation {
                 repo_url,
+                repo_token: None,
                 work_unit: None,
                 timeout: None,
             },
@@ -343,10 +350,14 @@ struct SessionFixture {
 
 impl SessionFixture {
     fn new(agent_name: &str) -> Self {
-        Self::new_with_root_prefix(agent_name, &format!("agentd-runner-{agent_name}"))
+        Self::new_with_repo_server(agent_name, &format!("agentd-runner-{agent_name}"))
     }
 
     fn new_with_root_prefix(agent_name: &str, root_prefix: &str) -> Self {
+        Self::new_with_repo_server(agent_name, root_prefix)
+    }
+
+    fn new_with_repo_server(agent_name: &str, root_prefix: &str) -> Self {
         let root = unique_temp_dir(root_prefix);
         fs::create_dir_all(&root).expect("fixture root should be created");
 
@@ -786,7 +797,9 @@ EOF
     run)
         [ -f /agentd/methodology/manifest.toml ]
         [ "${AGENT_NAME:-}" != "" ]
-        [ "${GITHUB_TOKEN:-}" = "${GITHUB_TOKEN:-test-token}" ]
+        if [ "${GITHUB_TOKEN+set}" = "set" ]; then
+            [ "${GITHUB_TOKEN}" = "test-token" ]
+        fi
         [ "$(id -u)" != "0" ]
         [ "$(id -un)" = "${AGENT_NAME}" ]
         [ "${HOME:-}" = "/home/${AGENT_NAME}" ]
