@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use agentd_runner::validate_environment_name;
+use agentd_runner::{RunnerError, validate_agent_name, validate_environment_name};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +38,11 @@ impl Config {
 
         for raw_agent in raw.agents {
             validate_lookup_key("name", &raw_agent.name, None, None)?;
+            if validate_agent_name(&raw_agent.name).is_err() {
+                return Err(ConfigError::InvalidAgentName {
+                    name: raw_agent.name,
+                });
+            }
 
             if !seen_agents.insert(raw_agent.name.clone()) {
                 return Err(ConfigError::DuplicateAgentName {
@@ -198,6 +203,9 @@ pub enum ConfigError {
     DuplicateAgentName {
         name: String,
     },
+    InvalidAgentName {
+        name: String,
+    },
     DuplicateCredentialName {
         agent: String,
         name: String,
@@ -229,6 +237,13 @@ impl fmt::Display for ConfigError {
             ConfigError::NoAgents => write!(f, "config must define at least one agent"),
             ConfigError::DuplicateAgentName { name } => {
                 write!(f, "duplicate agent name: {name}")
+            }
+            ConfigError::InvalidAgentName { name } => {
+                write!(
+                    f,
+                    "invalid agent name '{name}'; {}",
+                    RunnerError::InvalidAgentName
+                )
             }
             ConfigError::DuplicateCredentialName { agent, name } => {
                 write!(

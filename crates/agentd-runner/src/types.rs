@@ -38,6 +38,12 @@ pub enum EnvironmentNameValidationError {
     Reserved,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentNameValidationError {
+    Invalid,
+    Reserved,
+}
+
 #[derive(Debug)]
 pub enum RunnerError {
     MissingMethodologyManifest {
@@ -73,7 +79,10 @@ impl fmt::Display for RunnerError {
                     path.display()
                 )
             }
-            RunnerError::InvalidAgentName => write!(f, "agent_name must not be empty"),
+            RunnerError::InvalidAgentName => write!(
+                f,
+                "agent_name must already be a unix username starting with a lowercase letter, containing only lowercase letters, digits, '_', or '-', be at most 32 characters, and not be one of the reserved system names root, nobody, daemon, bin, sys, man, or mail"
+            ),
             RunnerError::InvalidBaseImage => write!(f, "base_image must not be empty"),
             RunnerError::InvalidRepoUrl { message } => write!(f, "repo_url {message}"),
             RunnerError::InvalidAgentCommand => {

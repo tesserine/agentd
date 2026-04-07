@@ -629,9 +629,11 @@ fn run_git_in<const N: usize>(directory: &Path, args: [&str; N]) {
 }
 
 const CONTAINERFILE: &str = r#"
-FROM docker.io/library/alpine:3.20
+FROM docker.io/library/debian:bookworm-slim
 
-RUN apk add --no-cache git
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git gosu passwd \
+    && rm -rf /var/lib/apt/lists/*
 COPY runa /usr/local/bin/runa
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /usr/local/bin/runa /entrypoint.sh
@@ -783,9 +785,17 @@ EOF
         ;;
     run)
         [ -f /agentd/methodology/manifest.toml ]
-        [ -f README.md ]
         [ "${AGENT_NAME:-}" != "" ]
         [ "${GITHUB_TOKEN:-}" = "${GITHUB_TOKEN:-test-token}" ]
+        [ "$(id -u)" != "0" ]
+        [ "$(id -un)" = "${AGENT_NAME}" ]
+        [ "${HOME:-}" = "/home/${AGENT_NAME}" ]
+        [ "$(pwd)" = "/home/${AGENT_NAME}/repo" ]
+        [ -w "${HOME}" ]
+        [ -w "${HOME}/repo" ]
+        [ -f "${HOME}/repo/README.md" ]
+        [ -f "${HOME}/repo/.runa/config.toml" ]
+        [ ! -e "${HOME}/.runa/config.toml" ]
         grep -F 'command = ["codex", "exec"' .runa/config.toml >/dev/null
 
         if [ "${RUNA_TEST_BEHAVIOR:-success}" = "success" ]; then

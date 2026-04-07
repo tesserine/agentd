@@ -16,6 +16,26 @@ fn example_config() -> String {
         .expect("example config should be readable")
 }
 
+fn assert_invalid_agent_name_parse_error(name: &str) {
+    let error = Config::from_str(&format!(
+        r#"
+[[agents]]
+name = "{name}"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#
+    ))
+    .expect_err("invalid agent names should be rejected at parse time");
+
+    match error {
+        ConfigError::InvalidAgentName { name: invalid_name } => assert_eq!(invalid_name, name),
+        other => panic!("expected invalid agent name error, got {other}"),
+    }
+}
+
 fn write_temp_config(name: &str, contents: &str) -> PathBuf {
     let unique = format!(
         "agentd-config-test-{name}-{}-{}",
@@ -266,6 +286,26 @@ command = ["codex", "exec"]
             other => panic!("expected whitespace validation error, got {other}"),
         }
     }
+}
+
+#[test]
+fn rejects_uppercase_agent_names_at_parse_time() {
+    assert_invalid_agent_name_parse_error("Codex");
+}
+
+#[test]
+fn rejects_digit_prefixed_agent_names_at_parse_time() {
+    assert_invalid_agent_name_parse_error("123agent");
+}
+
+#[test]
+fn rejects_reserved_agent_names_at_parse_time() {
+    assert_invalid_agent_name_parse_error("root");
+}
+
+#[test]
+fn rejects_agent_names_longer_than_thirty_two_characters_at_parse_time() {
+    assert_invalid_agent_name_parse_error(&format!("a{}", "b".repeat(32)));
 }
 
 #[test]

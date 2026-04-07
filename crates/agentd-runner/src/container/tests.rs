@@ -141,7 +141,7 @@ fn build_container_script_terminates_git_clone_options_before_repo_url() {
         },
     );
 
-    assert!(script.contains("git clone --no-hardlinks -- '-repo.git' '/agentd/workspace/repo'"));
+    assert!(script.contains("git clone --no-hardlinks -- '-repo.git' '/home/agent/repo'"));
 }
 
 #[test]
@@ -162,6 +162,35 @@ fn build_container_script_disables_git_terminal_prompts() {
     );
 
     assert!(script.contains("GIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- "));
+}
+
+#[test]
+fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unprivileged_user() {
+    let script = build_container_script(
+        &crate::SessionSpec {
+            agent_name: "agent_name".to_string(),
+            base_image: "image".to_string(),
+            methodology_dir: PathBuf::from("/tmp/methodology"),
+            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            environment: Vec::new(),
+        },
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            work_unit: Some("task-42".to_string()),
+            timeout: None,
+        },
+    );
+
+    assert!(script.contains("useradd --create-home --home-dir '/home/agent_name' --shell /bin/sh --user-group 'agent_name'"));
+    assert!(script.contains(
+        "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/agent_name/repo'"
+    ));
+    assert!(script.contains("\ncd '/home/agent_name/repo'\n"));
+    assert!(script.contains("runa init --methodology '/agentd/methodology/manifest.toml'"));
+    assert!(script.contains("cat >> .runa/config.toml <<'EOF'"));
+    assert!(script.contains("\nchown -R 'agent_name:agent_name' '/home/agent_name'\n"));
+    assert!(script.contains("\nexport HOME='/home/agent_name'\n"));
+    assert!(script.contains("exec gosu 'agent_name:agent_name' runa run --work-unit 'task-42'"));
 }
 
 #[test]
@@ -452,11 +481,11 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let fixture = FakePodmanFixture::new();
     fixture.install(&FakePodmanScenario::new());
-    let agent_name = "a".repeat(190);
+    let agent_name = "agent_name";
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        agent_name: agent_name.clone(),
+        agent_name: agent_name.to_string(),
         base_image: "image".to_string(),
         methodology_dir,
         agent_command: vec!["codex".to_string(), "exec".to_string()],

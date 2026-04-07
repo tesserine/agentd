@@ -1,11 +1,15 @@
-use crate::types::{EnvironmentNameValidationError, RunnerError, SessionInvocation, SessionSpec};
+use crate::types::{
+    AgentNameValidationError, EnvironmentNameValidationError, RunnerError, SessionInvocation,
+    SessionSpec,
+};
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
+const RESERVED_AGENT_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
 
 pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
-    if spec.agent_name.trim().is_empty() {
+    if validate_agent_name(&spec.agent_name).is_err() {
         return Err(RunnerError::InvalidAgentName);
     }
     if spec.base_image.trim().is_empty() || spec.base_image != spec.base_image.trim() {
@@ -57,6 +61,17 @@ pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValida
     }
     if is_reserved_environment_name(name) {
         return Err(EnvironmentNameValidationError::Reserved);
+    }
+
+    Ok(())
+}
+
+pub fn validate_agent_name(name: &str) -> Result<(), AgentNameValidationError> {
+    if !is_valid_unix_username(name) {
+        return Err(AgentNameValidationError::Invalid);
+    }
+    if is_reserved_agent_name(name) {
+        return Err(AgentNameValidationError::Reserved);
     }
 
     Ok(())
@@ -119,6 +134,28 @@ fn credential_bearing_repo_url_error() -> RunnerError {
 
 fn is_reserved_environment_name(name: &str) -> bool {
     matches!(name, AGENT_NAME_ENV)
+}
+
+fn is_reserved_agent_name(name: &str) -> bool {
+    RESERVED_AGENT_NAMES.contains(&name)
+}
+
+fn is_valid_unix_username(name: &str) -> bool {
+    let mut characters = name.chars();
+    let Some(first_character) = characters.next() else {
+        return false;
+    };
+
+    if !first_character.is_ascii_lowercase() || name.len() > 32 {
+        return false;
+    }
+
+    characters.all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || character == '-'
+            || character == '_'
+    })
 }
 
 #[cfg(test)]
@@ -210,6 +247,111 @@ mod tests {
                 "expected InvalidBaseImage for {base_image:?}, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_spec_accepts_valid_unix_agent_names() {
+        for agent_name in [
+            "agent",
+            "agent-01",
+            "agent_01",
+            "agent-name_01",
+            &"a".repeat(32),
+        ] {
+            validate_spec(&SessionSpec {
+                agent_name: agent_name.to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            })
+            .unwrap_or_else(|error| panic!("expected {agent_name:?} to be accepted, got {error}"));
+        }
+    }
+
+    #[test]
+    fn validate_agent_name_accepts_valid_unix_agent_names() {
+        for agent_name in [
+            "agent",
+            "agent-01",
+            "agent_01",
+            "agent-name_01",
+            &"a".repeat(32),
+        ] {
+            validate_agent_name(agent_name).unwrap_or_else(|error| {
+                panic!("expected {agent_name:?} to be accepted, got {error:?}")
+            });
+        }
+    }
+
+    #[test]
+    fn validate_agent_name_rejects_invalid_unix_usernames() {
+        for agent_name in [
+            "",
+            "   ",
+            "Agent 01",
+            "123agent",
+            "---",
+            "_agent",
+            "agent__name!",
+            &format!("a{}", "b".repeat(32)),
+        ] {
+            let error = validate_agent_name(agent_name)
+                .expect_err("invalid unix usernames should be rejected");
+
+            assert_eq!(
+                error,
+                AgentNameValidationError::Invalid,
+                "expected Invalid for {agent_name:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_agent_name_rejects_reserved_names() {
+        for agent_name in ["root", "nobody", "daemon", "bin", "sys", "man", "mail"] {
+            let error =
+                validate_agent_name(agent_name).expect_err("reserved names should be rejected");
+
+            assert_eq!(
+                error,
+                AgentNameValidationError::Reserved,
+                "expected Reserved for {agent_name:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_spec_maps_invalid_or_reserved_agent_names_to_runner_error() {
+        for agent_name in ["123agent", "root"] {
+            let error = validate_spec(&SessionSpec {
+                agent_name: agent_name.to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            })
+            .expect_err("invalid sanitized agent names should be rejected");
+
+            assert!(
+                matches!(error, RunnerError::InvalidAgentName),
+                "expected InvalidAgentName for {agent_name:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_agent_name_error_mentions_format_and_reserved_names() {
+        let message = RunnerError::InvalidAgentName.to_string();
+
+        assert!(
+            message.contains("must already be a unix username"),
+            "expected unix username requirement in message, got {message}"
+        );
+        assert!(
+            message.contains("root"),
+            "expected reserved-name guidance in message, got {message}"
+        );
     }
 
     #[test]
@@ -346,6 +488,30 @@ mod tests {
                 .to_string()
                 .contains("credential-bearing URLs are not accepted until #32 lands"),
             "expected credential-bearing URL message, got {error}"
+        );
+    }
+
+    #[test]
+    fn run_session_rejects_reserved_agent_name_before_methodology_validation() {
+        let error = crate::run_session(
+            SessionSpec {
+                agent_name: "root".to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/does-not-exist"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            },
+            SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        )
+        .expect_err("reserved agent name should be rejected before setup");
+
+        assert!(
+            matches!(error, RunnerError::InvalidAgentName),
+            "expected InvalidAgentName, got {error:?}"
         );
     }
 }
