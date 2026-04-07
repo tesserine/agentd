@@ -258,24 +258,14 @@ pub enum ConfigError {
     /// The configuration defines zero agents. At least one must be declared.
     NoAgents,
     /// Two agents share the same name.
-    DuplicateAgentName {
-        name: String,
-    },
+    DuplicateAgentName { name: String },
     /// An agent name fails the runner's [`validate_agent_name`] rules.
-    InvalidAgentName {
-        name: String,
-    },
+    InvalidAgentName { name: String },
     /// Two credentials within the same agent share a name.
-    DuplicateCredentialName {
-        agent: String,
-        name: String,
-    },
+    DuplicateCredentialName { agent: String, name: String },
     /// A credential name fails [`validate_environment_name`] (contains `,`
     /// or `=`, or is the reserved `AGENT_NAME`).
-    InvalidCredentialName {
-        agent: String,
-        name: String,
-    },
+    InvalidCredentialName { agent: String, name: String },
     /// A required string field is empty or whitespace-only.
     EmptyField {
         field: &'static str,
@@ -291,9 +281,7 @@ pub enum ConfigError {
         credential: Option<String>,
     },
     /// The `runa.command` array is empty for an agent.
-    EmptyCommand {
-        agent: String,
-    },
+    EmptyCommand { agent: String },
 }
 
 impl fmt::Display for ConfigError {

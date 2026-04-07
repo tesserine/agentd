@@ -117,9 +117,7 @@ pub enum AgentNameValidationError {
 pub enum RunnerError {
     /// The methodology directory does not contain `manifest.toml`. Produced
     /// during resource allocation, after spec and invocation validation pass.
-    MissingMethodologyManifest {
-        path: PathBuf,
-    },
+    MissingMethodologyManifest { path: PathBuf },
     /// The agent name fails unix username rules or matches a reserved system
     /// name. Produced during spec validation.
     InvalidAgentName,
@@ -129,22 +127,16 @@ pub enum RunnerError {
     /// The repository URL is not a supported remote form (`https://`,
     /// `http://`, `git://`) or embeds credentials. Produced during
     /// invocation validation.
-    InvalidRepoUrl {
-        message: String,
-    },
+    InvalidRepoUrl { message: String },
     /// The agent command array is empty or contains an empty element.
     /// Produced during spec validation.
     InvalidAgentCommand,
     /// An environment variable name is empty or contains `,` or `=`.
     /// Produced during spec validation.
-    InvalidEnvironmentName {
-        name: String,
-    },
+    InvalidEnvironmentName { name: String },
     /// An environment variable name collides with a runner-managed name.
     /// Produced during spec validation.
-    ReservedEnvironmentName {
-        name: String,
-    },
+    ReservedEnvironmentName { name: String },
     /// Filesystem or process I/O failure.
     Io(std::io::Error),
     /// A podman CLI invocation returned a non-zero exit status. Captures the
