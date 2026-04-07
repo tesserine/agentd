@@ -84,12 +84,13 @@ The runner prepares the execution environment:
 1. Creates an ephemeral Podman container from the agent's configured base image. That image must provide a POSIX-compatible shell at `/bin/sh` because the runner's container entrypoint executes through that path.
 2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
-4. Mounts the configured methodology directory read-only and initializes runa from `manifest.toml` at the mount root.
-5. Clones the requested repository into an ephemeral workspace inside the container and writes the configured agent command into runa's project config. This clone step is a plain in-container `git clone`: the base image must provide `git` in `PATH`, it currently accepts only public `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and does not wire injected environment credentials into git. Base images that lack either `/bin/sh` or `git` (for example distroless images) are not supported. Authenticated private-repository clone support remains deferred to issue #32.
+4. Mounts the configured methodology directory read-only.
+5. Creates an unprivileged unix user derived from the agent name with home directory `/home/{username}`, clones the requested repository into `/home/{username}/repo`, and initializes runa from inside that repository so project state lives at `/home/{username}/repo/.runa/`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `useradd`, and `gosu` in `PATH`, it currently accepts only public `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and does not wire injected environment credentials into git. Base images that lack `/bin/sh`, `git`, `useradd`, or `gosu` are not supported. Authenticated private-repository clone support remains deferred to issue #32.
+6. Recursively transfers ownership of `/home/{username}` to that user, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready.
 
 ### Phase 3: Execution (`agentd-runner`)
 
-The runner launches `runa run` inside the prepared repository workspace and supervises the container until natural completion or an optional timeout. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
+The runner drops privileges with `gosu` and launches `runa run` as the unprivileged agent user from `/home/{username}/repo`, then supervises the container until natural completion or an optional timeout. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
 
 ### Phase 4: Teardown (`agentd-runner`)
 
@@ -103,12 +104,14 @@ agentd runs sessions in ephemeral Podman containers so agents remain separated f
 |---|---|---|
 | Read-only methodology directory | Expose the runa methodology manifest and protocol assets without allowing mutation | Context |
 | Credentials | Authenticate to external systems without baking secrets into images | Credentials |
-| Ephemeral cloned repository | Give the session a writable project workspace that starts clean each run | Mission, Tool Availability |
+| Home workspace at `/home/{username}` with repo at `/home/{username}/repo` | Give the session a writable standard Linux home and a clean project workspace that starts fresh each run | Mission, Tool Availability, Identity |
 
 From inside the environment, an agent should see:
 - identity-related environment variables
+- `$HOME` set to `/home/{username}`
 - a read-only methodology mount rooted at `manifest.toml`
-- a fresh writable repository checkout for the current session
+- a fresh writable repository checkout at `/home/{username}/repo`
+- runa project state at `/home/{username}/repo/.runa/`
 - the tools and runtime configuration needed for its assigned work
 
 ## 6. Credential Flow

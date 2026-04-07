@@ -1,3 +1,4 @@
+use crate::resources::sanitize_name;
 use crate::types::{EnvironmentNameValidationError, RunnerError, SessionInvocation, SessionSpec};
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
@@ -5,7 +6,7 @@ const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
 
 pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
-    if spec.agent_name.trim().is_empty() {
+    if !is_valid_unix_username(&sanitize_name(&spec.agent_name)) {
         return Err(RunnerError::InvalidAgentName);
     }
     if spec.base_image.trim().is_empty() || spec.base_image != spec.base_image.trim() {
@@ -121,6 +122,21 @@ fn is_reserved_environment_name(name: &str) -> bool {
     matches!(name, AGENT_NAME_ENV)
 }
 
+fn is_valid_unix_username(name: &str) -> bool {
+    let mut characters = name.chars();
+    let Some(first_character) = characters.next() else {
+        return false;
+    };
+
+    if !first_character.is_ascii_lowercase() || name.len() > 32 {
+        return false;
+    }
+
+    characters.all(|character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +224,45 @@ mod tests {
             assert!(
                 matches!(error, RunnerError::InvalidBaseImage),
                 "expected InvalidBaseImage for {base_image:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_spec_accepts_agent_names_that_sanitize_to_valid_unix_usernames() {
+        for agent_name in ["agent", "agent-01", "Agent 01", "agent_name"] {
+            validate_spec(&SessionSpec {
+                agent_name: agent_name.to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            })
+            .unwrap_or_else(|error| panic!("expected {agent_name:?} to be accepted, got {error}"));
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_agent_names_that_sanitize_to_invalid_unix_usernames() {
+        for agent_name in [
+            "",
+            "   ",
+            "123agent",
+            "---",
+            &format!("a{}", "b".repeat(32)),
+        ] {
+            let error = validate_spec(&SessionSpec {
+                agent_name: agent_name.to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            })
+            .expect_err("invalid sanitized agent names should be rejected");
+
+            assert!(
+                matches!(error, RunnerError::InvalidAgentName),
+                "expected InvalidAgentName for {agent_name:?}, got {error:?}"
             );
         }
     }

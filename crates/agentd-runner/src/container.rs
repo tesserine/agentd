@@ -1,4 +1,5 @@
 use crate::podman::{run_podman_command, run_podman_command_until};
+use crate::resources::sanitize_name;
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::runner_managed_environment;
@@ -10,9 +11,9 @@ use std::time::{Duration, Instant};
 
 const ATTACHED_STDERR_TAIL_LIMIT: usize = 64 * 1024;
 const ATTACHED_STDERR_TRUNCATION_NOTICE: &str = "[stderr truncated to last 65536 bytes]\n";
+const HOME_ROOT_DIR: &str = "/home";
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
-const REPO_DIR: &str = "/agentd/workspace/repo";
 
 pub(crate) fn create_container(
     resources: &SessionResources,
@@ -110,24 +111,37 @@ pub(crate) fn log_attached_start_kill_failure(stage: &str, error: &std::io::Erro
 }
 
 fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
-    let mut script = String::from(
-        "set -eu\n\
-         mkdir -p /agentd/workspace\n\
-         rm -rf /agentd/workspace/repo\n\
-         GIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- ",
-    );
+    let username = sanitize_name(&spec.agent_name);
+    let home_dir = format!("{HOME_ROOT_DIR}/{username}");
+    let repo_dir = format!("{home_dir}/repo");
+    let user_group = format!("{username}:{username}");
+    let mut script = String::from("set -eu\nuseradd --create-home --home-dir ");
+    script.push_str(&shell_quote(&home_dir));
+    script.push_str(" --shell /bin/sh --user-group ");
+    script.push_str(&shell_quote(&username));
+    script.push_str("\nrm -rf ");
+    script.push_str(&shell_quote(&repo_dir));
+    script.push_str("\nGIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- ");
     script.push_str(&shell_quote(&invocation.repo_url));
     script.push(' ');
-    script.push_str(&shell_quote(REPO_DIR));
+    script.push_str(&shell_quote(&repo_dir));
     script.push_str("\ncd ");
-    script.push_str(&shell_quote(REPO_DIR));
+    script.push_str(&shell_quote(&repo_dir));
     script.push_str("\nruna init --methodology ");
     script.push_str(&shell_quote(&format!(
         "{METHODOLOGY_MOUNT_PATH}/manifest.toml"
     )));
     script.push_str("\ncat >> .runa/config.toml <<'EOF'\n[agent]\ncommand = ");
     script.push_str(&toml_array(&spec.agent_command));
-    script.push_str("\nEOF\nexec runa run");
+    script.push_str("\nEOF\nchown -R ");
+    script.push_str(&shell_quote(&user_group));
+    script.push(' ');
+    script.push_str(&shell_quote(&home_dir));
+    script.push_str("\nexport HOME=");
+    script.push_str(&shell_quote(&home_dir));
+    script.push_str("\nexec gosu ");
+    script.push_str(&shell_quote(&user_group));
+    script.push_str(" runa run");
 
     if let Some(work_unit) = &invocation.work_unit {
         script.push(' ');

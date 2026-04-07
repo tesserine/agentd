@@ -73,7 +73,10 @@ impl fmt::Display for RunnerError {
                     path.display()
                 )
             }
-            RunnerError::InvalidAgentName => write!(f, "agent_name must not be empty"),
+            RunnerError::InvalidAgentName => write!(
+                f,
+                "agent_name must sanitize to a unix username starting with a lowercase letter, containing only lowercase letters, digits, or '-', and be at most 32 characters"
+            ),
             RunnerError::InvalidBaseImage => write!(f, "base_image must not be empty"),
             RunnerError::InvalidRepoUrl { message } => write!(f, "repo_url {message}"),
             RunnerError::InvalidAgentCommand => {
