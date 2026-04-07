@@ -60,6 +60,10 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
         return Err(unsupported_repo_url_error());
     }
 
+    if invocation.repo_token.is_some() && !repo_url.starts_with("https://") {
+        return Err(repo_token_requires_https_error());
+    }
+
     Ok(())
 }
 
@@ -154,6 +158,12 @@ fn unsupported_repo_url_error() -> RunnerError {
 fn credential_bearing_repo_url_error() -> RunnerError {
     RunnerError::InvalidRepoUrl {
         message: "must not embed credentials in the URL; credential-bearing URLs are not accepted until #32 lands".to_string(),
+    }
+}
+
+fn repo_token_requires_https_error() -> RunnerError {
+    RunnerError::InvalidRepoUrl {
+        message: "must use https:// when repo_token is set".to_string(),
     }
 }
 
@@ -384,6 +394,49 @@ mod tests {
     }
 
     #[test]
+    fn validate_invocation_accepts_repo_token_for_https_repo_urls() {
+        for repo_url in [
+            "https://example.com/private-agentd.git",
+            "https://example.com/private-agentd.git/",
+        ] {
+            validate_invocation(&SessionInvocation {
+                repo_url: repo_url.to_string(),
+                repo_token: Some("repo-token".to_string()),
+                work_unit: None,
+                timeout: None,
+            })
+            .unwrap_or_else(|error| panic!("expected {repo_url} to be accepted, got {error}"));
+        }
+    }
+
+    #[test]
+    fn validate_invocation_rejects_repo_token_for_non_https_repo_urls() {
+        for repo_url in [
+            "http://example.com/private-agentd.git",
+            "git://example.com/private-agentd.git",
+        ] {
+            let error = validate_invocation(&SessionInvocation {
+                repo_url: repo_url.to_string(),
+                repo_token: Some("repo-token".to_string()),
+                work_unit: None,
+                timeout: None,
+            })
+            .expect_err("repo_token should be rejected for non-https repo URLs");
+
+            assert!(
+                matches!(error, RunnerError::InvalidRepoUrl { .. }),
+                "expected InvalidRepoUrl for {repo_url}, got {error:?}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must use https:// when repo_token is set"),
+                "expected repo_token https-only message for {repo_url}, got {error}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_invocation_rejects_non_remote_repo_urls() {
         for repo_url in [
             "",
@@ -497,6 +550,39 @@ mod tests {
                 .contains("credential-bearing URLs are not accepted until #32 lands"),
             "expected credential-bearing URL message, got {error}"
         );
+    }
+
+    #[test]
+    fn run_session_rejects_non_https_repo_token_before_methodology_validation() {
+        for repo_url in [
+            "http://example.com/private-agentd.git",
+            "git://example.com/private-agentd.git",
+        ] {
+            let error = crate::run_session(
+                SessionSpec {
+                    methodology_dir: PathBuf::from("/tmp/does-not-exist"),
+                    ..test_session_spec()
+                },
+                SessionInvocation {
+                    repo_url: repo_url.to_string(),
+                    repo_token: Some("repo-token".to_string()),
+                    work_unit: None,
+                    timeout: None,
+                },
+            )
+            .expect_err("non-https repo token should be rejected before setup");
+
+            assert!(
+                matches!(error, RunnerError::InvalidRepoUrl { .. }),
+                "expected InvalidRepoUrl for {repo_url}, got {error:?}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must use https:// when repo_token is set"),
+                "expected repo_token https-only message for {repo_url}, got {error}"
+            );
+        }
     }
 
     #[test]

@@ -60,10 +60,12 @@ pub struct ResolvedEnvironmentVariable {
 pub struct SessionInvocation {
     /// Remote repository URL cloned into the container workspace. Must use
     /// `https://`, `http://`, or `git://` scheme. Credential-bearing URLs
-    /// are rejected.
+    /// are rejected. When [`Self::repo_token`] is present, this must use
+    /// `https://`.
     pub repo_url: String,
     /// Optional bearer token used only for the runner-managed `git clone`
-    /// request. This token is not passed through to the agent runtime.
+    /// request for `https://` repository URLs. This token is not passed
+    /// through to the agent runtime.
     pub repo_token: Option<String>,
     /// Optional work unit identifier passed as `--work-unit` to `runa run`.
     pub work_unit: Option<String>,
@@ -128,8 +130,9 @@ pub enum RunnerError {
     /// during spec validation.
     InvalidBaseImage,
     /// The repository URL is not a supported remote form (`https://`,
-    /// `http://`, `git://`) or embeds credentials. Produced during
-    /// invocation validation.
+    /// `http://`, `git://`), embeds credentials, or is paired with
+    /// `repo_token` without using `https://`. Produced during invocation
+    /// validation.
     InvalidRepoUrl { message: String },
     /// The agent command array is empty or contains an empty element.
     /// Produced during spec validation.
