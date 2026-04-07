@@ -1,5 +1,4 @@
 use crate::podman::{run_podman_command, run_podman_command_until};
-use crate::resources::sanitize_name;
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::runner_managed_environment;
@@ -111,14 +110,14 @@ pub(crate) fn log_attached_start_kill_failure(stage: &str, error: &std::io::Erro
 }
 
 fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
-    let username = sanitize_name(&spec.agent_name);
+    let username = &spec.agent_name;
     let home_dir = format!("{HOME_ROOT_DIR}/{username}");
     let repo_dir = format!("{home_dir}/repo");
     let user_group = format!("{username}:{username}");
     let mut script = String::from("set -eu\nuseradd --create-home --home-dir ");
     script.push_str(&shell_quote(&home_dir));
     script.push_str(" --shell /bin/sh --user-group ");
-    script.push_str(&shell_quote(&username));
+    script.push_str(&shell_quote(username));
     script.push_str("\nrm -rf ");
     script.push_str(&shell_quote(&repo_dir));
     script.push_str("\nGIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- ");

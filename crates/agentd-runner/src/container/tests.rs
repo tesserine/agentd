@@ -168,7 +168,7 @@ fn build_container_script_disables_git_terminal_prompts() {
 fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unprivileged_user() {
     let script = build_container_script(
         &crate::SessionSpec {
-            agent_name: "Agent Name".to_string(),
+            agent_name: "agent-name".to_string(),
             base_image: "image".to_string(),
             methodology_dir: PathBuf::from("/tmp/methodology"),
             agent_command: vec!["codex".to_string(), "exec".to_string()],
