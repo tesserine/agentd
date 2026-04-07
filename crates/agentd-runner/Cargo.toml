@@ -6,3 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+getrandom = "0.4.2"
+
+[dev-dependencies]
+toml = "0.8"
