@@ -1,4 +1,5 @@
 use super::*;
+use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure_to};
 use crate::resources::SessionResources;
 use crate::test_support::{
     CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario, InspectBehavior,
@@ -433,9 +434,9 @@ fn attached_start_stderr_retains_only_bounded_tail() {
 fn logs_cleanup_failures_with_cleanup_prefix() {
     let mut output = Vec::new();
 
-    log_container_lifecycle_failure_to(
+    log_lifecycle_failure_to(
         &mut output,
-        ContainerLifecycleFailureKind::Cleanup,
+        LifecycleFailureKind::Cleanup,
         "session execution",
         &RunnerError::InvalidBaseImage,
     )
@@ -451,9 +452,9 @@ fn logs_cleanup_failures_with_cleanup_prefix() {
 fn logs_attached_start_finalization_failures_with_finalization_prefix() {
     let mut output = Vec::new();
 
-    log_container_lifecycle_failure_to(
+    log_lifecycle_failure_to(
         &mut output,
-        ContainerLifecycleFailureKind::AttachedStartFinalization,
+        LifecycleFailureKind::AttachedStartFinalization,
         "session execution",
         &RunnerError::InvalidAgentCommand,
     )
@@ -470,9 +471,9 @@ fn logs_attached_start_kill_failures_with_kill_prefix() {
     let mut output = Vec::new();
     let error = std::io::Error::other("kill failed");
 
-    log_container_lifecycle_failure_to(
+    log_lifecycle_failure_to(
         &mut output,
-        ContainerLifecycleFailureKind::AttachedStartKill,
+        LifecycleFailureKind::AttachedStartKill,
         "session execution",
         &error,
     )

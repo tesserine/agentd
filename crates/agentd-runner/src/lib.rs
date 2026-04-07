@@ -12,6 +12,7 @@
 //! treatment of these phases.
 
 mod container;
+mod lifecycle;
 mod podman;
 mod resources;
 mod types;
@@ -26,10 +27,8 @@ pub use types::{
 };
 pub use validation::{validate_agent_name, validate_environment_name};
 
-use container::{
-    ContainerLifecycleFailureKind, create_container, log_container_lifecycle_failure,
-    run_container_to_completion, run_container_with_timeout,
-};
+use container::{create_container, run_container_to_completion, run_container_with_timeout};
+use lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use resources::{
     SessionResources, cleanup_methodology_staging_dir, cleanup_podman_secrets,
     prepare_session_resources, unique_suffix,
@@ -61,8 +60,8 @@ pub fn run_session(
 
     if let Err(error) = create_container(&resources, &spec, &invocation) {
         if let Err(cleanup_error) = cleanup_session_resources(&resources) {
-            log_container_lifecycle_failure(
-                ContainerLifecycleFailureKind::Cleanup,
+            log_lifecycle_failure(
+                LifecycleFailureKind::Cleanup,
                 "container creation",
                 &cleanup_error,
             );
@@ -85,8 +84,8 @@ pub fn run_session(
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Err(error), Err(cleanup_error)) => {
-            log_container_lifecycle_failure(
-                ContainerLifecycleFailureKind::Cleanup,
+            log_lifecycle_failure(
+                LifecycleFailureKind::Cleanup,
                 "session execution",
                 &cleanup_error,
             );
