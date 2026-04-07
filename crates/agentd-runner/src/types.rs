@@ -75,7 +75,7 @@ impl fmt::Display for RunnerError {
             }
             RunnerError::InvalidAgentName => write!(
                 f,
-                "agent_name must already be a unix username starting with a lowercase letter, containing only lowercase letters, digits, or '-', be at most 32 characters, and not be one of the reserved system names root, nobody, daemon, bin, sys, man, or mail"
+                "agent_name must already be a unix username starting with a lowercase letter, containing only lowercase letters, digits, '_', or '-', be at most 32 characters, and not be one of the reserved system names root, nobody, daemon, bin, sys, man, or mail"
             ),
             RunnerError::InvalidBaseImage => write!(f, "base_image must not be empty"),
             RunnerError::InvalidRepoUrl { message } => write!(f, "repo_url {message}"),

@@ -20,7 +20,7 @@ use container::{
 };
 use resources::{
     SessionResources, cleanup_methodology_staging_dir, cleanup_podman_secrets,
-    prepare_session_resources, sanitize_name, unique_suffix,
+    prepare_session_resources, unique_suffix,
 };
 use validation::{validate_invocation, validate_spec};
 
@@ -32,7 +32,7 @@ pub fn run_session(
     validate_invocation(&invocation)?;
     let session_id = unique_suffix()?;
 
-    let container_name = format!("agentd-{}-{}", sanitize_name(&spec.agent_name), session_id);
+    let container_name = format!("agentd-{}-{}", spec.agent_name, session_id);
     let resources = prepare_session_resources(&container_name, &spec, &session_id)?;
 
     if let Err(error) = create_container(&resources, &spec, &invocation) {

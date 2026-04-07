@@ -22,24 +22,6 @@ pub(crate) struct SessionResources {
     pub(crate) secret_bindings: Vec<SecretBinding>,
 }
 
-pub(crate) fn sanitize_name(value: &str) -> String {
-    let mut result = String::new();
-    let mut last_was_dash = false;
-
-    for character in value.chars() {
-        let normalized = character.to_ascii_lowercase();
-        if normalized.is_ascii_alphanumeric() {
-            result.push(normalized);
-            last_was_dash = false;
-        } else if !last_was_dash {
-            result.push('-');
-            last_was_dash = true;
-        }
-    }
-
-    result.trim_matches('-').to_string()
-}
-
 pub(crate) fn unique_suffix() -> Result<String, RunnerError> {
     unique_suffix_with(|bytes| fill_random_bytes(bytes).map_err(std::io::Error::other))
 }

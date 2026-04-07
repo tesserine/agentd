@@ -137,7 +137,10 @@ fn is_valid_unix_username(name: &str) -> bool {
     }
 
     characters.all(|character| {
-        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || character == '-'
+            || character == '_'
     })
 }
 
@@ -234,7 +237,13 @@ mod tests {
 
     #[test]
     fn validate_spec_accepts_valid_unix_agent_names() {
-        for agent_name in ["agent", "agent-01", &"a".repeat(32)] {
+        for agent_name in [
+            "agent",
+            "agent-01",
+            "agent_01",
+            "agent-name_01",
+            &"a".repeat(32),
+        ] {
             validate_spec(&SessionSpec {
                 agent_name: agent_name.to_string(),
                 base_image: "image".to_string(),
@@ -252,9 +261,10 @@ mod tests {
             "",
             "   ",
             "Agent 01",
-            "agent_name",
             "123agent",
             "---",
+            "_agent",
+            "agent__name!",
             "root",
             "nobody",
             "daemon",
