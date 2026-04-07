@@ -1,3 +1,13 @@
+//! Container creation, execution, and exit classification.
+//!
+//! Manages the podman container lifecycle: building the entrypoint script,
+//! assembling `podman create` arguments, running the container in attached
+//! mode, and classifying the exit result. The container runs as root (UID 0)
+//! for privileged setup, then drops to an unprivileged agent user via `gosu`
+//! before executing the agent command. Exit code 125 from `podman start
+//! --attach` is ambiguous (podman infrastructure error vs. container process)
+//! and requires container state inspection to disambiguate.
+
 use crate::podman::{run_podman_command, run_podman_command_until};
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
@@ -109,6 +119,14 @@ pub(crate) fn log_attached_start_kill_failure(stage: &str, error: &std::io::Erro
     let _ = log_attached_start_kill_failure_to(&mut stderr, stage, error);
 }
 
+// Generates the shell script passed as the container entrypoint via
+// `/bin/sh -lc`. The script runs as root (UID 0) to perform privileged setup:
+// creating the agent's unix user, cloning the repository, initializing runa
+// with the methodology manifest, writing the agent command to runa config, and
+// transferring home directory ownership. It then drops privileges permanently
+// via `gosu` and `exec`s `runa run` as the unprivileged agent user. `set -eu`
+// at the top ensures any setup failure aborts immediately rather than
+// continuing with a broken workspace.
 fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
     let username = &spec.agent_name;
     let home_dir = format!("{HOME_ROOT_DIR}/{username}");
@@ -265,6 +283,12 @@ where
     writeln!(writer, "attached start kill after {stage} failed: {error}")
 }
 
+// Polls the attached `podman start` child process for exit, optionally
+// enforcing a timeout deadline. While waiting, inspects the container status
+// to detect the "running" state. Once running is confirmed, releases the
+// backing podman secrets so credential material is removed from the host
+// secret store while the container continues using its in-memory environment
+// copy. Returns `Some(ExitStatus)` on natural completion or `None` on timeout.
 fn wait_for_container_exit(
     child: &mut Child,
     container_name: &str,
@@ -341,6 +365,12 @@ fn start_attached_container(container_name: &str) -> Result<AttachedPodmanStart,
     })
 }
 
+// Interprets the exit status of `podman start --attach`. Exit code 125 is
+// ambiguous: podman uses it for infrastructure errors, but the container
+// process itself may have exited 125. When exit code 125 is observed, inspects
+// the container's terminal state via `podman inspect`. If the container reached
+// a terminal state (exited/stopped), uses the container's own exit code as the
+// session outcome. Otherwise surfaces a `PodmanCommandFailed` error.
 fn classify_attached_start_result(
     args: Vec<String>,
     container_name: &str,
@@ -498,6 +528,10 @@ where
     Ok(collected.into_string())
 }
 
+// Ring buffer that retains only the last `limit` bytes of stderr output.
+// Attached container runs can produce unbounded stderr; this caps memory usage
+// while preserving the most recent (and most diagnostic) output for inclusion
+// in error messages.
 struct StderrTailBuffer {
     bytes: VecDeque<u8>,
     limit: usize,

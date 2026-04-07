@@ -1,3 +1,10 @@
+//! Thin command layer over the podman CLI.
+//!
+//! All podman interaction in the runner flows through this module, providing a
+//! single point of control for process spawning, stdin piping, deadline
+//! enforcement, and exit-status interpretation. Tests substitute a fake podman
+//! script via `PATH` manipulation rather than mocking this layer.
+
 use crate::types::RunnerError;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Output, Stdio};
@@ -130,6 +137,10 @@ fn read_podman_output_after_exit(
     })
 }
 
+/// Kills a child process and waits for it to be reaped.
+///
+/// Swallows `InvalidInput` from `kill()` because it means the process already
+/// exited between the `try_wait` check and the kill attempt — a benign race.
 pub(crate) fn terminate_child(child: &mut Child) -> Result<(), RunnerError> {
     if child.try_wait()?.is_some() {
         return Ok(());

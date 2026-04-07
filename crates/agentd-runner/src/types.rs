@@ -1,67 +1,154 @@
+//! Public data types for the session lifecycle.
+//!
+//! Defines the inputs ([`SessionSpec`], [`SessionInvocation`]), outputs
+//! ([`SessionOutcome`]), and error types ([`RunnerError`]) that
+//! [`run_session`](crate::run_session) operates on. Validation error types
+//! for the standalone validators are also defined here.
+
 use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 
+/// Static configuration for an agent session.
+///
+/// Describes the agent's identity, container image, methodology, command, and
+/// caller-resolved environment variables. Validated by
+/// [`run_session`](crate::run_session) before any resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSpec {
+    /// Agent identity string. Doubles as the in-container unix username, a
+    /// component of the container name, and the value of the `AGENT_NAME`
+    /// environment variable. Must pass
+    /// [`validate_agent_name`](crate::validate_agent_name).
     pub agent_name: String,
+    /// Container image reference. The image must provide `/bin/sh`, `git`,
+    /// `useradd`, and `gosu` in `PATH`.
     pub base_image: String,
+    /// Host-side path to the methodology directory. Mounted read-only into
+    /// the container at `/agentd/methodology`. Must contain `manifest.toml`.
     pub methodology_dir: PathBuf,
+    /// Command array written into `.runa/config.toml` as the
+    /// `[agent] command` value. Not a shell command — each element becomes a
+    /// TOML string in the array.
     pub agent_command: Vec<String>,
+    /// Caller-resolved environment variables injected into the container.
+    /// Non-empty values are passed via ephemeral podman secrets; empty values
+    /// are passed as direct `--env` assignments.
     pub environment: Vec<ResolvedEnvironmentVariable>,
 }
 
+/// A name-value pair representing an environment variable whose value has
+/// already been resolved by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedEnvironmentVariable {
+    /// Variable name. Must not be empty, contain `,` or `=`, or collide with
+    /// runner-managed names (currently `AGENT_NAME`).
     pub name: String,
+    /// Variable value. Empty values are legal and are injected as direct
+    /// `--env NAME=` assignments rather than podman secrets, which reject
+    /// zero-byte payloads.
     pub value: String,
 }
 
+/// Per-invocation parameters for a session launch.
+///
+/// Describes the repository to clone, an optional work unit, and an optional
+/// timeout. Validated by [`run_session`](crate::run_session) before any
+/// resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInvocation {
+    /// Remote repository URL cloned into the container workspace. Must use
+    /// `https://`, `http://`, or `git://` scheme. Credential-bearing URLs
+    /// are rejected.
     pub repo_url: String,
+    /// Optional work unit identifier passed as `--work-unit` to `runa run`.
     pub work_unit: Option<String>,
+    /// Optional session timeout. When set, the runner force-removes the
+    /// container after this duration and returns
+    /// [`SessionOutcome::TimedOut`].
     pub timeout: Option<Duration>,
 }
 
+/// Terminal outcome of a completed session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionOutcome {
+    /// The container process exited with code 0.
     Succeeded,
+    /// The container process exited with a non-zero code.
     Failed { exit_code: i32 },
+    /// The session exceeded its timeout and was force-removed.
     TimedOut,
 }
 
+/// Error returned by
+/// [`validate_environment_name`](crate::validate_environment_name) when a
+/// name violates naming rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvironmentNameValidationError {
+    /// The name is empty or contains `,` or `=`.
     Invalid,
+    /// The name collides with a runner-managed environment variable.
     Reserved,
 }
 
+/// Error returned by [`validate_agent_name`](crate::validate_agent_name)
+/// when a name violates naming rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentNameValidationError {
+    /// The name is not a valid unix username: must start with a lowercase
+    /// letter, contain only lowercase letters, digits, `_`, or `-`, and be
+    /// at most 32 characters.
     Invalid,
+    /// The name matches a reserved system username (`root`, `nobody`,
+    /// `daemon`, `bin`, `sys`, `man`, `mail`).
     Reserved,
 }
 
+/// Errors produced during session execution.
+///
+/// Validation errors ([`InvalidAgentName`](Self::InvalidAgentName),
+/// [`InvalidBaseImage`](Self::InvalidBaseImage), etc.) are returned before
+/// any resources are allocated. Resource and execution errors
+/// ([`MissingMethodologyManifest`](Self::MissingMethodologyManifest),
+/// [`Io`](Self::Io), [`PodmanCommandFailed`](Self::PodmanCommandFailed))
+/// occur after resource allocation has begun.
 #[derive(Debug)]
 pub enum RunnerError {
+    /// The methodology directory does not contain `manifest.toml`. Produced
+    /// during resource allocation, after spec and invocation validation pass.
     MissingMethodologyManifest {
         path: PathBuf,
     },
+    /// The agent name fails unix username rules or matches a reserved system
+    /// name. Produced during spec validation.
     InvalidAgentName,
+    /// The base image string is empty or has surrounding whitespace. Produced
+    /// during spec validation.
     InvalidBaseImage,
+    /// The repository URL is not a supported remote form (`https://`,
+    /// `http://`, `git://`) or embeds credentials. Produced during
+    /// invocation validation.
     InvalidRepoUrl {
         message: String,
     },
+    /// The agent command array is empty or contains an empty element.
+    /// Produced during spec validation.
     InvalidAgentCommand,
+    /// An environment variable name is empty or contains `,` or `=`.
+    /// Produced during spec validation.
     InvalidEnvironmentName {
         name: String,
     },
+    /// An environment variable name collides with a runner-managed name.
+    /// Produced during spec validation.
     ReservedEnvironmentName {
         name: String,
     },
+    /// Filesystem or process I/O failure.
     Io(std::io::Error),
+    /// A podman CLI invocation returned a non-zero exit status. Captures the
+    /// argument list, exit status, and stderr for diagnostics.
     PodmanCommandFailed {
         args: Vec<String>,
         status: ExitStatus,

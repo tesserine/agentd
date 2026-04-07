@@ -1,3 +1,10 @@
+//! Session resource allocation and cleanup.
+//!
+//! Resources (methodology staging directory, podman secrets) are allocated as
+//! a unit by [`prepare_session_resources`] and cleaned up as a unit after the
+//! session completes. Partial-failure cleanup during allocation ensures no
+//! leaked secrets or stale directories when resource creation fails midway.
+
 use crate::podman::run_podman_command_with_input;
 use crate::types::{ResolvedEnvironmentVariable, RunnerError, SessionSpec};
 use getrandom::fill as fill_random_bytes;
@@ -94,6 +101,10 @@ pub(crate) fn cleanup_methodology_staging_dir(path: &Path) -> Result<(), RunnerE
     }
 }
 
+// Creates a staging directory containing a symlink to the canonical methodology
+// path. The symlink indirection ensures the podman bind-mount source is always
+// an absolute, canonical path free of characters that break mount syntax, even
+// when the original methodology_dir is relative or contains problematic chars.
 fn create_methodology_staging_dir(
     methodology_dir: &Path,
     session_id: &str,
@@ -111,6 +122,11 @@ fn create_methodology_staging_dir(
     Ok(staging_dir)
 }
 
+// Returns a base directory for session staging that is safe for podman
+// bind-mount syntax. On systems where `std::env::temp_dir()` returns a path
+// containing commas (e.g., certain Nix or sandbox environments), the comma
+// breaks podman's comma-delimited mount option parsing. Falls back to `/tmp`
+// on unix in that case.
 fn safe_staging_root() -> PathBuf {
     let temp_dir = std::env::temp_dir();
     if !path_requires_mount_staging_alias(&temp_dir) {
@@ -158,6 +174,9 @@ fn create_directory_symlink(source: &Path, destination: &Path) -> Result<(), Run
     std::os::windows::fs::symlink_dir(source, destination).map_err(RunnerError::Io)
 }
 
+// Generates a 32-character hex string from 16 bytes of cryptographic randomness.
+// Used to create unique container names and secret names that are unpredictable
+// across sessions, preventing name collisions and name-guessing attacks.
 fn unique_suffix_with<F>(fill_random: F) -> Result<String, RunnerError>
 where
     F: FnOnce(&mut [u8]) -> std::io::Result<()>,
