@@ -78,7 +78,6 @@ fn is_supported_repo_url(repo_url: &str) -> bool {
                 && !authority.starts_with('/')
                 && path.starts_with('/')
                 && path.len() > 1
-                && !path.ends_with('/')
                 && SUPPORTED_REPO_URL_PREFIXES
                     .iter()
                     .any(|prefix| repo_url.starts_with(prefix))
@@ -217,8 +216,11 @@ mod tests {
     fn validate_invocation_accepts_supported_remote_repo_urls() {
         for repo_url in [
             "https://example.com/agentd.git",
+            "https://example.com/agentd.git/",
             "http://example.com/agentd.git",
+            "http://example.com/agentd.git/",
             "git://example.com/agentd.git",
+            "git://example.com/agentd.git/",
         ] {
             validate_invocation(&SessionInvocation {
                 repo_url: repo_url.to_string(),
@@ -240,6 +242,8 @@ mod tests {
             "../repo.git",
             "/srv/test-repo.git",
             "file:///srv/test-repo.git",
+            "ftp://example.com/agentd.git",
+            "gopher://example.com/agentd.git",
             "ssh://git@example.com/agentd.git",
             "git@example.com:agentd.git",
             "https://user:token@example.com/repo.git",
