@@ -185,20 +185,17 @@ fn is_valid_unix_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ResolvedEnvironmentVariable;
+    use crate::{test_support::test_session_spec, ResolvedEnvironmentVariable};
     use std::path::PathBuf;
 
     #[test]
     fn validate_spec_rejects_reserved_environment_names() {
         let error = validate_spec(&SessionSpec {
-            agent_name: "agent".to_string(),
-            base_image: "image".to_string(),
-            methodology_dir: PathBuf::from("/tmp/methodology"),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "AGENT_NAME".to_string(),
                 value: "spoofed".to_string(),
             }],
+            ..test_session_spec()
         })
         .expect_err("reserved runner environment names should be rejected");
 
@@ -213,14 +210,11 @@ mod tests {
     #[test]
     fn validate_spec_rejects_environment_names_containing_commas() {
         let error = validate_spec(&SessionSpec {
-            agent_name: "agent".to_string(),
-            base_image: "image".to_string(),
-            methodology_dir: PathBuf::from("/tmp/methodology"),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "TOKEN,EXTRA".to_string(),
                 value: "secret".to_string(),
             }],
+            ..test_session_spec()
         })
         .expect_err("comma-delimited environment names should be rejected");
 
@@ -235,14 +229,11 @@ mod tests {
     #[test]
     fn validate_spec_rejects_environment_names_containing_equals_signs() {
         let error = validate_spec(&SessionSpec {
-            agent_name: "agent".to_string(),
-            base_image: "image".to_string(),
-            methodology_dir: PathBuf::from("/tmp/methodology"),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "TOKEN=EXTRA".to_string(),
                 value: "secret".to_string(),
             }],
+            ..test_session_spec()
         })
         .expect_err("environment names containing '=' should be rejected");
 
@@ -258,11 +249,8 @@ mod tests {
     fn validate_spec_rejects_base_image_with_surrounding_whitespace() {
         for base_image in [" image", "image ", " image "] {
             let error = validate_spec(&SessionSpec {
-                agent_name: "agent".to_string(),
                 base_image: base_image.to_string(),
-                methodology_dir: PathBuf::from("/tmp/methodology"),
-                agent_command: vec!["codex".to_string(), "exec".to_string()],
-                environment: Vec::new(),
+                ..test_session_spec()
             })
             .expect_err("base_image values with surrounding whitespace should be rejected");
 
@@ -284,10 +272,7 @@ mod tests {
         ] {
             validate_spec(&SessionSpec {
                 agent_name: agent_name.to_string(),
-                base_image: "image".to_string(),
-                methodology_dir: PathBuf::from("/tmp/methodology"),
-                agent_command: vec!["codex".to_string(), "exec".to_string()],
-                environment: Vec::new(),
+                ..test_session_spec()
             })
             .unwrap_or_else(|error| panic!("expected {agent_name:?} to be accepted, got {error}"));
         }
@@ -350,10 +335,7 @@ mod tests {
         for agent_name in ["123agent", "root"] {
             let error = validate_spec(&SessionSpec {
                 agent_name: agent_name.to_string(),
-                base_image: "image".to_string(),
-                methodology_dir: PathBuf::from("/tmp/methodology"),
-                agent_command: vec!["codex".to_string(), "exec".to_string()],
-                environment: Vec::new(),
+                ..test_session_spec()
             })
             .expect_err("invalid sanitized agent names should be rejected");
 
@@ -465,11 +447,8 @@ mod tests {
     fn run_session_rejects_invalid_repo_url_before_methodology_validation() {
         let error = crate::run_session(
             SessionSpec {
-                agent_name: "agent".to_string(),
-                base_image: "image".to_string(),
                 methodology_dir: PathBuf::from("/tmp/does-not-exist"),
-                agent_command: vec!["codex".to_string(), "exec".to_string()],
-                environment: Vec::new(),
+                ..test_session_spec()
             },
             SessionInvocation {
                 repo_url: "/srv/test-repo.git".to_string(),
@@ -489,11 +468,8 @@ mod tests {
     fn run_session_rejects_credential_bearing_repo_url_before_methodology_validation() {
         let error = crate::run_session(
             SessionSpec {
-                agent_name: "agent".to_string(),
-                base_image: "image".to_string(),
                 methodology_dir: PathBuf::from("/tmp/does-not-exist"),
-                agent_command: vec!["codex".to_string(), "exec".to_string()],
-                environment: Vec::new(),
+                ..test_session_spec()
             },
             SessionInvocation {
                 repo_url: "https://user:token@example.com/repo.git".to_string(),
@@ -520,10 +496,8 @@ mod tests {
         let error = crate::run_session(
             SessionSpec {
                 agent_name: "root".to_string(),
-                base_image: "image".to_string(),
                 methodology_dir: PathBuf::from("/tmp/does-not-exist"),
-                agent_command: vec!["codex".to_string(), "exec".to_string()],
-                environment: Vec::new(),
+                ..test_session_spec()
             },
             SessionInvocation {
                 repo_url: "https://example.com/agentd.git".to_string(),
