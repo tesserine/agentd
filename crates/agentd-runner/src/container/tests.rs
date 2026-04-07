@@ -360,6 +360,61 @@ fn attached_start_stderr_retains_only_bounded_tail() {
 }
 
 #[test]
+fn logs_cleanup_failures_with_cleanup_prefix() {
+    let mut output = Vec::new();
+
+    log_container_lifecycle_failure_to(
+        &mut output,
+        ContainerLifecycleFailureKind::Cleanup,
+        "session execution",
+        &RunnerError::InvalidBaseImage,
+    )
+    .expect("logging to an in-memory buffer should succeed");
+
+    assert_eq!(
+        String::from_utf8(output).expect("log output should be valid UTF-8"),
+        "cleanup after session execution failed: base_image must not be empty\n"
+    );
+}
+
+#[test]
+fn logs_attached_start_finalization_failures_with_finalization_prefix() {
+    let mut output = Vec::new();
+
+    log_container_lifecycle_failure_to(
+        &mut output,
+        ContainerLifecycleFailureKind::AttachedStartFinalization,
+        "session execution",
+        &RunnerError::InvalidAgentCommand,
+    )
+    .expect("logging to an in-memory buffer should succeed");
+
+    assert_eq!(
+        String::from_utf8(output).expect("log output should be valid UTF-8"),
+        "attached start finalization after session execution failed: agent_command must contain at least one argument\n"
+    );
+}
+
+#[test]
+fn logs_attached_start_kill_failures_with_kill_prefix() {
+    let mut output = Vec::new();
+    let error = std::io::Error::other("kill failed");
+
+    log_container_lifecycle_failure_to(
+        &mut output,
+        ContainerLifecycleFailureKind::AttachedStartKill,
+        "session execution",
+        &error,
+    )
+    .expect("logging to an in-memory buffer should succeed");
+
+    assert_eq!(
+        String::from_utf8(output).expect("log output should be valid UTF-8"),
+        "attached start kill after session execution failed: kill failed\n"
+    );
+}
+
+#[test]
 fn fake_podman_scenario_records_create_arguments_for_a_successful_session() {
     let _guard = fake_podman_lock()
         .lock()

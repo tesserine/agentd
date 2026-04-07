@@ -13,6 +13,7 @@ use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::runner_managed_environment;
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -77,12 +78,24 @@ pub(crate) fn run_container_with_timeout(
                 Ok(SessionOutcome::TimedOut)
             }
             Err(error) => {
-                log_cleanup_failure("session execution", &error);
+                log_container_lifecycle_failure(
+                    ContainerLifecycleFailureKind::Cleanup,
+                    "session execution",
+                    &error,
+                );
                 if let Err(kill_error) = start.child.kill() {
-                    log_attached_start_kill_failure("session execution", &kill_error);
+                    log_container_lifecycle_failure(
+                        ContainerLifecycleFailureKind::AttachedStartKill,
+                        "session execution",
+                        &kill_error,
+                    );
                 }
                 if let Err(finalize_error) = finalize_attached_start(start).map(|_| ()) {
-                    log_attached_start_finalization_failure("session execution", &finalize_error);
+                    log_container_lifecycle_failure(
+                        ContainerLifecycleFailureKind::AttachedStartFinalization,
+                        "session execution",
+                        &finalize_error,
+                    );
                 }
                 Ok(SessionOutcome::TimedOut)
             }
@@ -104,19 +117,32 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
     .map(|_| ())
 }
 
-pub(crate) fn log_cleanup_failure(stage: &str, error: &RunnerError) {
-    let mut stderr = std::io::stderr().lock();
-    let _ = log_cleanup_failure_to(&mut stderr, stage, error);
+#[derive(Clone, Copy)]
+pub(crate) enum ContainerLifecycleFailureKind {
+    Cleanup,
+    AttachedStartFinalization,
+    AttachedStartKill,
 }
 
-pub(crate) fn log_attached_start_finalization_failure(stage: &str, error: &RunnerError) {
-    let mut stderr = std::io::stderr().lock();
-    let _ = log_attached_start_finalization_failure_to(&mut stderr, stage, error);
+impl ContainerLifecycleFailureKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Cleanup => "cleanup after",
+            Self::AttachedStartFinalization => "attached start finalization after",
+            Self::AttachedStartKill => "attached start kill after",
+        }
+    }
 }
 
-pub(crate) fn log_attached_start_kill_failure(stage: &str, error: &std::io::Error) {
+pub(crate) fn log_container_lifecycle_failure<E>(
+    kind: ContainerLifecycleFailureKind,
+    stage: &str,
+    error: &E,
+) where
+    E: Display,
+{
     let mut stderr = std::io::stderr().lock();
-    let _ = log_attached_start_kill_failure_to(&mut stderr, stage, error);
+    let _ = log_container_lifecycle_failure_to(&mut stderr, kind, stage, error);
 }
 
 // Generates the shell script passed as the container entrypoint via
@@ -231,11 +257,19 @@ fn cleanup_and_finalize_attached_start_after_wait_error(
     start: AttachedPodmanStart,
 ) {
     if let Err(error) = cleanup_container(container_name) {
-        log_cleanup_failure("session execution", &error);
+        log_container_lifecycle_failure(
+            ContainerLifecycleFailureKind::Cleanup,
+            "session execution",
+            &error,
+        );
     }
 
     if let Err(error) = finalize_attached_start(start).map(|_| ()) {
-        log_attached_start_finalization_failure("session execution", &error);
+        log_container_lifecycle_failure(
+            ContainerLifecycleFailureKind::AttachedStartFinalization,
+            "session execution",
+            &error,
+        );
     }
 }
 
@@ -247,40 +281,17 @@ fn finalize_attached_start(
     Ok((start.args, stderr))
 }
 
-fn log_cleanup_failure_to<W>(
+fn log_container_lifecycle_failure_to<W, E>(
     writer: &mut W,
+    kind: ContainerLifecycleFailureKind,
     stage: &str,
-    error: &RunnerError,
+    error: &E,
 ) -> std::io::Result<()>
 where
     W: Write,
+    E: Display,
 {
-    writeln!(writer, "cleanup after {stage} failed: {error}")
-}
-
-fn log_attached_start_finalization_failure_to<W>(
-    writer: &mut W,
-    stage: &str,
-    error: &RunnerError,
-) -> std::io::Result<()>
-where
-    W: Write,
-{
-    writeln!(
-        writer,
-        "attached start finalization after {stage} failed: {error}"
-    )
-}
-
-fn log_attached_start_kill_failure_to<W>(
-    writer: &mut W,
-    stage: &str,
-    error: &std::io::Error,
-) -> std::io::Result<()>
-where
-    W: Write,
-{
-    writeln!(writer, "attached start kill after {stage} failed: {error}")
+    writeln!(writer, "{} {stage} failed: {error}", kind.prefix())
 }
 
 // Polls the attached `podman start` child process for exit, optionally
@@ -327,7 +338,11 @@ fn wait_for_container_exit(
             if running {
                 match cleanup_podman_secrets(secret_bindings) {
                     Ok(()) => {}
-                    Err(error) => log_cleanup_failure("secret release", &error),
+                    Err(error) => log_container_lifecycle_failure(
+                        ContainerLifecycleFailureKind::Cleanup,
+                        "secret release",
+                        &error,
+                    ),
                 }
                 secrets_released = true;
             }
