@@ -8,6 +8,16 @@ use std::time::Duration;
 
 const VALID_REMOTE_REPO_URL: &str = "https://example.com/agentd.git";
 
+pub(crate) fn test_session_spec() -> SessionSpec {
+    SessionSpec {
+        agent_name: "agent".to_string(),
+        base_image: "image".to_string(),
+        methodology_dir: PathBuf::from("/tmp/methodology"),
+        agent_command: vec!["codex".to_string(), "exec".to_string()],
+        environment: Vec::new(),
+    }
+}
+
 pub(crate) fn fake_podman_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

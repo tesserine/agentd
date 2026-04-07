@@ -1,8 +1,8 @@
 use super::*;
 use crate::resources::SessionResources;
 use crate::test_support::{
-    CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario, InspectBehavior,
-    exit_status, fake_podman_lock,
+    exit_status, fake_podman_lock, test_session_spec, CommandBehavior, CommandOutcome,
+    FakePodmanFixture, FakePodmanScenario, InspectBehavior,
 };
 use crate::{ResolvedEnvironmentVariable, SessionInvocation};
 use std::path::{Path, PathBuf};
@@ -20,13 +20,7 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
             secret_bindings: Vec::new(),
         },
-        &crate::SessionSpec {
-            agent_name: "agent".to_string(),
-            base_image: "image".to_string(),
-            methodology_dir: PathBuf::from("/tmp/methodology"),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
-            environment: Vec::new(),
-        },
+        &test_session_spec(),
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             work_unit: None,
@@ -52,13 +46,7 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
             secret_bindings: Vec::new(),
         },
-        &crate::SessionSpec {
-            agent_name: "agent".to_string(),
-            base_image: "image".to_string(),
-            methodology_dir: PathBuf::from("/tmp/methodology"),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
-            environment: Vec::new(),
-        },
+        &test_session_spec(),
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             work_unit: None,
@@ -89,13 +77,7 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
 
 #[test]
 fn create_container_args_pass_shell_flags_after_image_argument() {
-    let spec = crate::SessionSpec {
-        agent_name: "agent".to_string(),
-        base_image: "image".to_string(),
-        methodology_dir: PathBuf::from("/tmp/methodology"),
-        agent_command: vec!["codex".to_string(), "exec".to_string()],
-        environment: Vec::new(),
-    };
+    let spec = test_session_spec();
     let invocation = SessionInvocation {
         repo_url: VALID_REMOTE_REPO_URL.to_string(),
         work_unit: None,
@@ -127,13 +109,7 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
 #[test]
 fn build_container_script_terminates_git_clone_options_before_repo_url() {
     let script = build_container_script(
-        &crate::SessionSpec {
-            agent_name: "agent".to_string(),
-            base_image: "image".to_string(),
-            methodology_dir: PathBuf::from("/tmp/methodology"),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
-            environment: Vec::new(),
-        },
+        &test_session_spec(),
         &SessionInvocation {
             repo_url: "-repo.git".to_string(),
             work_unit: None,
@@ -147,13 +123,7 @@ fn build_container_script_terminates_git_clone_options_before_repo_url() {
 #[test]
 fn build_container_script_disables_git_terminal_prompts() {
     let script = build_container_script(
-        &crate::SessionSpec {
-            agent_name: "agent".to_string(),
-            base_image: "image".to_string(),
-            methodology_dir: PathBuf::from("/tmp/methodology"),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
-            environment: Vec::new(),
-        },
+        &test_session_spec(),
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             work_unit: None,
@@ -169,10 +139,7 @@ fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unp
     let script = build_container_script(
         &crate::SessionSpec {
             agent_name: "agent_name".to_string(),
-            base_image: "image".to_string(),
-            methodology_dir: PathBuf::from("/tmp/methodology"),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
-            environment: Vec::new(),
+            ..test_session_spec()
         },
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
@@ -425,14 +392,12 @@ fn fake_podman_scenario_records_create_arguments_for_a_successful_session() {
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        agent_name: "agent".to_string(),
-        base_image: "image".to_string(),
         methodology_dir,
-        agent_command: vec!["codex".to_string(), "exec".to_string()],
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
             value: "test-token".to_string(),
         }],
+        ..test_session_spec()
     });
 
     assert_eq!(
@@ -452,14 +417,12 @@ fn run_session_does_not_pass_resolved_environment_values_via_podman_create_argum
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        agent_name: "agent".to_string(),
-        base_image: "image".to_string(),
         methodology_dir,
-        agent_command: vec!["codex".to_string(), "exec".to_string()],
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
             value: "test-token".to_string(),
         }],
+        ..test_session_spec()
     });
 
     assert_eq!(
@@ -493,10 +456,7 @@ fn run_session_injects_empty_environment_values_via_direct_env_args() {
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        agent_name: "agent".to_string(),
-        base_image: "image".to_string(),
         methodology_dir,
-        agent_command: vec!["codex".to_string(), "exec".to_string()],
         environment: vec![
             ResolvedEnvironmentVariable {
                 name: "EMPTY_VALUE".to_string(),
@@ -507,6 +467,7 @@ fn run_session_injects_empty_environment_values_via_direct_env_args() {
                 value: "test-token".to_string(),
             },
         ],
+        ..test_session_spec()
     });
 
     assert_eq!(
@@ -541,13 +502,12 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
         agent_name: agent_name.to_string(),
-        base_image: "image".to_string(),
         methodology_dir,
-        agent_command: vec!["codex".to_string(), "exec".to_string()],
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
             value: "test-token".to_string(),
         }],
+        ..test_session_spec()
     });
 
     assert_eq!(
@@ -612,14 +572,12 @@ fn run_session_releases_session_secrets_after_container_reaches_running_state() 
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        agent_name: "agent".to_string(),
-        base_image: "image".to_string(),
         methodology_dir,
-        agent_command: vec!["codex".to_string(), "exec".to_string()],
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
             value: "test-token".to_string(),
         }],
+        ..test_session_spec()
     });
 
     assert_eq!(
@@ -662,14 +620,12 @@ fn run_session_continues_when_secret_release_fails_after_container_reaches_runni
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        agent_name: "agent".to_string(),
-        base_image: "image".to_string(),
         methodology_dir,
-        agent_command: vec!["codex".to_string(), "exec".to_string()],
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
             value: "test-token".to_string(),
         }],
+        ..test_session_spec()
     });
 
     assert_eq!(
@@ -861,8 +817,8 @@ fn run_container_to_completion_reaps_attached_child_when_wait_for_container_exit
 }
 
 #[test]
-fn run_container_with_timeout_returns_timed_out_promptly_when_cleanup_container_fails_after_timeout()
- {
+fn run_container_with_timeout_returns_timed_out_promptly_when_cleanup_container_fails_after_timeout(
+) {
     let _guard = fake_podman_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -933,14 +889,12 @@ fn run_session_returns_run_error_when_cleanup_after_run_also_fails() {
         .run_with_fake_podman_env(|| {
             crate::run_session(
                 crate::SessionSpec {
-                    agent_name: "agent".to_string(),
-                    base_image: "image".to_string(),
                     methodology_dir,
-                    agent_command: vec!["codex".to_string(), "exec".to_string()],
                     environment: vec![ResolvedEnvironmentVariable {
                         name: "GITHUB_TOKEN".to_string(),
                         value: "test-token".to_string(),
                     }],
+                    ..test_session_spec()
                 },
                 SessionInvocation {
                     repo_url: VALID_REMOTE_REPO_URL.to_string(),
@@ -977,14 +931,12 @@ fn fake_podman_scenario_allows_create_stdout_without_breaking_success() {
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        agent_name: "agent".to_string(),
-        base_image: "image".to_string(),
         methodology_dir,
-        agent_command: vec!["codex".to_string(), "exec".to_string()],
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
             value: "test-token".to_string(),
         }],
+        ..test_session_spec()
     });
 
     assert_eq!(
