@@ -35,9 +35,9 @@ Every structural decision in the workspace traces to a capability an agent sessi
 
 ### Identity
 
-**Need:** agents know who they are and retain state across sessions.
+**Need:** agents know who they are and can be distinguished clearly per session.
 
-**Constraint:** each agent receives a persistent home directory and stable identity variables.
+**Constraint:** each session receives stable identity variables and an agent-derived container name inside an ephemeral runtime.
 
 ### Mission
 
