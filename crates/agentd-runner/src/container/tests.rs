@@ -1,8 +1,8 @@
 use super::*;
 use crate::resources::SessionResources;
 use crate::test_support::{
-    exit_status, fake_podman_lock, test_session_spec, CommandBehavior, CommandOutcome,
-    FakePodmanFixture, FakePodmanScenario, InspectBehavior,
+    CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario, InspectBehavior,
+    exit_status, fake_podman_lock, test_session_spec,
 };
 use crate::{ResolvedEnvironmentVariable, SessionInvocation};
 use std::path::{Path, PathBuf};
@@ -817,8 +817,8 @@ fn run_container_to_completion_reaps_attached_child_when_wait_for_container_exit
 }
 
 #[test]
-fn run_container_with_timeout_returns_timed_out_promptly_when_cleanup_container_fails_after_timeout(
-) {
+fn run_container_with_timeout_returns_timed_out_promptly_when_cleanup_container_fails_after_timeout()
+ {
     let _guard = fake_podman_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -185,7 +185,7 @@ fn is_valid_unix_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_support::test_session_spec, ResolvedEnvironmentVariable};
+    use crate::{ResolvedEnvironmentVariable, test_support::test_session_spec};
     use std::path::PathBuf;
 
     #[test]
