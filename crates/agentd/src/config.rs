@@ -1,3 +1,13 @@
+//! TOML configuration parsing and validation for the agent registry.
+//!
+//! Bridges operator-facing configuration to the runner's [`SessionSpec`]
+//! model. Validation here is stricter than the runner's own validation —
+//! it enforces uniqueness (no duplicate agent or credential names),
+//! non-empty fields, and whitespace hygiene in addition to the runner's
+//! format and reservation rules.
+//!
+//! [`SessionSpec`]: agentd_runner::SessionSpec
+
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -6,22 +16,35 @@ use std::str::FromStr;
 use agentd_runner::{RunnerError, validate_agent_name, validate_environment_name};
 use serde::Deserialize;
 
+/// Validated agent registry parsed from a TOML configuration file.
+///
+/// Guarantees that all agent names are unique and valid, all required fields
+/// are non-empty, and all credential names are valid environment variable
+/// names. Relative `methodology_dir` paths are resolved against the
+/// configuration file's parent directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     agents: Vec<AgentConfig>,
 }
 
 impl Config {
+    /// Reads and parses a TOML configuration file at `path`.
+    ///
+    /// Relative `methodology_dir` values in the file are resolved against
+    /// the directory containing `path`. Returns [`ConfigError`] on I/O
+    /// failure, parse failure, or any validation violation.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
         let base_dir = absolute_config_dir(path)?;
         Self::parse(&contents, base_dir.as_deref())
     }
 
+    /// Returns all configured agents.
     pub fn agents(&self) -> &[AgentConfig] {
         &self.agents
     }
 
+    /// Looks up an agent by name. Returns `None` if no agent matches.
     pub fn agent(&self, name: &str) -> Option<&AgentConfig> {
         self.agents.iter().find(|agent| agent.name == name)
     }
@@ -129,6 +152,10 @@ impl Config {
     }
 }
 
+/// Parses a configuration from a TOML string without file-path context.
+///
+/// Unlike [`Config::load`], relative `methodology_dir` values are preserved
+/// as-is because there is no file path to resolve them against.
 impl FromStr for Config {
     type Err = ConfigError;
 
@@ -137,6 +164,11 @@ impl FromStr for Config {
     }
 }
 
+/// Configuration for a single agent in the registry.
+///
+/// Fields are private; use the accessor methods to read values. The agent
+/// name has been validated as a legal unix username and is unique within the
+/// [`Config`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
     name: String,
@@ -147,27 +179,41 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
+    /// Agent identity string, validated as a legal unix username.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Container image reference for this agent's sessions.
     pub fn base_image(&self) -> &str {
         &self.base_image
     }
 
+    /// Path to the methodology directory. Always absolute when constructed
+    /// via [`Config::load`]; preserved as-is (potentially relative) when
+    /// constructed via the [`FromStr`] impl.
     pub fn methodology_dir(&self) -> &Path {
         &self.methodology_dir
     }
 
+    /// Declared credentials for this agent. Each credential's name is a
+    /// valid environment variable name, unique within this agent.
     pub fn credentials(&self) -> &[CredentialConfig] {
         &self.credentials
     }
 
+    /// Runa runtime configuration for this agent.
     pub fn runa(&self) -> &RunaConfig {
         &self.runa
     }
 }
 
+/// A declared credential for an agent.
+///
+/// The `name` becomes the environment variable name inside the container.
+/// The `source` is an opaque reference to the operator's secret store —
+/// agentd preserves it as-is and does not resolve it; resolution happens
+/// upstream before the runner receives the value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialConfig {
     name: String,
@@ -175,55 +221,76 @@ pub struct CredentialConfig {
 }
 
 impl CredentialConfig {
+    /// Environment variable name for this credential inside the container.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Opaque reference to the operator's secret store. Preserved as-is;
+    /// credential resolution is the caller's responsibility.
     pub fn source(&self) -> &str {
         &self.source
     }
 }
 
+/// Runa runtime configuration for an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunaConfig {
     command: Vec<String>,
 }
 
 impl RunaConfig {
+    /// Static command array written into `.runa/config.toml` as the
+    /// `[agent] command` value. Not a shell command — each element becomes
+    /// a TOML string in the array. Must contain at least one element.
     pub fn command(&self) -> &[String] {
         &self.command
     }
 }
 
+/// Errors produced when loading or validating a configuration file.
 #[derive(Debug)]
 pub enum ConfigError {
+    /// Failed to read the configuration file from disk.
     Io(std::io::Error),
+    /// The file contains invalid TOML or violates the expected schema.
     Parse(toml::de::Error),
+    /// The configuration defines zero agents. At least one must be declared.
     NoAgents,
+    /// Two agents share the same name.
     DuplicateAgentName {
         name: String,
     },
+    /// An agent name fails the runner's [`validate_agent_name`] rules.
     InvalidAgentName {
         name: String,
     },
+    /// Two credentials within the same agent share a name.
     DuplicateCredentialName {
         agent: String,
         name: String,
     },
+    /// A credential name fails [`validate_environment_name`] (contains `,`
+    /// or `=`, or is the reserved `AGENT_NAME`).
     InvalidCredentialName {
         agent: String,
         name: String,
     },
+    /// A required string field is empty or whitespace-only.
     EmptyField {
         field: &'static str,
         agent: Option<String>,
         credential: Option<String>,
     },
+    /// A lookup-key field has leading or trailing whitespace. Caught
+    /// separately from empty because the trimmed value may be valid — the
+    /// whitespace itself is the error.
     FieldHasOuterWhitespace {
         field: &'static str,
         agent: Option<String>,
         credential: Option<String>,
     },
+    /// The `runa.command` array is empty for an agent.
     EmptyCommand {
         agent: String,
     },

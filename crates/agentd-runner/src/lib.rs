@@ -1,4 +1,15 @@
 //! Session lifecycle management for agentd.
+//!
+//! Owns the four phases of a session: input validation, resource allocation
+//! (methodology staging, podman secrets), container execution (create, start
+//! in attached mode, supervise), and teardown (force-remove container, release
+//! secrets, remove staging directory). The public entry point is
+//! [`run_session`], which accepts a [`SessionSpec`] and
+//! [`SessionInvocation`] and returns a [`SessionOutcome`] or
+//! [`RunnerError`].
+//!
+//! See `ARCHITECTURE.md` section "Session Lifecycle" for the design-level
+//! treatment of these phases.
 
 mod container;
 mod podman;
@@ -24,6 +35,18 @@ use resources::{
 };
 use validation::{validate_invocation, validate_spec};
 
+/// Executes a single agent session from validation through teardown.
+///
+/// Validates `spec` and `invocation`, allocates session resources (methodology
+/// staging directory, podman secrets for non-empty environment values), creates
+/// and runs an ephemeral podman container, then cleans up all resources
+/// regardless of outcome.
+///
+/// Returns [`SessionOutcome::Succeeded`] when the container exits 0,
+/// [`SessionOutcome::Failed`] for non-zero exits, or
+/// [`SessionOutcome::TimedOut`] when the optional timeout fires. Returns
+/// [`RunnerError`] for validation failures, I/O errors, or podman command
+/// failures.
 pub fn run_session(
     spec: SessionSpec,
     invocation: SessionInvocation,

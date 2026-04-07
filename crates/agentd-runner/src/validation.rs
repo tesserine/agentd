@@ -1,3 +1,10 @@
+//! Input validation for session specs and invocations.
+//!
+//! All validation runs before any filesystem or podman interaction, so invalid
+//! inputs are rejected without side effects. The two public validators
+//! ([`validate_agent_name`] and [`validate_environment_name`]) are also used
+//! by the configuration layer in the `agentd` crate.
+
 use crate::types::{
     AgentNameValidationError, EnvironmentNameValidationError, RunnerError, SessionInvocation,
     SessionSpec,
@@ -55,6 +62,12 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
     Ok(())
 }
 
+/// Validates an environment variable name against naming rules.
+///
+/// Rejects names that are empty, contain `,` or `=`, or collide with
+/// runner-managed names (currently `AGENT_NAME`). Used both by
+/// [`run_session`](crate::run_session) during spec validation and by the
+/// configuration layer for credential name validation.
 pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValidationError> {
     if name.is_empty() || name.contains('=') || name.contains(',') {
         return Err(EnvironmentNameValidationError::Invalid);
@@ -66,6 +79,13 @@ pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValida
     Ok(())
 }
 
+/// Validates an agent name against unix username rules and reserved names.
+///
+/// The name must start with a lowercase ASCII letter, contain only lowercase
+/// letters, digits, `_`, or `-`, and be at most 32 characters. Names matching
+/// reserved system usernames (`root`, `nobody`, `daemon`, `bin`, `sys`, `man`,
+/// `mail`) are also rejected. Used both by [`run_session`](crate::run_session)
+/// during spec validation and by the configuration layer.
 pub fn validate_agent_name(name: &str) -> Result<(), AgentNameValidationError> {
     if !is_valid_unix_username(name) {
         return Err(AgentNameValidationError::Invalid);
@@ -77,6 +97,10 @@ pub fn validate_agent_name(name: &str) -> Result<(), AgentNameValidationError> {
     Ok(())
 }
 
+/// Returns the environment variables managed by the runner itself.
+///
+/// These names are reserved — callers cannot use them in
+/// [`SessionSpec::environment`] because the runner injects them directly.
 pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1] {
     [(AGENT_NAME_ENV, &spec.agent_name)]
 }
