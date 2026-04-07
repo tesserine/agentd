@@ -8,12 +8,12 @@
 //! --attach` is ambiguous (podman infrastructure error vs. container process)
 //! and requires container state inspection to disambiguate.
 
+use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::podman::{run_podman_command, run_podman_command_until};
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
 use std::collections::VecDeque;
-use std::fmt::Display;
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -78,21 +78,17 @@ pub(crate) fn run_container_with_timeout(
                 Ok(SessionOutcome::TimedOut)
             }
             Err(error) => {
-                log_container_lifecycle_failure(
-                    ContainerLifecycleFailureKind::Cleanup,
-                    "session execution",
-                    &error,
-                );
+                log_lifecycle_failure(LifecycleFailureKind::Cleanup, "session execution", &error);
                 if let Err(kill_error) = start.child.kill() {
-                    log_container_lifecycle_failure(
-                        ContainerLifecycleFailureKind::AttachedStartKill,
+                    log_lifecycle_failure(
+                        LifecycleFailureKind::AttachedStartKill,
                         "session execution",
                         &kill_error,
                     );
                 }
                 if let Err(finalize_error) = finalize_attached_start(start).map(|_| ()) {
-                    log_container_lifecycle_failure(
-                        ContainerLifecycleFailureKind::AttachedStartFinalization,
+                    log_lifecycle_failure(
+                        LifecycleFailureKind::AttachedStartFinalization,
                         "session execution",
                         &finalize_error,
                     );
@@ -115,34 +111,6 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
         container_name.to_string(),
     ])
     .map(|_| ())
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ContainerLifecycleFailureKind {
-    Cleanup,
-    AttachedStartFinalization,
-    AttachedStartKill,
-}
-
-impl ContainerLifecycleFailureKind {
-    fn prefix(self) -> &'static str {
-        match self {
-            Self::Cleanup => "cleanup after",
-            Self::AttachedStartFinalization => "attached start finalization after",
-            Self::AttachedStartKill => "attached start kill after",
-        }
-    }
-}
-
-pub(crate) fn log_container_lifecycle_failure<E>(
-    kind: ContainerLifecycleFailureKind,
-    stage: &str,
-    error: &E,
-) where
-    E: Display,
-{
-    let mut stderr = std::io::stderr().lock();
-    let _ = log_container_lifecycle_failure_to(&mut stderr, kind, stage, error);
 }
 
 // Generates the shell script passed as the container entrypoint via
@@ -297,16 +265,12 @@ fn cleanup_and_finalize_attached_start_after_wait_error(
     start: AttachedPodmanStart,
 ) {
     if let Err(error) = cleanup_container(container_name) {
-        log_container_lifecycle_failure(
-            ContainerLifecycleFailureKind::Cleanup,
-            "session execution",
-            &error,
-        );
+        log_lifecycle_failure(LifecycleFailureKind::Cleanup, "session execution", &error);
     }
 
     if let Err(error) = finalize_attached_start(start).map(|_| ()) {
-        log_container_lifecycle_failure(
-            ContainerLifecycleFailureKind::AttachedStartFinalization,
+        log_lifecycle_failure(
+            LifecycleFailureKind::AttachedStartFinalization,
             "session execution",
             &error,
         );
@@ -319,19 +283,6 @@ fn finalize_attached_start(
     start.child.wait()?;
     let stderr = finish_captured_stderr(start.stderr_thread)?;
     Ok((start.args, stderr))
-}
-
-fn log_container_lifecycle_failure_to<W, E>(
-    writer: &mut W,
-    kind: ContainerLifecycleFailureKind,
-    stage: &str,
-    error: &E,
-) -> std::io::Result<()>
-where
-    W: Write,
-    E: Display,
-{
-    writeln!(writer, "{} {stage} failed: {error}", kind.prefix())
 }
 
 // Polls the attached `podman start` child process for exit, optionally
@@ -378,8 +329,8 @@ fn wait_for_container_exit(
             if running {
                 match cleanup_podman_secrets(secret_bindings) {
                     Ok(()) => {}
-                    Err(error) => log_container_lifecycle_failure(
-                        ContainerLifecycleFailureKind::Cleanup,
+                    Err(error) => log_lifecycle_failure(
+                        LifecycleFailureKind::Cleanup,
                         "secret release",
                         &error,
                     ),
