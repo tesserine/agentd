@@ -11,6 +11,11 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+struct StartedPodmanCommand {
+    child: Child,
+    write_error: Option<std::io::Error>,
+}
+
 pub(crate) fn run_podman_command(args: Vec<String>) -> Result<String, RunnerError> {
     run_podman_command_with_input(args, None)
 }
@@ -26,28 +31,7 @@ pub(crate) fn run_podman_command_with_input(
     args: Vec<String>,
     stdin_data: Option<&[u8]>,
 ) -> Result<String, RunnerError> {
-    let mut command = Command::new("podman");
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if stdin_data.is_some() {
-        command.stdin(Stdio::piped());
-    }
-
-    let mut child = command.spawn()?;
-    let write_error = if let Some(stdin_data) = stdin_data {
-        let write_result = {
-            let mut stdin = child
-                .stdin
-                .take()
-                .expect("podman stdin should be piped when input is provided");
-            stdin.write_all(stdin_data)
-        };
-        write_result.err()
-    } else {
-        None
-    };
+    let StartedPodmanCommand { child, write_error } = spawn_podman_command(&args, stdin_data)?;
 
     let output = child.wait_with_output()?;
     finish_podman_output(args, write_error, output)
@@ -58,28 +42,10 @@ pub(crate) fn run_podman_command_with_input_until(
     stdin_data: Option<&[u8]>,
     deadline: Instant,
 ) -> Result<Option<String>, RunnerError> {
-    let mut command = Command::new("podman");
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if stdin_data.is_some() {
-        command.stdin(Stdio::piped());
-    }
-
-    let mut child = command.spawn()?;
-    let write_error = if let Some(stdin_data) = stdin_data {
-        let write_result = {
-            let mut stdin = child
-                .stdin
-                .take()
-                .expect("podman stdin should be piped when input is provided");
-            stdin.write_all(stdin_data)
-        };
-        write_result.err()
-    } else {
-        None
-    };
+    let StartedPodmanCommand {
+        mut child,
+        write_error,
+    } = spawn_podman_command(&args, stdin_data)?;
 
     loop {
         if let Some(status) = child.try_wait()? {
@@ -93,6 +59,40 @@ pub(crate) fn run_podman_command_with_input_until(
         }
 
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn spawn_podman_command(
+    args: &[String],
+    stdin_data: Option<&[u8]>,
+) -> Result<StartedPodmanCommand, RunnerError> {
+    let mut command = Command::new("podman");
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if stdin_data.is_some() {
+        command.stdin(Stdio::piped());
+    }
+
+    let mut child = command.spawn()?;
+    let write_error = write_podman_stdin(&mut child, stdin_data);
+
+    Ok(StartedPodmanCommand { child, write_error })
+}
+
+fn write_podman_stdin(child: &mut Child, stdin_data: Option<&[u8]>) -> Option<std::io::Error> {
+    if let Some(stdin_data) = stdin_data {
+        let write_result = {
+            let mut stdin = child
+                .stdin
+                .take()
+                .expect("podman stdin should be piped when input is provided");
+            stdin.write_all(stdin_data)
+        };
+        write_result.err()
+    } else {
+        None
     }
 }
 
@@ -165,6 +165,34 @@ mod tests {
         fake_podman_lock,
     };
 
+    #[test]
+    fn podman_command_setup_is_defined_once_for_input_handling_paths() {
+        let source = include_str!("podman.rs");
+        let implementation_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("podman.rs should contain implementation before tests");
+
+        assert_eq!(
+            implementation_source
+                .matches("Command::new(\"podman\")")
+                .count(),
+            1
+        );
+        assert_eq!(
+            implementation_source
+                .matches(".stdin(Stdio::piped())")
+                .count(),
+            1
+        );
+        assert_eq!(
+            implementation_source
+                .matches("stdin.write_all(stdin_data)")
+                .count(),
+            1
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn podman_commands_with_input_reap_failed_children_before_returning() {
@@ -192,6 +220,50 @@ mod tests {
                         "-".to_string(),
                     ],
                     Some(&stdin_data),
+                )
+            })
+            .expect_err("failed podman commands should surface an error");
+
+        match error {
+            RunnerError::PodmanCommandFailed { status, .. } => {
+                assert_eq!(status.code(), Some(17));
+            }
+            other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+
+        let pid = fixture.start_pid_from("podman.pid");
+        assert_process_is_reaped(pid);
+        assert_eq!(exit_status(17).code(), Some(17));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn podman_commands_with_input_until_reap_failed_children_before_returning() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        let scenario = FakePodmanScenario::new().with_secret_create(
+            crate::test_support::CommandBehavior::from_outcome(
+                crate::test_support::CommandOutcome::new()
+                    .record_pid_to("podman.pid")
+                    .exit_code(17),
+            ),
+        );
+        fixture.install(&scenario);
+
+        let stdin_data = vec![b'x'; 8 * 1024 * 1024];
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_podman_command_with_input_until(
+                    vec![
+                        "secret".to_string(),
+                        "create".to_string(),
+                        "secret-name".to_string(),
+                        "-".to_string(),
+                    ],
+                    Some(&stdin_data),
+                    Instant::now() + Duration::from_secs(1),
                 )
             })
             .expect_err("failed podman commands should surface an error");
