@@ -139,8 +139,10 @@ fn read_podman_output_after_exit(
 
 /// Kills a child process and waits for it to be reaped.
 ///
-/// Swallows `InvalidInput` from `kill()` because it means the process already
-/// exited between the `try_wait` check and the kill attempt — a benign race.
+/// Swallows `InvalidInput` from `kill()` as a defensive guard. Since Rust
+/// 1.72, `kill()` returns `Ok(())` for already-exited processes, so the
+/// leading `try_wait` check and the stdlib itself handle the benign race;
+/// the `InvalidInput` arm is retained for robustness.
 pub(crate) fn terminate_child(child: &mut Child) -> Result<(), RunnerError> {
     if child.try_wait()?.is_some() {
         return Ok(());

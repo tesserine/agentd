@@ -189,9 +189,9 @@ impl AgentConfig {
         &self.base_image
     }
 
-    /// Path to the methodology directory. Absolute if the config file path
-    /// was absolute or the original value was absolute; otherwise relative to
-    /// the config file's parent directory.
+    /// Path to the methodology directory. Always absolute when constructed
+    /// via [`Config::load`]; preserved as-is (potentially relative) when
+    /// constructed via the [`FromStr`] impl.
     pub fn methodology_dir(&self) -> &Path {
         &self.methodology_dir
     }

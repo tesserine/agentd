@@ -23,7 +23,7 @@ pub struct SessionSpec {
     /// [`validate_agent_name`](crate::validate_agent_name).
     pub agent_name: String,
     /// Container image reference. The image must provide `/bin/sh`, `git`,
-    /// `useradd`, and `gosu` in `PATH`.
+    /// `useradd`, `gosu`, and `runa` in `PATH`.
     pub base_image: String,
     /// Host-side path to the methodology directory. Mounted read-only into
     /// the container at `/agentd/methodology`. Must contain `manifest.toml`.
