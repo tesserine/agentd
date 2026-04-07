@@ -993,8 +993,9 @@ fn build_create_container_args(
 
     args.push("--user".to_string());
     args.push("0:0".to_string());
-    args.push(spec.base_image.clone());
+    args.push("--entrypoint".to_string());
     args.push("/bin/sh".to_string());
+    args.push(spec.base_image.clone());
     args.push("-lc".to_string());
     args.push(build_container_script(spec, invocation));
 
@@ -1467,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn create_container_args_force_root_user_before_image_argument() {
+    fn create_container_args_force_root_user_and_entrypoint_before_image_argument() {
         let args = build_create_container_args(
             &SessionResources {
                 container_name: "agentd-agent-session".to_string(),
@@ -1498,19 +1499,28 @@ mod tests {
             Some("0:0"),
             "podman create should run as root"
         );
+        let entrypoint_index = args
+            .iter()
+            .position(|arg| arg == "--entrypoint")
+            .expect("podman create should receive --entrypoint");
+        assert_eq!(
+            args.get(entrypoint_index + 1).map(String::as_str),
+            Some("/bin/sh"),
+            "podman create should override the image entrypoint with /bin/sh"
+        );
 
         let image_index = args
             .iter()
             .position(|arg| arg == "image")
             .expect("podman create should include the base image");
         assert!(
-            user_index < image_index,
-            "--user should be injected before the image argument: {args:?}"
+            user_index < image_index && entrypoint_index < image_index,
+            "--user and --entrypoint should be injected before the image argument: {args:?}"
         );
     }
 
     #[test]
-    fn create_container_args_use_absolute_shell_path_after_image_argument() {
+    fn create_container_args_pass_shell_flags_after_image_argument() {
         let args = build_create_container_args(
             &SessionResources {
                 container_name: "agentd-agent-session".to_string(),
@@ -1531,6 +1541,20 @@ mod tests {
                 timeout: None,
             },
         );
+        let expected_script = build_container_script(
+            &SessionSpec {
+                agent_name: "agent".to_string(),
+                base_image: "image".to_string(),
+                methodology_dir: PathBuf::from("/tmp/methodology"),
+                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                environment: Vec::new(),
+            },
+            &SessionInvocation {
+                repo_url: VALID_REMOTE_REPO_URL.to_string(),
+                work_unit: None,
+                timeout: None,
+            },
+        );
 
         let image_index = args
             .iter()
@@ -1538,8 +1562,13 @@ mod tests {
             .expect("podman create should include the base image");
         assert_eq!(
             args.get(image_index + 1).map(String::as_str),
-            Some("/bin/sh"),
-            "podman create should invoke the documented absolute shell path"
+            Some("-lc"),
+            "podman create should pass shell flags after the image argument"
+        );
+        assert_eq!(
+            args.get(image_index + 2).map(String::as_str),
+            Some(expected_script.as_str()),
+            "podman create should pass the bootstrap script after the shell flags"
         );
     }
 

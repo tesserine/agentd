@@ -1,16 +1,17 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use agentd_runner::{
     ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec, run_session,
 };
-
-const TEST_REMOTE_REPO_URL: &str = "git://127.0.0.1:9418/test-repo.git";
 
 #[test]
 fn succeeds_without_timeout_and_cleans_up_container() {
@@ -47,7 +48,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
             ],
         },
         SessionInvocation {
-            repo_url: TEST_REMOTE_REPO_URL.to_string(),
+            repo_url: fixture.repo_url(),
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -93,7 +94,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
             ],
         },
         SessionInvocation {
-            repo_url: TEST_REMOTE_REPO_URL.to_string(),
+            repo_url: fixture.repo_url(),
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -137,7 +138,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
             ],
         },
         SessionInvocation {
-            repo_url: TEST_REMOTE_REPO_URL.to_string(),
+            repo_url: fixture.repo_url(),
             work_unit: None,
             timeout: None,
         },
@@ -181,7 +182,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
             ],
         },
         SessionInvocation {
-            repo_url: TEST_REMOTE_REPO_URL.to_string(),
+            repo_url: fixture.repo_url(),
             work_unit: None,
             timeout: None,
         },
@@ -226,7 +227,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             ],
         },
         SessionInvocation {
-            repo_url: TEST_REMOTE_REPO_URL.to_string(),
+            repo_url: fixture.repo_url(),
             work_unit: Some("task-42".to_string()),
             timeout: None,
         },
@@ -268,7 +269,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
             ],
         },
         SessionInvocation {
-            repo_url: TEST_REMOTE_REPO_URL.to_string(),
+            repo_url: fixture.repo_url(),
             work_unit: None,
             timeout: Some(Duration::from_secs(1)),
         },
@@ -292,6 +293,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
     let fixture = SessionFixture::new("running-secret-agent");
     let image = fixture.build_image();
     let methodology_dir = fixture.methodology_dir();
+    let repo_url = fixture.repo_url();
 
     let session = thread::spawn(move || {
         run_session(
@@ -312,7 +314,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                 ],
             },
             SessionInvocation {
-                repo_url: TEST_REMOTE_REPO_URL.to_string(),
+                repo_url,
                 work_unit: None,
                 timeout: None,
             },
@@ -336,6 +338,7 @@ struct SessionFixture {
     root: PathBuf,
     agent_name: String,
     baseline_runner_secret_names: BTreeSet<String>,
+    repo_server: RepoHttpServer,
 }
 
 impl SessionFixture {
@@ -354,11 +357,16 @@ impl SessionFixture {
             "name = \"test-methodology\"\n",
         )
         .expect("methodology manifest should be written");
+        let repo_root = root.join("repo-server");
+        let bare_repo_dir = repo_root.join("repo.git");
+        fs::create_dir_all(&repo_root).expect("repo root should be created");
+        write_test_repo(&bare_repo_dir);
 
         Self {
             root,
             agent_name: agent_name.to_string(),
             baseline_runner_secret_names: list_runner_secret_names(),
+            repo_server: RepoHttpServer::start(repo_root),
         }
     }
 
@@ -366,12 +374,17 @@ impl SessionFixture {
         self.root.join("methodology")
     }
 
+    fn repo_url(&self) -> String {
+        format!(
+            "http://host.containers.internal:{}/repo.git",
+            self.repo_server.port()
+        )
+    }
+
     fn build_image(&self) -> String {
         let context_dir = self.root.join("image-context");
-        let bare_repo_dir = context_dir.join("repo.git");
         fs::create_dir_all(&context_dir).expect("image context should be created");
 
-        write_test_repo(&bare_repo_dir);
         fs::write(context_dir.join("runa"), RUNA_STUB).expect("runa stub should be written");
         fs::write(context_dir.join("entrypoint.sh"), ENTRYPOINT_SH)
             .expect("entrypoint script should be written");
@@ -592,6 +605,7 @@ fn write_test_repo(destination: &Path) {
             destination.to_str().unwrap(),
         ],
     );
+    run_git_in(destination, ["update-server-info"]);
 }
 
 fn run_git<const N: usize>(directory: &Path, args: [&str; N]) {
@@ -617,33 +631,139 @@ fn run_git_in<const N: usize>(directory: &Path, args: [&str; N]) {
 const CONTAINERFILE: &str = r#"
 FROM docker.io/library/alpine:3.20
 
-RUN apk add --no-cache git git-daemon
+RUN apk add --no-cache git
 COPY runa /usr/local/bin/runa
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /usr/local/bin/runa /entrypoint.sh
-COPY repo.git /srv/test-repo.git
 ENTRYPOINT ["/entrypoint.sh"]
 "#;
 
 const ENTRYPOINT_SH: &str = r#"#!/bin/sh
 set -eu
 
-git daemon --export-all --base-path=/srv --reuseaddr --listen=127.0.0.1 --port=9418 /srv &
-git_daemon_pid=$!
-trap 'kill "$git_daemon_pid" >/dev/null 2>&1 || true; wait "$git_daemon_pid" >/dev/null 2>&1 || true' EXIT
-
-attempt=0
-while [ "$attempt" -lt 50 ]; do
-    if git ls-remote git://127.0.0.1:9418/test-repo.git >/dev/null 2>&1; then
-        exec "$@"
-    fi
-    attempt=$((attempt + 1))
-    sleep 0.1
-done
-
-echo "git daemon did not become ready" >&2
+echo "image entrypoint should not run" >&2
 exit 97
 "#;
+
+struct RepoHttpServer {
+    port: u16,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl RepoHttpServer {
+    fn start(root: PathBuf) -> Self {
+        let listener = TcpListener::bind(("0.0.0.0", 0))
+            .expect("fixture repo HTTP server should bind an ephemeral port");
+        listener
+            .set_nonblocking(true)
+            .expect("fixture repo HTTP server should become nonblocking");
+        let port = listener
+            .local_addr()
+            .expect("fixture repo HTTP server should expose a local address")
+            .port();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_signal = Arc::clone(&shutdown);
+        let thread = thread::spawn(move || serve_repo_http(listener, root, shutdown_signal));
+
+        Self {
+            port,
+            shutdown,
+            thread: Some(thread),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for RepoHttpServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .expect("fixture repo HTTP server thread should stop cleanly");
+        }
+    }
+}
+
+fn serve_repo_http(listener: TcpListener, root: PathBuf, shutdown: Arc<AtomicBool>) {
+    while !shutdown.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let root = root.clone();
+                thread::spawn(move || handle_repo_http_request(stream, &root));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("fixture repo HTTP server accept failed: {error}"),
+        }
+    }
+}
+
+fn handle_repo_http_request(stream: TcpStream, root: &Path) {
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
+        return;
+    }
+
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).is_err() || header == "\r\n" {
+            break;
+        }
+    }
+
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let request_target = parts.next().unwrap_or_default();
+    let path = request_target.split('?').next().unwrap_or_default();
+    let mut stream = reader.into_inner();
+
+    if method != "GET" && method != "HEAD" {
+        write_http_response(
+            &mut stream,
+            "405 Method Not Allowed",
+            b"method not allowed",
+            false,
+        );
+        return;
+    }
+
+    let relative_path = path.trim_start_matches('/');
+    if relative_path.is_empty() || relative_path.split('/').any(|segment| segment == "..") {
+        write_http_response(&mut stream, "404 Not Found", b"not found", method == "HEAD");
+        return;
+    }
+
+    let file_path = root.join(relative_path);
+    let Ok(body) = fs::read(&file_path) else {
+        write_http_response(&mut stream, "404 Not Found", b"not found", method == "HEAD");
+        return;
+    };
+
+    write_http_response(&mut stream, "200 OK", &body, method == "HEAD");
+}
+
+fn write_http_response(stream: &mut TcpStream, status: &str, body: &[u8], head_only: bool) {
+    let headers = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .expect("fixture repo HTTP server should write response headers");
+    if !head_only {
+        stream
+            .write_all(body)
+            .expect("fixture repo HTTP server should write response body");
+    }
+}
 
 const RUNA_STUB: &str = r#"#!/bin/sh
 set -eu
