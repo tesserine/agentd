@@ -27,7 +27,8 @@ pub use types::{
 pub use validation::{validate_agent_name, validate_environment_name};
 
 use container::{
-    create_container, log_cleanup_failure, run_container_to_completion, run_container_with_timeout,
+    ContainerLifecycleFailureKind, create_container, log_container_lifecycle_failure,
+    run_container_to_completion, run_container_with_timeout,
 };
 use resources::{
     SessionResources, cleanup_methodology_staging_dir, cleanup_podman_secrets,
@@ -60,7 +61,11 @@ pub fn run_session(
 
     if let Err(error) = create_container(&resources, &spec, &invocation) {
         if let Err(cleanup_error) = cleanup_session_resources(&resources) {
-            log_cleanup_failure("container creation", &cleanup_error);
+            log_container_lifecycle_failure(
+                ContainerLifecycleFailureKind::Cleanup,
+                "container creation",
+                &cleanup_error,
+            );
         }
         return Err(error);
     }
@@ -81,7 +86,11 @@ pub fn run_session(
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Err(error), Err(cleanup_error)) => {
-            log_cleanup_failure("session execution", &cleanup_error);
+            log_container_lifecycle_failure(
+                ContainerLifecycleFailureKind::Cleanup,
+                "session execution",
+                &cleanup_error,
+            );
             Err(error)
         }
     }
