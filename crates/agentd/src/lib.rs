@@ -5,3 +5,8 @@
 //! configuration and starts the daemon.
 
 pub mod config;
+pub mod logging;
+
+pub use logging::{
+    LogFormat, LoggingError, ResolvedLoggingConfig, configure_tracing, resolve_logging_config,
+};

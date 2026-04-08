@@ -35,11 +35,17 @@ pub(crate) fn create_container(
 
 pub(crate) fn run_container_to_completion(
     container_name: &str,
+    session_id: &str,
     secret_bindings: &[SecretBinding],
 ) -> Result<SessionOutcome, RunnerError> {
     let mut start = start_attached_container(container_name)?;
-    let wait_result =
-        wait_for_container_exit(&mut start.child, container_name, secret_bindings, None);
+    let wait_result = wait_for_container_exit(
+        &mut start.child,
+        container_name,
+        session_id,
+        secret_bindings,
+        None,
+    );
 
     match wait_result {
         Ok(Some(status)) => {
@@ -48,7 +54,7 @@ pub(crate) fn run_container_to_completion(
         }
         Ok(None) => unreachable!("container wait without timeout should not return a timeout"),
         Err(error) => {
-            cleanup_and_finalize_attached_start_after_wait_error(container_name, start);
+            cleanup_and_finalize_attached_start_after_wait_error(container_name, session_id, start);
             Err(error)
         }
     }
@@ -56,6 +62,7 @@ pub(crate) fn run_container_to_completion(
 
 pub(crate) fn run_container_with_timeout(
     container_name: &str,
+    session_id: &str,
     secret_bindings: &[SecretBinding],
     timeout: Duration,
 ) -> Result<SessionOutcome, RunnerError> {
@@ -63,6 +70,7 @@ pub(crate) fn run_container_with_timeout(
     let wait_result = wait_for_container_exit(
         &mut start.child,
         container_name,
+        session_id,
         secret_bindings,
         Some(timeout),
     );
@@ -78,11 +86,19 @@ pub(crate) fn run_container_with_timeout(
                 Ok(SessionOutcome::TimedOut)
             }
             Err(error) => {
-                log_lifecycle_failure(LifecycleFailureKind::Cleanup, "session execution", &error);
+                log_lifecycle_failure(
+                    LifecycleFailureKind::Cleanup,
+                    "session execution",
+                    container_name,
+                    session_id,
+                    &error,
+                );
                 if let Err(kill_error) = start.child.kill() {
                     log_lifecycle_failure(
                         LifecycleFailureKind::AttachedStartKill,
                         "session execution",
+                        container_name,
+                        session_id,
                         &kill_error,
                     );
                 }
@@ -90,6 +106,8 @@ pub(crate) fn run_container_with_timeout(
                     log_lifecycle_failure(
                         LifecycleFailureKind::AttachedStartFinalization,
                         "session execution",
+                        container_name,
+                        session_id,
                         &finalize_error,
                     );
                 }
@@ -97,7 +115,7 @@ pub(crate) fn run_container_with_timeout(
             }
         },
         Err(error) => {
-            cleanup_and_finalize_attached_start_after_wait_error(container_name, start);
+            cleanup_and_finalize_attached_start_after_wait_error(container_name, session_id, start);
             Err(error)
         }
     }
@@ -262,16 +280,25 @@ fn build_create_container_args(
 
 fn cleanup_and_finalize_attached_start_after_wait_error(
     container_name: &str,
+    session_id: &str,
     start: AttachedPodmanStart,
 ) {
     if let Err(error) = cleanup_container(container_name) {
-        log_lifecycle_failure(LifecycleFailureKind::Cleanup, "session execution", &error);
+        log_lifecycle_failure(
+            LifecycleFailureKind::Cleanup,
+            "session execution",
+            container_name,
+            session_id,
+            &error,
+        );
     }
 
     if let Err(error) = finalize_attached_start(start).map(|_| ()) {
         log_lifecycle_failure(
             LifecycleFailureKind::AttachedStartFinalization,
             "session execution",
+            container_name,
+            session_id,
             &error,
         );
     }
@@ -294,6 +321,7 @@ fn finalize_attached_start(
 fn wait_for_container_exit(
     child: &mut Child,
     container_name: &str,
+    session_id: &str,
     secret_bindings: &[SecretBinding],
     timeout: Option<Duration>,
 ) -> Result<Option<ExitStatus>, RunnerError> {
@@ -332,6 +360,8 @@ fn wait_for_container_exit(
                     Err(error) => log_lifecycle_failure(
                         LifecycleFailureKind::Cleanup,
                         "secret release",
+                        container_name,
+                        session_id,
                         &error,
                     ),
                 }

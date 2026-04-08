@@ -1,9 +1,9 @@
 use super::*;
-use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure_to};
+use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::resources::SessionResources;
 use crate::test_support::{
     CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario, InspectBehavior,
-    exit_status, fake_podman_lock, test_session_spec,
+    capture_tracing_events, exit_status, fake_podman_lock, test_session_spec,
 };
 use crate::{ResolvedEnvironmentVariable, SessionInvocation};
 use std::env;
@@ -308,6 +308,7 @@ fn wait_for_container_exit_checks_child_status_again_after_timeout_boundary() {
         wait_for_container_exit(
             &mut child,
             "container",
+            "session-123",
             &[SecretBinding {
                 secret_name: "secret".to_string(),
                 target_name: "GITHUB_TOKEN".to_string(),
@@ -432,57 +433,66 @@ fn attached_start_stderr_retains_only_bounded_tail() {
 
 #[test]
 fn logs_cleanup_failures_with_cleanup_prefix() {
-    let mut output = Vec::new();
+    let events = capture_tracing_events(|| {
+        log_lifecycle_failure(
+            LifecycleFailureKind::Cleanup,
+            "session execution",
+            "agentd-agent-session",
+            "session-123",
+            &RunnerError::InvalidBaseImage,
+        );
+    });
 
-    log_lifecycle_failure_to(
-        &mut output,
-        LifecycleFailureKind::Cleanup,
-        "session execution",
-        &RunnerError::InvalidBaseImage,
-    )
-    .expect("logging to an in-memory buffer should succeed");
-
-    assert_eq!(
-        String::from_utf8(output).expect("log output should be valid UTF-8"),
-        "cleanup after session execution failed: base_image must not be empty\n"
-    );
+    let event = &events[0];
+    assert_eq!(event["level"], "WARN");
+    assert_eq!(event["fields"]["event"], "runner.lifecycle_failure");
+    assert_eq!(event["fields"]["lifecycle_kind"], "cleanup");
+    assert_eq!(event["fields"]["stage"], "session execution");
+    assert_eq!(event["fields"]["container_name"], "agentd-agent-session");
+    assert_eq!(event["fields"]["session_id"], "session-123");
+    assert_eq!(event["fields"]["error"], "base_image must not be empty");
 }
 
 #[test]
 fn logs_attached_start_finalization_failures_with_finalization_prefix() {
-    let mut output = Vec::new();
+    let events = capture_tracing_events(|| {
+        log_lifecycle_failure(
+            LifecycleFailureKind::AttachedStartFinalization,
+            "session execution",
+            "agentd-agent-session",
+            "session-123",
+            &RunnerError::InvalidAgentCommand,
+        );
+    });
 
-    log_lifecycle_failure_to(
-        &mut output,
-        LifecycleFailureKind::AttachedStartFinalization,
-        "session execution",
-        &RunnerError::InvalidAgentCommand,
-    )
-    .expect("logging to an in-memory buffer should succeed");
-
+    let event = &events[0];
     assert_eq!(
-        String::from_utf8(output).expect("log output should be valid UTF-8"),
-        "attached start finalization after session execution failed: agent_command must contain at least one argument\n"
+        event["fields"]["lifecycle_kind"],
+        "attached_start_finalization"
+    );
+    assert_eq!(
+        event["fields"]["error"],
+        "agent_command must contain at least one argument"
     );
 }
 
 #[test]
 fn logs_attached_start_kill_failures_with_kill_prefix() {
-    let mut output = Vec::new();
-    let error = std::io::Error::other("kill failed");
+    let events = capture_tracing_events(|| {
+        let error = std::io::Error::other("kill failed");
 
-    log_lifecycle_failure_to(
-        &mut output,
-        LifecycleFailureKind::AttachedStartKill,
-        "session execution",
-        &error,
-    )
-    .expect("logging to an in-memory buffer should succeed");
+        log_lifecycle_failure(
+            LifecycleFailureKind::AttachedStartKill,
+            "session execution",
+            "agentd-agent-session",
+            "session-123",
+            &error,
+        );
+    });
 
-    assert_eq!(
-        String::from_utf8(output).expect("log output should be valid UTF-8"),
-        "attached start kill after session execution failed: kill failed\n"
-    );
+    let event = &events[0];
+    assert_eq!(event["fields"]["lifecycle_kind"], "attached_start_kill");
+    assert_eq!(event["fields"]["error"], "kill failed");
 }
 
 #[test]
@@ -815,6 +825,7 @@ fn wait_for_container_exit_returns_timeout_when_secret_release_fails() {
             wait_for_container_exit(
                 &mut child,
                 "container",
+                "session-123",
                 &[SecretBinding {
                     secret_name: "secret".to_string(),
                     target_name: "GITHUB_TOKEN".to_string(),
@@ -871,6 +882,7 @@ fn wait_for_container_exit_returns_timeout_promptly_when_inspect_stalls_past_dea
             wait_for_container_exit(
                 &mut child,
                 "container",
+                "session-123",
                 &[SecretBinding {
                     secret_name: "secret".to_string(),
                     target_name: "GITHUB_TOKEN".to_string(),
@@ -923,6 +935,7 @@ fn run_container_to_completion_reaps_attached_child_when_wait_for_container_exit
         .run_with_fake_podman_env(|| {
             run_container_to_completion(
                 "container",
+                "session-123",
                 &[SecretBinding {
                     secret_name: "secret".to_string(),
                     target_name: "GITHUB_TOKEN".to_string(),
@@ -985,7 +998,7 @@ fn run_container_with_timeout_returns_timed_out_promptly_when_cleanup_container_
     let started_at = Instant::now();
     let outcome = fixture
         .run_with_fake_podman_env(|| {
-            run_container_with_timeout("container", &[], Duration::from_millis(50))
+            run_container_with_timeout("container", "session-123", &[], Duration::from_millis(50))
         })
         .expect("timeout cleanup failure should still return TimedOut promptly");
     let elapsed = started_at.elapsed();

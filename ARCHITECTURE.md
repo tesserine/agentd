@@ -73,6 +73,14 @@ The workspace contains three crates because there are three distinct rates of ch
 
 A session is one execution of one agent from trigger to teardown.
 
+Operational visibility for that lifecycle uses structured tracing events written
+to stderr. The production default is timestamped JSON lines at `info` so
+operators can monitor normal session start, outcome, teardown, and lifecycle
+failures mechanically without extra log-filter setup; callers that invoke the
+runner without installing tracing still retain direct stderr diagnostics for
+failure paths. Local development can switch to a human-readable format through
+environment configuration.
+
 ### Phase 1: Scheduling (`agentd-scheduler`)
 
 The scheduler determines when an agent should run. Triggers may come from time-based schedules, external events, or manual invocation. The scheduler passes agent identity plus mission context to the runner.
