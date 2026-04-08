@@ -211,9 +211,9 @@ impl AgentConfig {
 /// A declared credential for an agent.
 ///
 /// The `name` becomes the environment variable name inside the container.
-/// The `source` is an opaque reference to the operator's secret store —
-/// agentd preserves it as-is and does not resolve it; resolution happens
-/// upstream before the runner receives the value.
+/// The `source` is the name of an environment variable that the daemon reads
+/// from its own process environment before passing the resolved value to the
+/// runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialConfig {
     name: String,
@@ -226,8 +226,8 @@ impl CredentialConfig {
         &self.name
     }
 
-    /// Opaque reference to the operator's secret store. Preserved as-is;
-    /// credential resolution is the caller's responsibility.
+    /// Environment variable name that the daemon later resolves from its own
+    /// process environment.
     pub fn source(&self) -> &str {
         &self.source
     }

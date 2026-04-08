@@ -116,7 +116,7 @@ From inside the environment, an agent should see:
 
 ## 6. Credential Flow
 
-Credentials are declared by agent configuration and sourced from an operator-managed secret store outside `agentd-runner`. During session setup, the runner receives already-resolved credential values from its caller, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
+Credentials are declared by agent configuration as daemon-side environment variable names. For each configured credential, the daemon resolves `source` with `std::env::var(source)` from its own process environment before calling `agentd-runner`. Operators provide those values through normal host mechanisms such as systemd `EnvironmentFile=`, shell exports, or container environment injection. During session setup, the runner receives only the already-resolved credential values, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
 
 Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When `SessionInvocation.repo_token` is present, the runner injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before `runa run` starts so the token does not persist in git config or the agent runtime environment.
 
@@ -127,7 +127,7 @@ Isolation is per agent: one agent receives only its own declared credentials. Sh
 | Need | Architectural Decision | Workspace Evidence | Failure if Violated |
 |---|---|---|---|
 | Network | Session environments receive deployment-controlled network access | `agentd-runner` owns session setup | Agents cannot reach external services |
-| Credentials | Secrets are injected at launch, not stored in code or images | `agentd-runner` accepts caller-resolved environment values | Agents cannot authenticate or credentials leak across agents |
+| Credentials | Secrets are injected at launch, not stored in code or images | `agentd` resolves configured environment-variable sources and `agentd-runner` accepts the resolved values | Agents cannot authenticate or credentials leak across agents |
 | Identity | Each session receives stable in-container identity variables and container naming | `agentd-runner` session contract and Podman lifecycle | Operators cannot distinguish which agent a session belongs to |
 | Mission | Scheduling or CLI invocation hands repo and optional work unit into session launch | `agentd-scheduler` plus `agentd-runner` boundary | Agents run without a reason or target |
 | Tool Availability | Tools are provided through the environment; MCP remains a runtime concern | Three-crate workspace with no transport crate | agentd would absorb protocol work it does not need |
