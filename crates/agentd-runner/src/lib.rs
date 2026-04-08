@@ -77,6 +77,7 @@ pub fn run_session(
                     "session_resource_allocation",
                     &error,
                 );
+                log_session_teardown(&session_id, &container_name, Ok(()));
                 return Err(error);
             }
         };
@@ -169,8 +170,9 @@ mod tests {
     use super::*;
     use crate::test_support::{
         FakePodmanFixture, FakePodmanScenario, capture_tracing_events, fake_podman_lock,
-        test_session_spec,
+        test_session_spec, unique_temp_dir,
     };
+    use std::fs;
 
     #[test]
     fn run_session_emits_start_outcome_and_teardown_events() {
@@ -196,6 +198,43 @@ mod tests {
         assert_eq!(events[0]["fields"]["event"], "runner.session_started");
         assert_eq!(events[1]["fields"]["event"], "runner.session_outcome");
         assert_eq!(events[1]["fields"]["outcome"], "succeeded");
+        assert_eq!(events[2]["fields"]["event"], "runner.session_teardown");
+        assert_eq!(events[2]["fields"]["result"], "ok");
+    }
+
+    #[test]
+    fn run_session_emits_teardown_after_resource_allocation_failure() {
+        let methodology_dir = unique_temp_dir("runner-missing-manifest");
+        fs::create_dir_all(&methodology_dir).expect("methodology directory should be created");
+
+        let events = capture_tracing_events(|| {
+            let error = run_session(
+                SessionSpec {
+                    methodology_dir: methodology_dir.clone(),
+                    ..test_session_spec()
+                },
+                SessionInvocation {
+                    repo_url: "https://example.com/agentd.git".to_string(),
+                    repo_token: None,
+                    work_unit: None,
+                    timeout: None,
+                },
+            )
+            .expect_err("session should fail during resource allocation");
+
+            assert!(
+                matches!(error, RunnerError::MissingMethodologyManifest { .. }),
+                "expected missing manifest error, got {error:?}"
+            );
+        });
+
+        fs::remove_dir_all(&methodology_dir)
+            .expect("temporary methodology directory should be removed");
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["fields"]["event"], "runner.session_started");
+        assert_eq!(events[1]["fields"]["event"], "runner.session_error");
+        assert_eq!(events[1]["fields"]["stage"], "session_resource_allocation");
         assert_eq!(events[2]["fields"]["event"], "runner.session_teardown");
         assert_eq!(events[2]["fields"]["result"], "ok");
     }
