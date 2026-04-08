@@ -1,10 +1,13 @@
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
+use serde_json::Value;
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use tracing_subscriber::fmt::MakeWriter;
 
 const VALID_REMOTE_REPO_URL: &str = "https://example.com/agentd.git";
 
@@ -21,6 +24,70 @@ pub(crate) fn test_session_spec() -> SessionSpec {
 pub(crate) fn fake_podman_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub(crate) fn capture_tracing_events(run: impl FnOnce()) -> Vec<Value> {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(SharedBuffer::new(buffer.clone()))
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, run);
+
+    let output = String::from_utf8(
+        buffer
+            .lock()
+            .expect("trace buffer should be lockable")
+            .clone(),
+    )
+    .expect("trace output should be valid UTF-8");
+
+    output
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("trace line should be valid JSON"))
+        .collect()
+}
+
+#[derive(Clone)]
+struct SharedBuffer {
+    inner: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedBuffer {
+    fn new(inner: Arc<Mutex<Vec<u8>>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<'a> MakeWriter<'a> for SharedBuffer {
+    type Writer = SharedBufferWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SharedBufferWriter {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+struct SharedBufferWriter {
+    inner: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for SharedBufferWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner
+            .lock()
+            .expect("trace buffer should be lockable")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Added a documented static agent configuration format in `examples/agentd.toml` plus strict TOML parsing in the `agentd` crate for agent identity, base image, methodology mounts, credentials, and static runa command settings.
 - Added a Podman-backed session lifecycle in `agentd-runner` that creates ephemeral containers, mounts methodology assets read-only, clones a fresh repository workspace, runs `runa`, injects caller-resolved credentials, supports optional timeouts, and force-removes the container on teardown.
 - Added explicit `SessionInvocation.repo_token` support in `agentd-runner` so private HTTPS repository clones can authenticate with a clone-only bearer token without exposing the token in `podman create` arguments, git argv, or persistent git config.
+- Added extraction-ready tracing bootstrap in `agentd` plus structured runner lifecycle/session events, with JSON logs to stderr by default, `AGENTD_LOG_FORMAT=json|pretty` for format selection, and `RUST_LOG`/`AGENTD_LOG` filter control.
 
 ### Changed
 
@@ -22,4 +23,4 @@ All notable changes to this project will be documented in this file.
 - Restored acceptance of trailing-slash repository remotes such as `https://example.com/repo.git/` while keeping `agentd-runner` restricted to public `https://`, `http://`, and `git://` `repo_url` schemes.
 - Updated `agentd-runner` environment injection so empty resolved values are passed as direct `NAME=` assignments while non-empty values continue through Podman-managed secrets, avoiding Podman's zero-byte secret rejection without exposing non-empty secrets in `podman create` arguments.
 - Updated `agentd-runner` session startup to create a standard `/home/{username}` workspace, run `runa run` as an unprivileged unix user via `gosu`, require `useradd` and `gosu` in the base image contract, and reject configured agent names that are invalid or reserved unix usernames during config validation.
-- Updated `agentd-runner` resource-allocation rollback so cleanup failures in `prepare_session_resources` are logged to process stderr with the same lifecycle cleanup formatter already used for other runner cleanup paths, while the original secret-creation error remains the returned failure.
+- Replaced raw runner lifecycle stderr logging with structured `tracing` events carrying `container_name`, `session_id`, stage, lifecycle kind, and error fields, and added explicit session start, outcome, and teardown events around `run_session`.

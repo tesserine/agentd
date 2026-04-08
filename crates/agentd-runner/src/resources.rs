@@ -5,13 +5,12 @@
 //! session completes. Partial-failure cleanup during allocation ensures no
 //! leaked secrets or stale directories when resource creation fails midway.
 
-use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure_to};
+use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::podman::run_podman_command_with_input;
 use crate::types::{RunnerError, SessionInvocation, SessionSpec};
 use crate::validation::REPO_TOKEN_ENV;
 use getrandom::fill as fill_random_bytes;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
@@ -53,20 +52,6 @@ pub(crate) fn prepare_session_resources(
     invocation: &SessionInvocation,
     session_id: &str,
 ) -> Result<SessionResources, RunnerError> {
-    let mut stderr = std::io::stderr().lock();
-    prepare_session_resources_with_logger(container_name, spec, invocation, session_id, &mut stderr)
-}
-
-fn prepare_session_resources_with_logger<W>(
-    container_name: &str,
-    spec: &SessionSpec,
-    invocation: &SessionInvocation,
-    session_id: &str,
-    writer: &mut W,
-) -> Result<SessionResources, RunnerError>
-where
-    W: Write,
-{
     let manifest_path = spec.methodology_dir.join("manifest.toml");
     if !manifest_path.is_file() {
         return Err(RunnerError::MissingMethodologyManifest {
@@ -93,7 +78,7 @@ where
         let secret_name = format!("{SESSION_SECRET_PREFIX}{session_id}-{index}");
         if let Err(error) = create_podman_secret(&secret_name, &variable.value) {
             return Err(rollback_failed_resource_allocation(
-                writer, &resources, error,
+                &resources, session_id, error,
             ));
         }
         resources.environment_secret_bindings.push(SecretBinding {
@@ -110,7 +95,7 @@ where
         let secret_name = format!("{SESSION_SECRET_PREFIX}{session_id}-repo-token");
         if let Err(error) = create_podman_secret(&secret_name, repo_token) {
             return Err(rollback_failed_resource_allocation(
-                writer, &resources, error,
+                &resources, session_id, error,
             ));
         }
         resources.repo_token_secret_binding = Some(SecretBinding {
@@ -122,28 +107,27 @@ where
     Ok(resources)
 }
 
-fn rollback_failed_resource_allocation<W>(
-    writer: &mut W,
+fn rollback_failed_resource_allocation(
     resources: &SessionResources,
+    session_id: &str,
     error: RunnerError,
-) -> RunnerError
-where
-    W: Write,
-{
+) -> RunnerError {
     if let Err(cleanup_error) = cleanup_podman_secrets(&resources.all_secret_bindings()) {
-        let _ = log_lifecycle_failure_to(
-            writer,
+        log_lifecycle_failure(
             LifecycleFailureKind::Cleanup,
             "session resource allocation",
+            &resources.container_name,
+            session_id,
             &cleanup_error,
         );
     }
     if let Err(cleanup_error) = cleanup_methodology_staging_dir(&resources.methodology_staging_dir)
     {
-        let _ = log_lifecycle_failure_to(
-            writer,
+        log_lifecycle_failure(
             LifecycleFailureKind::Cleanup,
             "session resource allocation",
+            &resources.container_name,
+            session_id,
             &cleanup_error,
         );
     }
@@ -275,76 +259,43 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::prepare_session_resources;
     use crate::test_support::{
-        CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario, fake_podman_lock,
-        test_session_spec,
+        CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
+        capture_tracing_events, fake_podman_lock, test_session_spec,
     };
     use crate::{ResolvedEnvironmentVariable, RunnerError, SessionInvocation};
-    use std::env;
-    use std::process::Command;
-
-    const CHILD_MODE_ENV: &str = "AGENTD_RUNNER_RESOURCE_TEST_CHILD";
 
     #[test]
     fn prepare_session_resources_logs_cleanup_failure_after_environment_secret_create_failure() {
-        if env::var_os(CHILD_MODE_ENV).as_deref() == Some("environment-secret".as_ref()) {
-            run_environment_secret_create_failure_scenario();
-            return;
-        }
+        let events = capture_tracing_events(run_environment_secret_create_failure_scenario);
 
-        let output = run_current_test_as_child(
-            "resources::tests::prepare_session_resources_logs_cleanup_failure_after_environment_secret_create_failure",
-            "environment-secret",
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["fields"]["event"], "runner.lifecycle_failure");
+        assert_eq!(events[0]["fields"]["stage"], "session resource allocation");
         assert!(
-            stderr.contains("cleanup after session resource allocation failed:"),
-            "expected cleanup failure log in child stderr, got: {stderr}"
-        );
-        assert!(
-            stderr.contains("secret cleanup failed after create failure"),
-            "expected secret cleanup stderr in child stderr, got: {stderr}"
+            events[0]["fields"]["error"]
+                .as_str()
+                .expect("error field should be a string")
+                .contains("secret cleanup failed after create failure"),
+            "expected cleanup failure detail, got: {}",
+            events[0]["fields"]["error"]
         );
     }
 
     #[test]
     fn prepare_session_resources_logs_cleanup_failure_after_repo_token_secret_create_failure() {
-        if env::var_os(CHILD_MODE_ENV).as_deref() == Some("repo-token".as_ref()) {
-            run_repo_token_secret_create_failure_scenario();
-            return;
-        }
+        let events = capture_tracing_events(run_repo_token_secret_create_failure_scenario);
 
-        let output = run_current_test_as_child(
-            "resources::tests::prepare_session_resources_logs_cleanup_failure_after_repo_token_secret_create_failure",
-            "repo-token",
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["fields"]["event"], "runner.lifecycle_failure");
+        assert_eq!(events[0]["fields"]["stage"], "session resource allocation");
         assert!(
-            stderr.contains("cleanup after session resource allocation failed:"),
-            "expected cleanup failure log in child stderr, got: {stderr}"
+            events[0]["fields"]["error"]
+                .as_str()
+                .expect("error field should be a string")
+                .contains("secret cleanup failed after repo token create failure"),
+            "expected cleanup failure detail, got: {}",
+            events[0]["fields"]["error"]
         );
-        assert!(
-            stderr.contains("secret cleanup failed after repo token create failure"),
-            "expected secret cleanup stderr in child stderr, got: {stderr}"
-        );
-    }
-
-    fn run_current_test_as_child(test_name: &str, child_mode: &str) -> std::process::Output {
-        let output = Command::new(env::current_exe().expect("current test binary should exist"))
-            .env(CHILD_MODE_ENV, child_mode)
-            .arg("--exact")
-            .arg(test_name)
-            .arg("--nocapture")
-            .output()
-            .expect("child test process should start");
-
-        assert!(
-            output.status.success(),
-            "child test should succeed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        output
     }
 
     fn run_environment_secret_create_failure_scenario() {
