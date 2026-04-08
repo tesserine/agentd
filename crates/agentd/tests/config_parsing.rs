@@ -78,9 +78,18 @@ fn parses_example_config_into_static_agent_settings() {
     let agent = config.agent("codex").expect("example agent should exist");
 
     assert_eq!(config.agents().len(), 1);
+    assert_eq!(
+        config.daemon().socket_path(),
+        Path::new("/run/agentd/agentd.sock")
+    );
+    assert_eq!(
+        config.daemon().pid_file(),
+        Path::new("/run/agentd/agentd.pid")
+    );
     assert_eq!(agent.name(), "codex");
     assert_eq!(agent.base_image(), "ghcr.io/example/codex:latest");
     assert_eq!(agent.methodology_dir(), Path::new("../groundwork"));
+    assert_eq!(agent.repo_token_source(), Some("CODEX_REPO_TOKEN"));
     assert_eq!(
         agent.runa().command(),
         &["codex".to_string(), "exec".to_string()]
@@ -152,6 +161,134 @@ command = ["codex", "exec"]
 }
 
 #[test]
+fn parses_default_daemon_paths_when_daemon_section_is_omitted() {
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("config should parse with daemon defaults");
+
+    assert_eq!(
+        config.daemon().socket_path(),
+        Path::new("/run/agentd/agentd.sock")
+    );
+    assert_eq!(
+        config.daemon().pid_file(),
+        Path::new("/run/agentd/agentd.pid")
+    );
+}
+
+#[test]
+fn parses_explicit_daemon_paths() {
+    let config = Config::from_str(
+        r#"
+[daemon]
+socket_path = "/tmp/agentd-test.sock"
+pid_file = "/tmp/agentd-test.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("config should parse explicit daemon paths");
+
+    assert_eq!(
+        config.daemon().socket_path(),
+        Path::new("/tmp/agentd-test.sock")
+    );
+    assert_eq!(
+        config.daemon().pid_file(),
+        Path::new("/tmp/agentd-test.pid")
+    );
+}
+
+#[test]
+fn parses_repo_token_source_as_optional_clone_auth_lookup_key() {
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+repo_token_source = "CODEX_REPO_TOKEN"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("config should parse repo token source");
+
+    let agent = config.agent("codex").expect("agent should exist");
+
+    assert_eq!(agent.repo_token_source(), Some("CODEX_REPO_TOKEN"));
+}
+
+#[test]
+fn normalizes_empty_repo_token_source_to_none() {
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+repo_token_source = ""
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("empty repo token source should disable clone auth");
+
+    let agent = config.agent("codex").expect("agent should exist");
+
+    assert_eq!(agent.repo_token_source(), None);
+}
+
+#[test]
+fn rejects_repo_token_source_with_outer_whitespace() {
+    for repo_token_source in [" CODEX_REPO_TOKEN", "CODEX_REPO_TOKEN "] {
+        let error = Config::from_str(&format!(
+            r#"
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+repo_token_source = "{repo_token_source}"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#
+        ))
+        .expect_err("whitespace-padded repo token sources should be rejected");
+
+        match error {
+            ConfigError::FieldHasOuterWhitespace {
+                field,
+                agent,
+                credential,
+            } => {
+                assert_eq!(field, "repo_token_source");
+                assert_eq!(agent.as_deref(), Some("codex"));
+                assert_eq!(credential, None);
+            }
+            other => panic!("expected whitespace validation error, got {other}"),
+        }
+    }
+}
+
+#[test]
 fn rejects_unknown_fields_in_agent_config() {
     let error = Config::from_str(
         r#"
@@ -166,6 +303,29 @@ command = ["codex", "exec"]
 "#,
     )
     .expect_err("unknown fields should be rejected");
+
+    assert!(error.to_string().contains("unknown field"));
+    assert!(error.to_string().contains("extra"));
+}
+
+#[test]
+fn rejects_unknown_fields_in_daemon_config() {
+    let error = Config::from_str(
+        r#"
+[daemon]
+socket_path = "/tmp/agentd.sock"
+extra = "nope"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect_err("unknown daemon fields should be rejected");
 
     assert!(error.to_string().contains("unknown field"));
     assert!(error.to_string().contains("extra"));

@@ -1,10 +1,10 @@
-//! TOML configuration parsing and validation for the agent registry.
+//! TOML configuration parsing and validation for the daemon and agent registry.
 //!
-//! Bridges operator-facing configuration to the runner's [`SessionSpec`]
-//! model. Validation here is stricter than the runner's own validation —
-//! it enforces uniqueness (no duplicate agent or credential names),
-//! non-empty fields, and whitespace hygiene in addition to the runner's
-//! format and reservation rules.
+//! Bridges operator-facing configuration to daemon dispatch and the runner's
+//! [`SessionSpec`] model. Validation here is stricter than the runner's own
+//! validation — it enforces uniqueness (no duplicate agent or credential
+//! names), non-empty fields, and whitespace hygiene in addition to the
+//! runner's format and reservation rules.
 //!
 //! [`SessionSpec`]: agentd_runner::SessionSpec
 
@@ -16,14 +16,15 @@ use std::str::FromStr;
 use agentd_runner::{RunnerError, validate_agent_name, validate_environment_name};
 use serde::Deserialize;
 
-/// Validated agent registry parsed from a TOML configuration file.
+/// Validated daemon and agent registry parsed from a TOML configuration file.
 ///
-/// Guarantees that all agent names are unique and valid, all required fields
-/// are non-empty, and all credential names are valid environment variable
-/// names. Relative `methodology_dir` paths are resolved against the
-/// configuration file's parent directory.
+/// Guarantees that daemon runtime paths are present, all agent names are
+/// unique and valid, all required fields are non-empty, and all credential
+/// names are valid environment variable names. Relative `methodology_dir`
+/// paths are resolved against the configuration file's parent directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
+    daemon: DaemonConfig,
     agents: Vec<AgentConfig>,
 }
 
@@ -44,6 +45,11 @@ impl Config {
         &self.agents
     }
 
+    /// Returns the daemon-wide runtime paths.
+    pub fn daemon(&self) -> &DaemonConfig {
+        &self.daemon
+    }
+
     /// Looks up an agent by name. Returns `None` if no agent matches.
     pub fn agent(&self, name: &str) -> Option<&AgentConfig> {
         self.agents.iter().find(|agent| agent.name == name)
@@ -51,6 +57,8 @@ impl Config {
 
     fn parse(contents: &str, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(contents)?;
+        validate_non_empty("daemon.socket_path", &raw.daemon.socket_path, None, None)?;
+        validate_non_empty("daemon.pid_file", &raw.daemon.pid_file, None, None)?;
 
         if raw.agents.is_empty() {
             return Err(ConfigError::NoAgents);
@@ -85,6 +93,19 @@ impl Config {
                 Some(raw_agent.name.as_str()),
                 None,
             )?;
+            let repo_token_source = match raw_agent.repo_token_source {
+                Some(value) if value.is_empty() => None,
+                Some(value) => {
+                    validate_lookup_key(
+                        "repo_token_source",
+                        &value,
+                        Some(raw_agent.name.as_str()),
+                        None,
+                    )?;
+                    Some(value)
+                }
+                None => None,
+            };
 
             if raw_agent.runa.command.is_empty() {
                 return Err(ConfigError::EmptyCommand {
@@ -143,12 +164,19 @@ impl Config {
                 name: raw_agent.name,
                 base_image: raw_agent.base_image,
                 methodology_dir,
+                repo_token_source,
                 credentials,
                 runa: RunaConfig { command },
             });
         }
 
-        Ok(Self { agents })
+        Ok(Self {
+            daemon: DaemonConfig {
+                socket_path: PathBuf::from(raw.daemon.socket_path),
+                pid_file: PathBuf::from(raw.daemon.pid_file),
+            },
+            agents,
+        })
     }
 }
 
@@ -174,6 +202,7 @@ pub struct AgentConfig {
     name: String,
     base_image: String,
     methodology_dir: PathBuf,
+    repo_token_source: Option<String>,
     credentials: Vec<CredentialConfig>,
     runa: RunaConfig,
 }
@@ -194,6 +223,13 @@ impl AgentConfig {
     /// constructed via the [`FromStr`] impl.
     pub fn methodology_dir(&self) -> &Path {
         &self.methodology_dir
+    }
+
+    /// Optional environment variable name resolved by the daemon at dispatch
+    /// time to authenticate the runner-managed `git clone` only. This value is
+    /// not injected into the agent runtime environment.
+    pub fn repo_token_source(&self) -> Option<&str> {
+        self.repo_token_source.as_deref()
     }
 
     /// Declared credentials for this agent. Each credential's name is a
@@ -245,6 +281,25 @@ impl RunaConfig {
     /// a TOML string in the array. Must contain at least one element.
     pub fn command(&self) -> &[String] {
         &self.command
+    }
+}
+
+/// Daemon-wide paths for the operator socket and PID file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonConfig {
+    socket_path: PathBuf,
+    pid_file: PathBuf,
+}
+
+impl DaemonConfig {
+    /// Filesystem path for the daemon's local Unix socket.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Filesystem path for the daemon's PID file and advisory lock.
+    pub fn pid_file(&self) -> &Path {
+        &self.pid_file
     }
 }
 
@@ -380,7 +435,27 @@ impl From<toml::de::Error> for ConfigError {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
+    daemon: RawDaemonConfig,
+    #[serde(default)]
     agents: Vec<RawAgentConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDaemonConfig {
+    #[serde(default = "default_daemon_socket_path")]
+    socket_path: String,
+    #[serde(default = "default_daemon_pid_file")]
+    pid_file: String,
+}
+
+impl Default for RawDaemonConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: default_daemon_socket_path(),
+            pid_file: default_daemon_pid_file(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,6 +464,7 @@ struct RawAgentConfig {
     name: String,
     base_image: String,
     methodology_dir: String,
+    repo_token_source: Option<String>,
     #[serde(default)]
     credentials: Vec<RawCredentialConfig>,
     runa: RawRunaConfig,
@@ -405,6 +481,14 @@ struct RawCredentialConfig {
 #[serde(deny_unknown_fields)]
 struct RawRunaConfig {
     command: Vec<String>,
+}
+
+fn default_daemon_socket_path() -> String {
+    "/run/agentd/agentd.sock".to_string()
+}
+
+fn default_daemon_pid_file() -> String {
+    "/run/agentd/agentd.pid".to_string()
 }
 
 fn validate_non_empty(

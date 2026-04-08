@@ -4,9 +4,11 @@
 
 ## Status
 
-[![Status](https://img.shields.io/badge/status-placeholder-lightgrey)](#)
-
-Early development. Not yet functional.
+Early development. The current build supports:
+- foreground single-instance daemon startup
+- local Unix-socket operator control
+- manual `agentd run <agent> <repo> [--work-unit <wu>]` session triggers
+- clone-only repository auth through optional `repo_token_source`
 
 ## Architecture Overview
 
@@ -14,7 +16,36 @@ The system is organized as a Rust workspace with focused crates for composition,
 
 ## Quick Start
 
-Coming soon.
+1. Start from [examples/agentd.toml](examples/agentd.toml) and define at least one agent.
+2. Export any runtime credential env vars named by `[[agents.credentials]].source`.
+3. Optionally export the env var named by `repo_token_source` when private HTTPS clones need a bearer token for `git clone`.
+4. Start the daemon:
+
+```bash
+agentd daemon --config /etc/agentd/agentd.toml
+```
+
+`agentd` with no subcommand is the same as `agentd daemon`.
+
+The daemon is a foreground process. By default it uses:
+- socket: `/run/agentd/agentd.sock`
+- pid file: `/run/agentd/agentd.pid`
+
+Override those paths in the config file:
+
+```toml
+[daemon]
+socket_path = "/run/agentd/agentd.sock"
+pid_file = "/run/agentd/agentd.pid"
+```
+
+Trigger a manual session through the running daemon:
+
+```bash
+agentd run codex https://github.com/pentaxis93/agentd.git --work-unit issue-52
+```
+
+`repo_token_source` is not a runtime credential. It is resolved by the daemon at dispatch time, mapped to `SessionInvocation.repo_token`, and used only for the runner-managed `git clone`.
 
 ## License
 
