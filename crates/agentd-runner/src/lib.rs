@@ -77,7 +77,13 @@ pub fn run_session(
                     "session_resource_allocation",
                     &error,
                 );
-                log_session_teardown(&session_id, &container_name, Ok(()));
+                tracing::info!(
+                    event = "runner.session_teardown",
+                    session_id = session_id,
+                    container_name = container_name,
+                    result = "skipped",
+                    "runner session teardown skipped"
+                );
                 return Err(error);
             }
         };
@@ -169,8 +175,8 @@ fn cleanup_session_resources(resources: &SessionResources) -> Result<(), RunnerE
 mod tests {
     use super::*;
     use crate::test_support::{
-        FakePodmanFixture, FakePodmanScenario, capture_tracing_events, fake_podman_lock,
-        test_session_spec, unique_temp_dir,
+        CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
+        capture_tracing_events, fake_podman_lock, test_session_spec, unique_temp_dir,
     };
     use std::fs;
 
@@ -236,6 +242,76 @@ mod tests {
         assert_eq!(events[1]["fields"]["event"], "runner.session_error");
         assert_eq!(events[1]["fields"]["stage"], "session_resource_allocation");
         assert_eq!(events[2]["fields"]["event"], "runner.session_teardown");
-        assert_eq!(events[2]["fields"]["result"], "ok");
+        assert_eq!(events[2]["fields"]["result"], "skipped");
+    }
+
+    #[test]
+    fn run_session_marks_teardown_skipped_when_allocation_rollback_logs_failure() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_secret_create(CommandBehavior::sequence(vec![
+                    CommandOutcome::new()
+                        .append_args_with_prefix("secret-commands.log", "create")
+                        .capture_stdin_to("secret-value.log"),
+                    CommandOutcome::new()
+                        .append_args_with_prefix("secret-commands.log", "create")
+                        .stderr("secret create failed")
+                        .exit_code(37),
+                ]))
+                .with_secret_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .append_args_with_prefix("secret-commands.log", "rm")
+                        .stderr("secret cleanup failed after create failure")
+                        .exit_code(41),
+                )),
+        );
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+
+        let events = capture_tracing_events(|| {
+            let error = fixture
+                .run_with_fake_podman_env(|| {
+                    run_session(
+                        SessionSpec {
+                            methodology_dir,
+                            environment: vec![
+                                ResolvedEnvironmentVariable {
+                                    name: "GITHUB_TOKEN".to_string(),
+                                    value: "test-token".to_string(),
+                                },
+                                ResolvedEnvironmentVariable {
+                                    name: "SECOND_SECRET".to_string(),
+                                    value: "second-token".to_string(),
+                                },
+                            ],
+                            ..test_session_spec()
+                        },
+                        SessionInvocation {
+                            repo_url: "https://example.com/agentd.git".to_string(),
+                            repo_token: None,
+                            work_unit: None,
+                            timeout: None,
+                        },
+                    )
+                })
+                .expect_err("session should fail during resource allocation");
+
+            assert!(
+                matches!(error, RunnerError::PodmanCommandFailed { .. }),
+                "expected podman command failure, got {error:?}"
+            );
+        });
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0]["fields"]["event"], "runner.session_started");
+        assert_eq!(events[1]["fields"]["event"], "runner.lifecycle_failure");
+        assert_eq!(events[1]["fields"]["stage"], "session resource allocation");
+        assert_eq!(events[2]["fields"]["event"], "runner.session_error");
+        assert_eq!(events[2]["fields"]["stage"], "session_resource_allocation");
+        assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
+        assert_eq!(events[3]["fields"]["result"], "skipped");
     }
 }
