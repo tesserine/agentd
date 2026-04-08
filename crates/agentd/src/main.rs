@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::{error::Error, fmt};
 
 use agentd::config::Config;
 use agentd::{
@@ -12,6 +13,23 @@ use clap::{Parser, Subcommand};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
+
+#[derive(Debug)]
+enum RunCommandError {
+    Failed { exit_code: i32 },
+    TimedOut,
+}
+
+impl fmt::Display for RunCommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed { exit_code } => write!(f, "session failed (exit code {exit_code})"),
+            Self::TimedOut => write!(f, "session timed out"),
+        }
+    }
+}
+
+impl Error for RunCommandError {}
 
 #[derive(Parser, Debug)]
 #[command(name = "agentd")]
@@ -70,7 +88,7 @@ fn run_daemon(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     signal_hook::flag::register(SIGTERM, shutdown.clone())?;
 
     let executor = RunnerSessionExecutor;
-    run_daemon_until_shutdown(config, &executor, shutdown.as_ref())?;
+    run_daemon_until_shutdown(config, executor, shutdown.as_ref())?;
     Ok(())
 }
 
@@ -90,12 +108,13 @@ fn run_client(
     )?;
 
     match outcome {
-        agentd_runner::SessionOutcome::Succeeded => println!("session succeeded"),
-        agentd_runner::SessionOutcome::Failed { exit_code } => {
-            println!("session failed (exit code {exit_code})")
+        agentd_runner::SessionOutcome::Succeeded => {
+            println!("session succeeded");
+            Ok(())
         }
-        agentd_runner::SessionOutcome::TimedOut => println!("session timed out"),
+        agentd_runner::SessionOutcome::Failed { exit_code } => {
+            Err(Box::new(RunCommandError::Failed { exit_code }))
+        }
+        agentd_runner::SessionOutcome::TimedOut => Err(Box::new(RunCommandError::TimedOut)),
     }
-
-    Ok(())
 }

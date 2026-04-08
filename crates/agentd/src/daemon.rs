@@ -2,8 +2,10 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -14,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::{DispatchError, ManualRunRequest, SessionExecutor, dispatch_manual_run};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
+const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -144,10 +146,11 @@ impl From<OutcomeMessage> for SessionOutcome {
 /// Run the foreground daemon until `shutdown` becomes true.
 pub fn run_daemon_until_shutdown(
     config: Config,
-    executor: &impl SessionExecutor,
+    executor: impl SessionExecutor + Send + Sync + Clone + 'static,
     shutdown: &AtomicBool,
 ) -> Result<(), DaemonError> {
     let runtime = DaemonRuntime::bind(config.daemon().socket_path(), config.daemon().pid_file())?;
+    let executor = Arc::new(executor);
     tracing::info!(
         event = "agentd.daemon_started",
         socket_path = %config.daemon().socket_path().display(),
@@ -157,16 +160,30 @@ pub fn run_daemon_until_shutdown(
 
     while !shutdown.load(Ordering::Acquire) {
         match runtime.listener.accept() {
-            Ok((stream, _)) => handle_connection(stream, &config, executor),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(POLL_INTERVAL);
-            }
+            Ok((stream, _)) => spawn_connection_handler(stream, config.clone(), executor.clone()),
+            Err(error) if accept_was_interrupted(&error) => continue,
             Err(error) => return Err(DaemonError::Io(error)),
         }
     }
 
     tracing::info!(event = "agentd.daemon_stopped", "agentd daemon stopped");
     Ok(())
+}
+
+fn accept_was_interrupted(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    )
+}
+
+fn spawn_connection_handler<E>(stream: UnixStream, config: Config, executor: Arc<E>)
+where
+    E: SessionExecutor + Send + Sync + 'static,
+{
+    thread::spawn(move || {
+        handle_connection(stream, &config, executor.as_ref());
+    });
 }
 
 /// Trigger a manual run against the local daemon and wait for its terminal outcome.
@@ -339,12 +356,10 @@ impl DaemonRuntime {
         write!(&mut pid_lock, "{}", std::process::id())?;
         pid_lock.sync_data()?;
 
-        if socket_path.exists() {
-            std::fs::remove_file(socket_path)?;
-        }
+        prepare_socket_path(socket_path)?;
 
         let listener = UnixListener::bind(socket_path)?;
-        listener.set_nonblocking(true)?;
+        set_listener_receive_timeout(&listener, ACCEPT_TIMEOUT)?;
 
         Ok(Self {
             listener,
@@ -357,8 +372,65 @@ impl DaemonRuntime {
 
 impl Drop for DaemonRuntime {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = remove_socket_file_if_present(&self.socket_path);
         let _ = std::fs::remove_file(&self.pid_file);
+    }
+}
+
+fn prepare_socket_path(socket_path: &Path) -> Result<(), DaemonError> {
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_socket() {
+                std::fs::remove_file(socket_path)?;
+                Ok(())
+            } else {
+                Err(DaemonError::Io(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "socket_path exists but is not a Unix socket: {}",
+                        socket_path.display()
+                    ),
+                )))
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DaemonError::Io(error)),
+    }
+}
+
+fn remove_socket_file_if_present(socket_path: &Path) -> Result<(), io::Error> {
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(socket_path),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn set_listener_receive_timeout(
+    listener: &UnixListener,
+    timeout: Duration,
+) -> Result<(), io::Error> {
+    let timeout = libc::timeval {
+        tv_sec: timeout.as_secs().try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "listener timeout too large")
+        })?,
+        tv_usec: i64::from(timeout.subsec_micros()),
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            listener.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &timeout as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 

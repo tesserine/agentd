@@ -71,6 +71,7 @@ pub trait SessionExecutor {
 }
 
 /// Production executor that forwards directly into `agentd-runner`.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct RunnerSessionExecutor;
 
 impl SessionExecutor for RunnerSessionExecutor {
