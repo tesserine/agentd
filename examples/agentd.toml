@@ -16,5 +16,5 @@ command = ["codex", "exec"]
 [[agents.credentials]]
 # Secret name exposed inside the session environment.
 name = "GITHUB_TOKEN"
-# Operator-managed secret reference. agentd preserves this string as-is.
-source = "op://agentd/github/token"
+# Environment variable name read from the daemon's own process environment.
+source = "AGENTD_GITHUB_TOKEN"

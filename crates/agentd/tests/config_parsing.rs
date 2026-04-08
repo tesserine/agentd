@@ -87,7 +87,7 @@ fn parses_example_config_into_static_agent_settings() {
     );
     assert_eq!(agent.credentials().len(), 1);
     assert_eq!(agent.credentials()[0].name(), "GITHUB_TOKEN");
-    assert_eq!(agent.credentials()[0].source(), "op://agentd/github/token");
+    assert_eq!(agent.credentials()[0].source(), "AGENTD_GITHUB_TOKEN");
 }
 
 #[test]
@@ -221,11 +221,11 @@ command = ["codex", "exec"]
 
 [[agents.credentials]]
 name = "GITHUB_TOKEN"
-source = "op://agentd/github/token"
+source = "AGENTD_GITHUB_TOKEN"
 
 [[agents.credentials]]
 name = "GITHUB_TOKEN"
-source = "op://agentd/github/other-token"
+source = "AGENTD_GITHUB_OTHER_TOKEN"
 "#,
     )
     .expect_err("duplicate credential names should be rejected");
@@ -323,7 +323,7 @@ command = ["codex", "exec"]
 
 [[agents.credentials]]
 name = "{name}"
-source = "op://agentd/github/token"
+source = "AGENTD_GITHUB_TOKEN"
 "#
         ))
         .expect_err("whitespace-padded credential names should be rejected");
@@ -357,7 +357,7 @@ command = ["codex", "exec"]
 
 [[agents.credentials]]
 name = "TOKEN,EXTRA"
-source = "op://agentd/github/token"
+source = "AGENTD_GITHUB_TOKEN"
 "#,
     )
     .expect_err("comma-delimited credential names should be rejected");
@@ -385,7 +385,7 @@ command = ["codex", "exec"]
 
 [[agents.credentials]]
 name = "FOO=BAR"
-source = "op://agentd/github/token"
+source = "AGENTD_GITHUB_TOKEN"
 "#,
     )
     .expect_err("credential names containing '=' should be rejected");
@@ -413,7 +413,7 @@ command = ["codex", "exec"]
 
 [[agents.credentials]]
 name = "AGENT_NAME"
-source = "op://agentd/github/token"
+source = "AGENTD_GITHUB_TOKEN"
 "#,
     )
     .expect_err("runner-reserved credential names should be rejected");
