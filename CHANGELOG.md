@@ -9,7 +9,7 @@ All notable changes to this project will be documented in this file.
 - Added a documented static agent configuration format in `examples/agentd.toml` plus strict TOML parsing in the `agentd` crate for agent identity, base image, methodology mounts, credentials, and static runa command settings.
 - Added a Podman-backed session lifecycle in `agentd-runner` that creates ephemeral containers, mounts methodology assets read-only, clones a fresh repository workspace, runs `runa`, injects caller-resolved credentials, supports optional timeouts, and force-removes the container on teardown.
 - Added explicit `SessionInvocation.repo_token` support in `agentd-runner` so private HTTPS repository clones can authenticate with a clone-only bearer token without exposing the token in `podman create` arguments, git argv, or persistent git config.
-- Added extraction-ready tracing bootstrap in `agentd` plus structured runner lifecycle/session events, with JSON logs to stderr by default, `AGENTD_LOG_FORMAT=json|pretty` for format selection, and `RUST_LOG`/`AGENTD_LOG` filter control.
+- Added extraction-ready tracing bootstrap in `agentd` plus structured runner lifecycle/session events, with timestamped JSON logs to stderr by default, an `info` default filter so normal session lifecycle records are visible without extra env setup, `runner.session_error` for pre-completion failures, stderr fallback for runner failure diagnostics when no tracing subscriber is installed, `AGENTD_LOG_FORMAT=json|pretty` for format selection, and `RUST_LOG`/`AGENTD_LOG` filter control.
 
 ### Changed
 

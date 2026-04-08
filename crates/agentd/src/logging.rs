@@ -13,11 +13,12 @@ use std::sync::{Arc, OnceLock};
 
 use tracing_subscriber::Registry;
 use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::{self as tracing_fmt, MakeWriter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::reload;
 
-const DEFAULT_FILTER: &str = "warn";
+const DEFAULT_FILTER: &str = "info";
 const DEFAULT_FORMAT: LogFormat = LogFormat::Json;
 const AGENTD_LOG_FORMAT_ENV: &str = "AGENTD_LOG_FORMAT";
 const AGENTD_LOG_ENV: &str = "AGENTD_LOG";
@@ -140,11 +141,7 @@ impl TracingHandle {
             .with_ansi(false)
             .without_time()
             .compact();
-        let json_layer = tracing_fmt::layer()
-            .json()
-            .with_writer(json_writer)
-            .with_ansi(false)
-            .without_time();
+        let json_layer = build_json_layer(json_writer);
 
         let subscriber = Registry::default()
             .with(filter_layer)
@@ -265,16 +262,80 @@ fn format_code(format: LogFormat) -> u8 {
 
 static TRACING_HANDLE: OnceLock<TracingHandle> = OnceLock::new();
 
+fn build_json_layer<S, W>(
+    writer: W,
+) -> tracing_fmt::Layer<
+    S,
+    tracing_subscriber::fmt::format::JsonFields,
+    tracing_subscriber::fmt::format::Format<tracing_subscriber::fmt::format::Json, SystemTime>,
+    W,
+>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+{
+    tracing_fmt::layer()
+        .json()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_timer(SystemTime)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LogFormat, resolve_log_format, resolve_logging_config_with_env};
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    use super::{LogFormat, build_json_layer, resolve_log_format, resolve_logging_config_with_env};
+    use tracing_subscriber::Registry;
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[derive(Clone)]
+    struct SharedBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedBuffer {
+        fn new(inner: Arc<Mutex<Vec<u8>>>) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedBuffer {
+        type Writer = SharedBufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedBufferWriter {
+                inner: self.inner.clone(),
+            }
+        }
+    }
+
+    struct SharedBufferWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("trace buffer should be lockable")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
-    fn resolve_logging_config_defaults_to_json_warn() {
+    fn resolve_logging_config_defaults_to_json_info() {
         let resolved = resolve_logging_config_with_env(None, None);
 
         assert_eq!(resolved.format, LogFormat::Json);
-        assert_eq!(resolved.filter, "warn");
+        assert_eq!(resolved.filter, "info");
     }
 
     #[test]
@@ -295,7 +356,7 @@ mod tests {
     fn resolve_logging_config_ignores_empty_filter_values() {
         let resolved = resolve_logging_config_with_env(Some(""), Some(""));
 
-        assert_eq!(resolved.filter, "warn");
+        assert_eq!(resolved.filter, "info");
     }
 
     #[test]
@@ -320,5 +381,29 @@ mod tests {
 
         assert_eq!(format, LogFormat::Json);
         assert_eq!(invalid.as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn json_logs_include_timestamps() {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber =
+            Registry::default().with(build_json_layer(SharedBuffer::new(buffer.clone())));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(event = "agentd.logging_test", "json log event");
+        });
+
+        let output = String::from_utf8(
+            buffer
+                .lock()
+                .expect("trace buffer should be lockable")
+                .clone(),
+        )
+        .expect("trace output should be valid UTF-8");
+
+        assert!(
+            output.contains("\"timestamp\""),
+            "expected timestamp field in json output: {output}"
+        );
     }
 }
