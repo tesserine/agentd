@@ -78,3 +78,21 @@ fn workspace_docs_describe_only_the_three_grounded_crates() {
     assert!(architecture.contains("`agentd-runner`"));
     assert!(architecture.contains("`agentd-scheduler`"));
 }
+
+#[test]
+fn architecture_describes_uniform_socket_intake_for_session_triggers() {
+    let architecture = read_workspace_file("ARCHITECTURE.md");
+
+    assert!(
+        architecture.contains("single intake for all session triggers"),
+        "architecture should describe the Unix socket as the single session intake"
+    );
+    assert!(
+        architecture.contains("scheduler is a socket client"),
+        "architecture should describe the scheduler as a socket client"
+    );
+    assert!(
+        !architecture.contains("The scheduler passes agent identity plus mission context to the runner."),
+        "architecture should not describe the scheduler as handing work directly to the runner"
+    );
+}
