@@ -73,6 +73,12 @@ The workspace contains three crates because there are three distinct rates of ch
 
 A session is one execution of one agent from trigger to teardown.
 
+Before the daemon accepts any session trigger, it first reconciles stale
+runner-managed Podman resources from prior runs. Dead `agentd-*` containers
+are removed, then orphaned `agentd-secret-*` secrets whose session container
+no longer exists are removed. Only after that cleanup succeeds does the daemon
+bind its Unix socket and begin accepting requests.
+
 The daemon's Unix socket is the single intake for all session triggers. Manual
 CLI invocation connects to that socket as a client. Scheduling policy also
 connects to that socket as a client when it decides work should start. The
@@ -135,6 +141,11 @@ From inside the environment, an agent should see:
 ## 6. Credential Flow
 
 Credentials are declared by agent configuration as daemon-side environment variable names. For each configured credential, the daemon resolves `source` with `std::env::var(source)` from its own process environment before calling `agentd-runner`. Operators provide those values through normal host mechanisms such as systemd `EnvironmentFile=`, shell exports, or container environment injection. During session setup, the runner receives only the already-resolved credential values, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
+
+Because the daemon owns the Podman session namespace, startup also reconciles
+stale runner-managed resources before any new session can start: dead
+`agentd-*` containers are removed first, then orphaned `agentd-secret-*`
+secrets whose session container is gone.
 
 Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When an agent config declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before `runa run` starts so the token does not persist in git config or the agent runtime environment.
 

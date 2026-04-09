@@ -11,7 +11,9 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use agentd_runner::SessionOutcome;
+use agentd_runner::{
+    RunnerError, SessionOutcome, StartupReconciliationReport, reconcile_startup_resources,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, DaemonConfig};
@@ -27,6 +29,7 @@ const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
 pub enum DaemonError {
     AlreadyRunning { pid: Option<u32> },
     Io(io::Error),
+    StartupReconciliation(RunnerError),
 }
 
 impl fmt::Display for DaemonError {
@@ -37,6 +40,9 @@ impl fmt::Display for DaemonError {
             }
             Self::AlreadyRunning { pid: None } => write!(f, "agentd is already running"),
             Self::Io(error) => write!(f, "{error}"),
+            Self::StartupReconciliation(error) => {
+                write!(f, "startup reconciliation failed: {error}")
+            }
         }
     }
 }
@@ -45,6 +51,7 @@ impl std::error::Error for DaemonError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
+            Self::StartupReconciliation(error) => Some(error),
             _ => None,
         }
     }
@@ -154,8 +161,37 @@ pub fn run_daemon_until_shutdown(
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
     shutdown: &AtomicBool,
 ) -> Result<(), DaemonError> {
+    run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
+        reconcile_startup_resources()
+    })
+}
+
+fn run_daemon_until_shutdown_with_reconciler<F>(
+    config: Config,
+    executor: impl SessionExecutor + Send + Sync + Clone + 'static,
+    shutdown: &AtomicBool,
+    reconcile_startup: F,
+) -> Result<(), DaemonError>
+where
+    F: FnOnce() -> Result<StartupReconciliationReport, RunnerError>,
+{
     let mut runtime =
-        DaemonRuntime::bind(config.daemon().socket_path(), config.daemon().pid_file())?;
+        DaemonRuntime::claim(config.daemon().socket_path(), config.daemon().pid_file())?;
+    let reconciliation_report = reconcile_startup().map_err(|error| {
+        tracing::error!(
+            event = "agentd.startup_reconciliation_failed",
+            error = %error,
+            "agentd startup reconciliation failed"
+        );
+        DaemonError::StartupReconciliation(error)
+    })?;
+    tracing::info!(
+        event = "agentd.startup_reconciliation_completed",
+        removed_container_count = reconciliation_report.removed_container_names.len(),
+        removed_secret_count = reconciliation_report.removed_secret_names.len(),
+        "agentd startup reconciliation completed"
+    );
+    runtime.bind_listener()?;
     let executor = Arc::new(executor);
     let mut handlers = Vec::new();
     tracing::info!(
@@ -429,7 +465,7 @@ struct DaemonRuntime {
 }
 
 impl DaemonRuntime {
-    fn bind(socket_path: &Path, pid_file: &Path) -> Result<Self, DaemonError> {
+    fn claim(socket_path: &Path, pid_file: &Path) -> Result<Self, DaemonError> {
         let socket_parent_created = socket_path
             .parent()
             .map(ensure_directory_exists)
@@ -463,16 +499,20 @@ impl DaemonRuntime {
 
         prepare_socket_path(socket_path)?;
 
-        let listener = UnixListener::bind(socket_path)?;
-        restrict_file_permissions(socket_path, SOCKET_MODE)?;
-        set_listener_receive_timeout(&listener, ACCEPT_TIMEOUT)?;
-
         Ok(Self {
-            listener: Some(listener),
+            listener: None,
             _pid_lock: pid_lock,
             pid_file: pid_file.to_path_buf(),
             socket_path: socket_path.to_path_buf(),
         })
+    }
+
+    fn bind_listener(&mut self) -> Result<(), io::Error> {
+        let listener = UnixListener::bind(&self.socket_path)?;
+        restrict_file_permissions(&self.socket_path, SOCKET_MODE)?;
+        set_listener_receive_timeout(&listener, ACCEPT_TIMEOUT)?;
+        self.listener = Some(listener);
+        Ok(())
     }
 
     fn accept(&self) -> Result<(UnixStream, std::os::unix::net::SocketAddr), io::Error> {
@@ -588,12 +628,88 @@ fn read_pid(pid_file: &Path) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{finish_daemon_loop, reap_finished_handlers};
+    use super::{
+        DaemonError, finish_daemon_loop, reap_finished_handlers,
+        run_daemon_until_shutdown_with_reconciler,
+    };
+    use crate::config::Config;
+    use crate::dispatch::SessionExecutor;
+    use agentd_runner::{
+        RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+    };
     use std::io;
+    use std::path::PathBuf;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
     use std::sync::mpsc::Sender;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    struct FixedOutcomeExecutor;
+
+    impl SessionExecutor for FixedOutcomeExecutor {
+        fn run_session(
+            &self,
+            _spec: SessionSpec,
+            _invocation: SessionInvocation,
+        ) -> Result<SessionOutcome, RunnerError> {
+            Ok(SessionOutcome::Succeeded)
+        }
+    }
+
+    fn unique_runtime_dir(name: &str) -> PathBuf {
+        let unique = format!(
+            "agentd-daemon-unit-test-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&path).expect("runtime dir should be created");
+        path
+    }
+
+    fn config_in_runtime_dir(runtime_dir: &std::path::Path) -> Config {
+        Config::from_str(&format!(
+            r#"
+[daemon]
+socket_path = "{socket_path}"
+pid_file = "{pid_file}"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+
+[[agents.credentials]]
+name = "GITHUB_TOKEN"
+source = "AGENTD_GITHUB_TOKEN"
+"#,
+            socket_path = runtime_dir.join("agentd.sock").display(),
+            pid_file = runtime_dir.join("agentd.pid").display(),
+        ))
+        .expect("config should parse")
+    }
+
+    fn wait_for_path(path: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        panic!("timed out waiting for {}", path.display());
+    }
 
     fn spawn_blocked_handler() -> (thread::JoinHandle<()>, Sender<()>) {
         let (tx, rx) = mpsc::channel();
@@ -717,5 +833,78 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(error.to_string(), "accept failed");
+    }
+
+    #[test]
+    fn startup_reconciliation_completes_before_socket_binding() {
+        let runtime_dir = unique_runtime_dir("startup-order");
+        let config = config_in_runtime_dir(&runtime_dir);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let daemon_config = config.clone();
+        let daemon_shutdown = shutdown.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            run_daemon_until_shutdown_with_reconciler(
+                daemon_config,
+                FixedOutcomeExecutor,
+                daemon_shutdown.as_ref(),
+                move || {
+                    started_tx
+                        .send(())
+                        .expect("reconciliation start should be reported");
+                    release_rx
+                        .recv()
+                        .expect("test should release reconciliation");
+                    Ok(StartupReconciliationReport::default())
+                },
+            )
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("startup reconciliation should start");
+        assert!(
+            !config.daemon().socket_path().exists(),
+            "socket should not exist while startup reconciliation is still running"
+        );
+
+        release_tx
+            .send(())
+            .expect("reconciliation should be released");
+        wait_for_path(config.daemon().socket_path());
+
+        shutdown.store(true, std::sync::atomic::Ordering::Release);
+        handle
+            .join()
+            .expect("daemon thread should join")
+            .expect("daemon should exit cleanly");
+    }
+
+    #[test]
+    fn startup_reconciliation_failure_aborts_daemon_before_socket_binding() {
+        let runtime_dir = unique_runtime_dir("startup-failure");
+        let config = config_in_runtime_dir(&runtime_dir);
+
+        let error = run_daemon_until_shutdown_with_reconciler(
+            config.clone(),
+            FixedOutcomeExecutor,
+            &AtomicBool::new(false),
+            || Err(RunnerError::InvalidBaseImage),
+        )
+        .expect_err("startup reconciliation failure should abort daemon startup");
+
+        match error {
+            DaemonError::StartupReconciliation(inner) => {
+                assert!(matches!(inner, RunnerError::InvalidBaseImage));
+            }
+            other => panic!("expected startup reconciliation error, got {other:?}"),
+        }
+
+        assert!(
+            !config.daemon().socket_path().exists(),
+            "socket should not be created when startup reconciliation fails"
+        );
     }
 }

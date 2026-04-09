@@ -93,9 +93,11 @@ impl Write for SharedBufferWriter {
 #[derive(Clone, Debug)]
 pub(crate) struct FakePodmanScenario {
     create: CommandBehavior,
+    ps: CommandBehavior,
     start: CommandBehavior,
     remove: CommandBehavior,
     secret_create: CommandBehavior,
+    secret_list: CommandBehavior,
     secret_remove: CommandBehavior,
     inspect: InspectBehavior,
 }
@@ -108,6 +110,7 @@ impl FakePodmanScenario {
                     .write_args_to("create-args.log")
                     .set_container_state("created"),
             ),
+            ps: CommandBehavior::from_outcome(CommandOutcome::new()),
             start: CommandBehavior::from_outcome(
                 CommandOutcome::new().set_container_state("running"),
             ),
@@ -117,6 +120,7 @@ impl FakePodmanScenario {
                     .append_args_with_prefix("secret-commands.log", "create")
                     .capture_stdin_to("secret-value.log"),
             ),
+            secret_list: CommandBehavior::from_outcome(CommandOutcome::new()),
             secret_remove: CommandBehavior::from_outcome(
                 CommandOutcome::new().append_args_with_prefix("secret-commands.log", "rm"),
             ),
@@ -126,6 +130,11 @@ impl FakePodmanScenario {
 
     pub(crate) fn with_create(mut self, behavior: CommandBehavior) -> Self {
         self.create = behavior;
+        self
+    }
+
+    pub(crate) fn with_ps(mut self, behavior: CommandBehavior) -> Self {
+        self.ps = behavior;
         self
     }
 
@@ -141,6 +150,11 @@ impl FakePodmanScenario {
 
     pub(crate) fn with_secret_create(mut self, behavior: CommandBehavior) -> Self {
         self.secret_create = behavior;
+        self
+    }
+
+    pub(crate) fn with_secret_ls(mut self, behavior: CommandBehavior) -> Self {
+        self.secret_list = behavior;
         self
     }
 
@@ -183,6 +197,7 @@ impl FakePodmanScenario {
         );
 
         script.push_str(&render_command_branch("create", &self.create));
+        script.push_str(&render_command_branch("ps", &self.ps));
         script.push_str(
             "    secret)\n\
                  subcommand=\"$1\"\n\
@@ -190,6 +205,7 @@ impl FakePodmanScenario {
                  case \"$subcommand\" in\n",
         );
         script.push_str(&render_command_branch("secret-create", &self.secret_create));
+        script.push_str(&render_command_branch("secret-ls", &self.secret_list));
         script.push_str(&render_command_branch("secret-rm", &self.secret_remove));
         script.push_str(
             "            *)\n\

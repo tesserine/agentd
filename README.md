@@ -6,6 +6,7 @@
 
 Early development. The current build supports:
 - foreground single-instance daemon startup
+- startup reconciliation of stale agentd-managed Podman containers and orphaned agentd secrets before accepting new sessions
 - local Unix-socket operator control
 - manual `agentd run <agent> <repo> [--work-unit <wu>]` session triggers
 - clone-only repository auth through optional `repo_token_source`
@@ -26,6 +27,10 @@ agentd daemon --config /etc/agentd/agentd.toml
 ```
 
 `agentd` with no subcommand is the same as `agentd daemon`.
+
+Before the daemon binds its Unix socket, it reconciles stale `agentd-*`
+containers and orphaned `agentd-secret-*` Podman secrets left behind by prior
+runs. Startup aborts if that cleanup cannot complete.
 
 The daemon is a foreground process. By default it uses:
 - socket: `/run/agentd/agentd.sock`

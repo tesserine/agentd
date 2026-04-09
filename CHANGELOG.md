@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Added explicit `SessionInvocation.repo_token` support in `agentd-runner` so private HTTPS repository clones can authenticate with a clone-only bearer token without exposing the token in `podman create` arguments, git argv, or persistent git config.
 - Added extraction-ready tracing bootstrap in `agentd` plus structured runner lifecycle/session events, with timestamped JSON logs to stderr by default, an `info` default filter so normal session lifecycle records are visible without extra env setup, `runner.session_error` for pre-completion failures, stderr fallback for runner failure diagnostics when no tracing subscriber is installed, `AGENTD_LOG_FORMAT=json|pretty` for format selection, and `RUST_LOG`/`AGENTD_LOG` filter control.
 - Added a real foreground `agentd` daemon with single-instance PID-file locking, a local Unix-socket operator interface, `agentd run` manual session dispatch, configurable daemon socket/PID paths, and optional per-agent `repo_token_source` resolution for clone-only HTTPS authentication.
+- Added runner-owned startup reconciliation for daemon-managed Podman resources so daemon startup removes dead `agentd-*` containers and orphaned `agentd-secret-*` secrets before binding the operator socket, and emits structured startup reconciliation events.
 
 ### Changed
 
