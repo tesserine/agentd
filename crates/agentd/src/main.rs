@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::{error::Error, fmt};
 
-use agentd::config::Config;
+use agentd::config::{Config, DaemonConfig};
 use agentd::{
     ManualRunRequest, RunnerSessionExecutor, configure_tracing, request_manual_run,
     run_daemon_until_shutdown,
@@ -70,15 +70,14 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let config = Config::load(&cli.config)?;
 
     match cli.command {
-        None | Some(Command::Daemon) => run_daemon(config),
+        None | Some(Command::Daemon) => run_daemon(Config::load(&cli.config)?),
         Some(Command::Run {
             agent,
             repo,
             work_unit,
-        }) => run_client(config, agent, repo, work_unit),
+        }) => run_client(DaemonConfig::load(&cli.config)?, agent, repo, work_unit),
     }
 }
 
@@ -101,7 +100,7 @@ fn register_termination_handlers(shutdown: Arc<AtomicBool>) -> Result<(), std::i
 }
 
 fn run_client(
-    config: Config,
+    config: DaemonConfig,
     agent: String,
     repo: String,
     work_unit: Option<String>,

@@ -334,3 +334,72 @@ fn binary_run_command_exits_non_zero_and_reports_timed_out_sessions_on_stderr() 
         "expected timed-out session error on stderr, got: {stderr}"
     );
 }
+
+#[test]
+fn binary_run_command_succeeds_when_agent_registry_becomes_invalid_after_daemon_start() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-invalid-registry-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-invalid-registry-after-start",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let (shutdown, handle, _config) = start_test_daemon(&config_path, SessionOutcome::Succeeded);
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[daemon]
+socket_path = "{socket_path}"
+pid_file = "{pid_file}"
+
+[[agents]]
+name = "Codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+            socket_path = socket_path.display(),
+            pid_file = pid_file.display()
+        ),
+    )
+    .expect("config should be rewritten");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "codex",
+            "https://example.com/repo.git",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "run command should still succeed while daemon is healthy: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "session succeeded\n"
+    );
+}

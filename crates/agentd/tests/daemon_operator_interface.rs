@@ -192,7 +192,7 @@ fn daemon_reports_manual_run_outcome_back_through_client_request() {
     wait_for_path(config.daemon().socket_path());
 
     let outcome = request_manual_run(
-        &config,
+        config.daemon(),
         &ManualRunRequest {
             agent: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
@@ -219,7 +219,7 @@ fn client_reports_clear_error_when_daemon_is_not_running() {
     let config = config_in_runtime_dir(&runtime_dir);
 
     let error = request_manual_run(
-        &config,
+        config.daemon(),
         &ManualRunRequest {
             agent: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
@@ -349,7 +349,7 @@ fn daemon_accepts_additional_manual_runs_while_a_previous_run_is_still_executing
     let first_config = config.clone();
     let first_request = thread::spawn(move || {
         request_manual_run(
-            &first_config,
+            first_config.daemon(),
             &ManualRunRequest {
                 agent: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
@@ -363,7 +363,7 @@ fn daemon_accepts_additional_manual_runs_while_a_previous_run_is_still_executing
     let (second_tx, second_rx) = mpsc::channel();
     let second_request = thread::spawn(move || {
         let outcome = request_manual_run(
-            &second_config,
+            second_config.daemon(),
             &ManualRunRequest {
                 agent: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
@@ -440,7 +440,7 @@ fn daemon_shutdown_waits_for_an_in_flight_manual_run_to_finish() {
     let client_config = config.clone();
     let client_request = thread::spawn(move || {
         request_manual_run(
-            &client_config,
+            client_config.daemon(),
             &ManualRunRequest {
                 agent: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
@@ -501,7 +501,7 @@ fn daemon_shutdown_stops_accepting_new_manual_runs() {
     let first_config = config.clone();
     let first_request = thread::spawn(move || {
         request_manual_run(
-            &first_config,
+            first_config.daemon(),
             &ManualRunRequest {
                 agent: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
@@ -515,7 +515,7 @@ fn daemon_shutdown_stops_accepting_new_manual_runs() {
     wait_for_path_removal(config.daemon().socket_path());
 
     let error = request_manual_run(
-        &config,
+        config.daemon(),
         &ManualRunRequest {
             agent: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),

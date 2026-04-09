@@ -61,8 +61,7 @@ impl Config {
 
     fn parse(contents: &str, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(contents)?;
-        validate_non_empty("daemon.socket_path", &raw.daemon.socket_path, None, None)?;
-        validate_non_empty("daemon.pid_file", &raw.daemon.pid_file, None, None)?;
+        let daemon = DaemonConfig::parse(raw.daemon, base_dir)?;
 
         if raw.agents.is_empty() {
             return Err(ConfigError::NoAgents);
@@ -174,13 +173,7 @@ impl Config {
             });
         }
 
-        Ok(Self {
-            daemon: DaemonConfig {
-                socket_path: resolve_config_path(base_dir, &raw.daemon.socket_path),
-                pid_file: resolve_config_path(base_dir, &raw.daemon.pid_file),
-            },
-            agents,
-        })
+        Ok(Self { daemon, agents })
     }
 }
 
@@ -296,6 +289,17 @@ pub struct DaemonConfig {
 }
 
 impl DaemonConfig {
+    /// Reads and parses only the daemon-wide runtime paths from a TOML
+    /// configuration file at `path`.
+    ///
+    /// Relative daemon runtime paths are resolved against the directory
+    /// containing `path`. Non-daemon sections are ignored entirely.
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let contents = std::fs::read_to_string(path)?;
+        let base_dir = absolute_config_dir(path)?;
+        Self::parse_from_str(&contents, base_dir.as_deref())
+    }
+
     /// Filesystem path for the daemon's local Unix socket.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
@@ -304,6 +308,21 @@ impl DaemonConfig {
     /// Filesystem path for the daemon's PID file and advisory lock.
     pub fn pid_file(&self) -> &Path {
         &self.pid_file
+    }
+
+    fn parse(raw: RawDaemonConfig, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
+        validate_non_empty("daemon.socket_path", &raw.socket_path, None, None)?;
+        validate_non_empty("daemon.pid_file", &raw.pid_file, None, None)?;
+
+        Ok(Self {
+            socket_path: resolve_config_path(base_dir, &raw.socket_path),
+            pid_file: resolve_config_path(base_dir, &raw.pid_file),
+        })
+    }
+
+    fn parse_from_str(contents: &str, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
+        let raw: RawDaemonOnlyConfig = toml::from_str(contents)?;
+        Self::parse(raw.daemon, base_dir)
     }
 }
 
@@ -442,6 +461,12 @@ struct RawConfig {
     daemon: RawDaemonConfig,
     #[serde(default)]
     agents: Vec<RawAgentConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDaemonOnlyConfig {
+    #[serde(default)]
+    daemon: RawDaemonConfig,
 }
 
 #[derive(Debug, Deserialize)]

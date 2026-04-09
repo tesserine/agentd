@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use agentd::config::{Config, ConfigError};
+use agentd::config::{Config, ConfigError, DaemonConfig};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -732,4 +732,106 @@ fn reports_io_errors_when_loading_missing_files() {
         ConfigError::Io(io_error) => assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound),
         other => panic!("expected io error, got {other}"),
     }
+}
+
+#[test]
+fn loading_daemon_config_resolves_relative_paths_from_file_location() {
+    let path = write_temp_config(
+        "daemon-only-relative-paths",
+        r#"
+[daemon]
+socket_path = "runtime/agentd.sock"
+pid_file = "runtime/agentd.pid"
+
+[[agents]]
+name = "Codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    );
+
+    let config = DaemonConfig::load(&path).expect("daemon config should parse");
+    let base_dir = path
+        .parent()
+        .expect("config file should have a parent directory");
+
+    assert_eq!(config.socket_path(), base_dir.join("runtime/agentd.sock"));
+    assert_eq!(config.pid_file(), base_dir.join("runtime/agentd.pid"));
+}
+
+#[test]
+fn loading_daemon_config_uses_defaults_when_daemon_section_is_omitted() {
+    let path = write_temp_config(
+        "daemon-only-defaults",
+        r#"
+[[agents]]
+name = "Codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    );
+
+    let config = DaemonConfig::load(&path).expect("daemon config should parse");
+
+    assert_eq!(config.socket_path(), Path::new("/run/agentd/agentd.sock"));
+    assert_eq!(config.pid_file(), Path::new("/run/agentd/agentd.pid"));
+}
+
+#[test]
+fn loading_daemon_config_rejects_unknown_fields_in_daemon_section() {
+    let path = write_temp_config(
+        "daemon-only-unknown-field",
+        r#"
+[daemon]
+socket_path = "/tmp/agentd.sock"
+extra = "nope"
+
+[[agents]]
+name = "Codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    );
+
+    let error = DaemonConfig::load(&path).expect_err("unknown daemon fields should be rejected");
+
+    assert!(error.to_string().contains("unknown field"));
+    assert!(error.to_string().contains("extra"));
+}
+
+#[test]
+fn loading_daemon_config_ignores_invalid_agent_registry_entries() {
+    let path = write_temp_config(
+        "daemon-only-ignores-agents",
+        r#"
+[daemon]
+socket_path = "runtime/agentd.sock"
+pid_file = "runtime/agentd.pid"
+
+[[agents]]
+name = "Codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    );
+
+    let config = DaemonConfig::load(&path).expect("daemon config should parse");
+    let base_dir = path
+        .parent()
+        .expect("config file should have a parent directory");
+
+    assert_eq!(config.socket_path(), base_dir.join("runtime/agentd.sock"));
+    assert_eq!(config.pid_file(), base_dir.join("runtime/agentd.pid"));
 }

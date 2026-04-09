@@ -14,7 +14,7 @@ use std::time::Duration;
 use agentd_runner::SessionOutcome;
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Config, DaemonConfig};
 use crate::{DispatchError, ManualRunRequest, SessionExecutor, dispatch_manual_run};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
@@ -173,6 +173,7 @@ pub fn run_daemon_until_shutdown(
                     continue;
                 }
 
+                reap_finished_handlers(&mut handlers);
                 handlers.push(spawn_connection_handler(
                     stream,
                     config.clone(),
@@ -227,22 +228,38 @@ fn reject_connection_during_shutdown(mut stream: UnixStream) {
 
 fn join_connection_handlers(handlers: Vec<JoinHandle<()>>) {
     for handler in handlers {
-        if handler.join().is_err() {
-            tracing::error!(
-                event = "agentd.operator_connection_panicked",
-                "operator connection handler panicked during shutdown"
-            );
+        log_handler_panic(handler);
+    }
+}
+
+fn reap_finished_handlers(handlers: &mut Vec<JoinHandle<()>>) {
+    let mut active_handlers = Vec::with_capacity(handlers.len());
+    for handler in std::mem::take(handlers) {
+        if handler.is_finished() {
+            log_handler_panic(handler);
+        } else {
+            active_handlers.push(handler);
         }
+    }
+    *handlers = active_handlers;
+}
+
+fn log_handler_panic(handler: JoinHandle<()>) {
+    if handler.join().is_err() {
+        tracing::error!(
+            event = "agentd.operator_connection_panicked",
+            "operator connection handler panicked"
+        );
     }
 }
 
 /// Trigger a manual run against the local daemon and wait for its terminal outcome.
 pub fn request_manual_run(
-    config: &Config,
+    config: &DaemonConfig,
     request: &ManualRunRequest,
 ) -> Result<SessionOutcome, ClientError> {
     match send_request(
-        config.daemon().socket_path(),
+        config.socket_path(),
         &RequestMessage::Run {
             agent: request.agent.clone(),
             repo_url: request.repo_url.clone(),
@@ -536,4 +553,51 @@ fn read_pid(pid_file: &Path) -> Option<u32> {
     fs::read_to_string(pid_file)
         .ok()
         .and_then(|contents| contents.trim().parse::<u32>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reap_finished_handlers;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn reaping_finished_handlers_keeps_only_live_threads() {
+        let finished = thread::spawn(|| {});
+        finished
+            .join()
+            .expect("finished thread should join cleanly");
+
+        let (tx, rx) = mpsc::channel();
+        let blocked = thread::spawn(move || {
+            rx.recv().expect("blocked thread should be released");
+        });
+
+        let mut handlers = vec![thread::spawn(|| {}), blocked];
+        thread::sleep(Duration::from_millis(50));
+
+        reap_finished_handlers(&mut handlers);
+
+        assert_eq!(handlers.len(), 1, "only the live handler should remain");
+        tx.send(()).expect("blocked thread should be released");
+        handlers
+            .pop()
+            .expect("live handler should remain")
+            .join()
+            .expect("blocked thread should join cleanly");
+    }
+
+    #[test]
+    fn reaping_finished_panicked_handlers_does_not_panic() {
+        let mut handlers = vec![thread::spawn(|| panic!("expected test panic"))];
+        thread::sleep(Duration::from_millis(50));
+
+        reap_finished_handlers(&mut handlers);
+
+        assert!(
+            handlers.is_empty(),
+            "finished panicked handlers should be reaped"
+        );
+    }
 }
