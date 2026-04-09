@@ -178,7 +178,8 @@ mod tests {
     use super::*;
     use crate::test_support::{
         CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
-        capture_tracing_events, fake_podman_lock, test_session_spec, unique_temp_dir,
+        capture_tracing_events, fake_podman_lock, fake_podman_ps_json, test_session_spec,
+        unique_temp_dir,
     };
     use std::fs;
 
@@ -326,15 +327,49 @@ mod tests {
         fixture.install(
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
-                    "agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa exited\n\
-                         agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb dead\n\
-                         agentd-build-cccccccccccccccccccccccccccccccc stopped\n\
-                         agentd-prepare-dddddddddddddddddddddddddddddddd created\n\
-                         agentd-init-12121212121212121212121212121212 initialized\n\
-                         agentd-pause-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee paused\n\
-                         agentd-stop-ffffffffffffffffffffffffffffffff stopping\n\
-                         agentd-live-99999999999999999999999999999999 running\n\
-                         postgres-db exited",
+                    &fake_podman_ps_json(&[
+                        (
+                            &["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                            "exited",
+                            "Exited (0) 10s ago",
+                        ),
+                        (
+                            &["agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+                            "dead",
+                            "Dead",
+                        ),
+                        (
+                            &["agentd-build-cccccccccccccccccccccccccccccccc"],
+                            "stopped",
+                            "Exited (137) 5m ago",
+                        ),
+                        (
+                            &["agentd-prepare-dddddddddddddddddddddddddddddddd"],
+                            "created",
+                            "Created",
+                        ),
+                        (
+                            &["agentd-init-12121212121212121212121212121212"],
+                            "initialized",
+                            "Initialized",
+                        ),
+                        (
+                            &["agentd-pause-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+                            "paused",
+                            "Up 2 minutes",
+                        ),
+                        (
+                            &["agentd-stop-ffffffffffffffffffffffffffffffff"],
+                            "stopping",
+                            "Stopping",
+                        ),
+                        (
+                            &["agentd-live-99999999999999999999999999999999"],
+                            "running",
+                            "Up 4 hours",
+                        ),
+                        (&["postgres-db"], "exited", "Exited (0) 1h ago"),
+                    ]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     "agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0\n\
@@ -399,10 +434,13 @@ mod tests {
         let fixture = FakePodmanFixture::new();
         fixture.install(
             &FakePodmanScenario::new()
-                .with_ps(CommandBehavior::from_outcome(
-                    CommandOutcome::new()
-                        .stdout("agentd-codex-dddddddddddddddddddddddddddddddd running"),
-                ))
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[(
+                        &["agentd-codex-dddddddddddddddddddddddddddddddd"],
+                        "running",
+                        "Up 2 minutes",
+                    )]),
+                )))
                 .with_secret_ls(CommandBehavior::from_outcome(
                     CommandOutcome::new()
                         .stdout("agentd-secret-dddddddddddddddddddddddddddddddd-0"),
@@ -428,7 +466,11 @@ mod tests {
         fixture.install(
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
-                    "agentd-codex-dddddddddddddddddddddddddddddddd mystery-state",
+                    &fake_podman_ps_json(&[(
+                        &["agentd-codex-dddddddddddddddddddddddddddddddd"],
+                        "mystery-state",
+                        "Something odd just happened",
+                    )]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(
                     CommandOutcome::new()
@@ -442,6 +484,38 @@ mod tests {
 
         assert!(report.removed_container_names.is_empty());
         assert!(report.removed_secret_names.is_empty());
+        assert_eq!(fixture.read_log("rm-commands.log"), "");
+        assert_eq!(fixture.secret_commands(), "");
+    }
+
+    #[test]
+    fn startup_reconciliation_returns_an_error_when_container_listing_json_is_malformed() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new().with_ps(CommandBehavior::from_outcome(
+                CommandOutcome::new().stdout("{not-json"),
+            )),
+        );
+
+        let error = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect_err(
+                "startup reconciliation should fail when container listing JSON is invalid",
+            );
+
+        match error {
+            RunnerError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert!(
+                    error.to_string().contains("podman ps --format json"),
+                    "expected invalid json error to mention podman ps output, got {error}"
+                );
+            }
+            other => panic!("expected invalid-data io error, got {other:?}"),
+        }
         assert_eq!(fixture.read_log("rm-commands.log"), "");
         assert_eq!(fixture.secret_commands(), "");
     }
@@ -470,7 +544,7 @@ mod tests {
                 status,
                 stderr,
             } => {
-                assert_eq!(args, vec!["ps", "-a", "--format", "{{.Names}} {{.State}}"]);
+                assert_eq!(args, vec!["ps", "-a", "--format", "json"]);
                 assert_eq!(status.code(), Some(29));
                 assert_eq!(stderr.trim(), "container list failed");
             }
@@ -486,10 +560,13 @@ mod tests {
         let fixture = FakePodmanFixture::new();
         fixture.install(
             &FakePodmanScenario::new()
-                .with_ps(CommandBehavior::from_outcome(
-                    CommandOutcome::new()
-                        .stdout("agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa exited"),
-                ))
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[(
+                        &["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                        "exited",
+                        "Exited (0) 10s ago",
+                    )]),
+                )))
                 .with_rm(CommandBehavior::from_outcome(
                     CommandOutcome::new()
                         .write_args_to("rm-commands.log")

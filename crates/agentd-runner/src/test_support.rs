@@ -1,5 +1,5 @@
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -49,6 +49,22 @@ pub(crate) fn capture_tracing_events(run: impl FnOnce()) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).expect("trace line should be valid JSON"))
         .collect()
+}
+
+pub(crate) fn fake_podman_ps_json(records: &[(&[&str], &str, &str)]) -> String {
+    serde_json::to_string(
+        &records
+            .iter()
+            .map(|(names, state, status)| {
+                json!({
+                    "Names": names,
+                    "State": state,
+                    "Status": status,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .expect("fake podman ps payload should serialize")
 }
 
 #[derive(Clone)]

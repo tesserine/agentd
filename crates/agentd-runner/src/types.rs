@@ -153,7 +153,8 @@ pub enum RunnerError {
     /// An environment variable name collides with a runner-managed name.
     /// Produced during spec validation.
     ReservedEnvironmentName { name: String },
-    /// Filesystem or process I/O failure.
+    /// Filesystem failure, process I/O failure, or invalid external command
+    /// output received after a successful process exit.
     Io(std::io::Error),
     /// A podman CLI invocation returned a non-zero exit status. Captures the
     /// argument list, exit status, and stderr for diagnostics.

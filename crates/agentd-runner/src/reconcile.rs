@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
+use std::io::{Error as IoError, ErrorKind};
 
 use crate::podman::run_podman_command;
 use crate::{RunnerError, StartupReconciliationReport};
+use serde::Deserialize;
 
 const CONTAINER_PREFIX: &str = "agentd-";
 const SECRET_PREFIX: &str = "agentd-secret-";
@@ -47,6 +49,14 @@ struct ContainerRecord {
     startup_reconciliation: StartupReconciliation,
 }
 
+#[derive(Debug, Deserialize)]
+struct PodmanPsRecord {
+    #[serde(rename = "Names")]
+    names: Vec<String>,
+    #[serde(rename = "State")]
+    state: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupReconciliation {
     Remove,
@@ -54,28 +64,35 @@ enum StartupReconciliation {
 }
 
 fn list_agentd_containers() -> Result<Vec<ContainerRecord>, RunnerError> {
-    Ok(run_podman_command(vec![
+    let output = run_podman_command(vec![
         "ps".to_string(),
         "-a".to_string(),
         "--format".to_string(),
-        "{{.Names}} {{.State}}".to_string(),
-    ])?
-    .lines()
-    .filter_map(parse_container_record_line)
-    .filter(|container| container.name.starts_with(CONTAINER_PREFIX))
-    .collect())
+        "json".to_string(),
+    ])?;
+
+    let records: Vec<PodmanPsRecord> = serde_json::from_str(&output).map_err(|error| {
+        RunnerError::Io(IoError::new(
+            ErrorKind::InvalidData,
+            format!("invalid podman ps --format json output: {error}"),
+        ))
+    })?;
+
+    Ok(records
+        .into_iter()
+        .filter_map(parse_container_record)
+        .collect())
 }
 
-fn parse_container_record_line(line: &str) -> Option<ContainerRecord> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
+fn parse_container_record(record: PodmanPsRecord) -> Option<ContainerRecord> {
+    let name = record
+        .names
+        .into_iter()
+        .find(|name| name.starts_with(CONTAINER_PREFIX))?;
 
-    let (name, state) = trimmed.rsplit_once(char::is_whitespace)?;
     Some(ContainerRecord {
-        name: name.trim().to_string(),
-        startup_reconciliation: classify_startup_reconciliation(state.trim()),
+        startup_reconciliation: classify_startup_reconciliation(record.state.trim()),
+        name,
     })
 }
 
