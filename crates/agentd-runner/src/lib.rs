@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_reconciliation_removes_only_dead_agentd_containers_and_orphaned_secrets() {
+    fn startup_reconciliation_removes_only_terminal_agentd_containers_and_orphaned_secrets() {
         let _guard = fake_podman_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -327,13 +327,23 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     "agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa exited\n\
-                         agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb running\n\
+                         agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb dead\n\
+                         agentd-build-cccccccccccccccccccccccccccccccc stopped\n\
+                         agentd-prepare-dddddddddddddddddddddddddddddddd created\n\
+                         agentd-pause-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee paused\n\
+                         agentd-stop-ffffffffffffffffffffffffffffffff stopping\n\
+                         agentd-live-99999999999999999999999999999999 running\n\
                          postgres-db exited",
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     "agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0\n\
                          agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0\n\
                          agentd-secret-cccccccccccccccccccccccccccccccc-repo-token\n\
+                         agentd-secret-dddddddddddddddddddddddddddddddd-0\n\
+                         agentd-secret-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-0\n\
+                         agentd-secret-ffffffffffffffffffffffffffffffff-0\n\
+                         agentd-secret-99999999999999999999999999999999-0\n\
+                         agentd-secret-12121212121212121212121212121212-repo-token\n\
                          foreign-secret",
                 )))
                 .with_rm(CommandBehavior::from_outcome(
@@ -350,22 +360,30 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]
+            vec![
+                "agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                "agentd-build-cccccccccccccccccccccccccccccccc".to_string(),
+                "agentd-prepare-dddddddddddddddddddddddddddddddd".to_string(),
+            ]
         );
         assert_eq!(
             report.removed_secret_names,
             vec![
                 "agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0".to_string(),
+                "agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0".to_string(),
                 "agentd-secret-cccccccccccccccccccccccccccccccc-repo-token".to_string(),
+                "agentd-secret-dddddddddddddddddddddddddddddddd-0".to_string(),
+                "agentd-secret-12121212121212121212121212121212-repo-token".to_string(),
             ]
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "rm --force agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb agentd-build-cccccccccccccccccccccccccccccccc agentd-prepare-dddddddddddddddddddddddddddddddd\n"
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0 agentd-secret-cccccccccccccccccccccccccccccccc-repo-token\n"
+            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0 agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0 agentd-secret-cccccccccccccccccccccccccccccccc-repo-token agentd-secret-dddddddddddddddddddddddddddddddd-0 agentd-secret-12121212121212121212121212121212-repo-token\n"
         );
     }
 
@@ -381,6 +399,33 @@ mod tests {
                     CommandOutcome::new()
                         .stdout("agentd-codex-dddddddddddddddddddddddddddddddd running"),
                 ))
+                .with_secret_ls(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .stdout("agentd-secret-dddddddddddddddddddddddddddddddd-0"),
+                )),
+        );
+
+        let report = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect("startup reconciliation should succeed");
+
+        assert!(report.removed_container_names.is_empty());
+        assert!(report.removed_secret_names.is_empty());
+        assert_eq!(fixture.read_log("rm-commands.log"), "");
+        assert_eq!(fixture.secret_commands(), "");
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_unknown_state_agentd_containers_and_their_secrets() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    "agentd-codex-dddddddddddddddddddddddddddddddd mystery-state",
+                )))
                 .with_secret_ls(CommandBehavior::from_outcome(
                     CommandOutcome::new()
                         .stdout("agentd-secret-dddddddddddddddddddddddddddddddd-0"),

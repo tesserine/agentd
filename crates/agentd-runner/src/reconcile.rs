@@ -14,14 +14,14 @@ pub fn reconcile_startup_resources() -> Result<StartupReconciliationReport, Runn
 
     let removed_container_names = containers
         .iter()
-        .filter(|container| !container.is_running)
+        .filter(|container| container.startup_reconciliation == StartupReconciliation::Remove)
         .map(|container| container.name.clone())
         .collect::<Vec<_>>();
     remove_containers(&removed_container_names)?;
 
     let live_session_ids = containers
         .iter()
-        .filter(|container| container.is_running)
+        .filter(|container| container.startup_reconciliation == StartupReconciliation::Preserve)
         .filter_map(|container| parse_container_session_id(&container.name))
         .collect::<BTreeSet<_>>();
 
@@ -44,7 +44,13 @@ pub fn reconcile_startup_resources() -> Result<StartupReconciliationReport, Runn
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContainerRecord {
     name: String,
-    is_running: bool,
+    startup_reconciliation: StartupReconciliation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupReconciliation {
+    Remove,
+    Preserve,
 }
 
 fn list_agentd_containers() -> Result<Vec<ContainerRecord>, RunnerError> {
@@ -69,8 +75,15 @@ fn parse_container_record_line(line: &str) -> Option<ContainerRecord> {
     let (name, state) = trimmed.rsplit_once(char::is_whitespace)?;
     Some(ContainerRecord {
         name: name.trim().to_string(),
-        is_running: state.trim() == "running",
+        startup_reconciliation: classify_startup_reconciliation(state.trim()),
     })
+}
+
+fn classify_startup_reconciliation(state: &str) -> StartupReconciliation {
+    match state {
+        "exited" | "dead" | "stopped" | "created" => StartupReconciliation::Remove,
+        _ => StartupReconciliation::Preserve,
+    }
 }
 
 fn list_agentd_secret_names() -> Result<Vec<String>, RunnerError> {
