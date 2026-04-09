@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agentd::config::Config;
-use agentd::{DispatchError, ManualRunRequest, SessionExecutor, dispatch_manual_run};
+use agentd::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 use agentd_runner::{
     ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
 };
@@ -74,7 +74,7 @@ source = "AGENTD_GITHUB_TOKEN"
 }
 
 #[test]
-fn dispatch_manual_run_resolves_repo_token_without_injecting_it_into_runtime_environment() {
+fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environment() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -83,15 +83,14 @@ fn dispatch_manual_run_resolves_repo_token_without_injecting_it_into_runtime_env
         std::env::set_var("CODEX_REPO_TOKEN", "clone-only-secret");
     }
     let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
-    let request = ManualRunRequest {
+    let request = RunRequest {
         agent: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: Some("task-42".to_string()),
     };
     let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
 
-    let outcome =
-        dispatch_manual_run(&config, &request, &executor).expect("dispatch should succeed");
+    let outcome = dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
 
     assert_eq!(outcome, SessionOutcome::Succeeded);
 
@@ -131,7 +130,7 @@ fn dispatch_manual_run_resolves_repo_token_without_injecting_it_into_runtime_env
 }
 
 #[test]
-fn dispatch_manual_run_omits_repo_token_when_source_env_var_is_missing() {
+fn dispatch_run_omits_repo_token_when_source_env_var_is_missing() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -140,14 +139,14 @@ fn dispatch_manual_run_omits_repo_token_when_source_env_var_is_missing() {
         std::env::remove_var("CODEX_REPO_TOKEN");
     }
     let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
-    let request = ManualRunRequest {
+    let request = RunRequest {
         agent: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
     let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
 
-    dispatch_manual_run(&config, &request, &executor).expect("dispatch should succeed");
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
 
     let state = state.lock().expect("recording state should lock");
     let invocation = state
@@ -163,7 +162,7 @@ fn dispatch_manual_run_omits_repo_token_when_source_env_var_is_missing() {
 }
 
 #[test]
-fn dispatch_manual_run_omits_repo_token_when_source_env_var_is_empty() {
+fn dispatch_run_omits_repo_token_when_source_env_var_is_empty() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -172,14 +171,14 @@ fn dispatch_manual_run_omits_repo_token_when_source_env_var_is_empty() {
         std::env::set_var("CODEX_REPO_TOKEN", "");
     }
     let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
-    let request = ManualRunRequest {
+    let request = RunRequest {
         agent: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
     let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
 
-    dispatch_manual_run(&config, &request, &executor).expect("dispatch should succeed");
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
 
     let state = state.lock().expect("recording state should lock");
     let invocation = state
@@ -196,7 +195,7 @@ fn dispatch_manual_run_omits_repo_token_when_source_env_var_is_empty() {
 }
 
 #[test]
-fn dispatch_manual_run_errors_when_runtime_credential_source_is_missing() {
+fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -205,14 +204,14 @@ fn dispatch_manual_run_errors_when_runtime_credential_source_is_missing() {
         std::env::set_var("CODEX_REPO_TOKEN", "clone-only-secret");
     }
     let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
-    let request = ManualRunRequest {
+    let request = RunRequest {
         agent: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
     let (executor, _state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
 
-    let error = dispatch_manual_run(&config, &request, &executor)
+    let error = dispatch_run(&config, &request, &executor)
         .expect_err("missing runtime credential sources should fail dispatch");
 
     match error {

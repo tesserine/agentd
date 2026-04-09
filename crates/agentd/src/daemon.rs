@@ -15,7 +15,7 @@ use agentd_runner::SessionOutcome;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, DaemonConfig};
-use crate::{DispatchError, ManualRunRequest, SessionExecutor, dispatch_manual_run};
+use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
 const RUNTIME_DIR_MODE: u32 = 0o700;
@@ -56,7 +56,7 @@ impl From<io::Error> for DaemonError {
     }
 }
 
-/// Errors returned to operator-side client commands.
+/// Errors returned to daemon client commands.
 #[derive(Debug)]
 pub enum ClientError {
     DaemonNotRunning { path: PathBuf },
@@ -284,10 +284,10 @@ fn log_handler_panic(handler: JoinHandle<()>) {
     }
 }
 
-/// Trigger a manual run against the local daemon and wait for its terminal outcome.
-pub fn request_manual_run(
+/// Trigger a run against the local daemon and wait for its terminal outcome.
+pub fn request_run(
     config: &DaemonConfig,
-    request: &ManualRunRequest,
+    request: &RunRequest,
 ) -> Result<SessionOutcome, ClientError> {
     match send_request(
         config.socket_path(),
@@ -381,9 +381,9 @@ fn handle_connection_inner(
             agent,
             repo_url,
             work_unit,
-        } => match dispatch_manual_run(
+        } => match dispatch_run(
             config,
-            &ManualRunRequest {
+            &RunRequest {
                 agent,
                 repo_url,
                 work_unit,
@@ -397,7 +397,7 @@ fn handle_connection_inner(
                 tracing::warn!(
                     event = "agentd.manual_run_rejected",
                     error = %error,
-                    "manual run request rejected"
+                    "run request rejected"
                 );
                 ResponseMessage::Error {
                     message: dispatch_error_message(&error),

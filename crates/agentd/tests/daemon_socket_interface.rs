@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 
 use agentd::config::Config;
 use agentd::{
-    ClientError, DaemonError, ManualRunRequest, SessionExecutor, request_manual_run,
-    run_daemon_until_shutdown,
+    ClientError, DaemonError, RunRequest, SessionExecutor, request_run, run_daemon_until_shutdown,
 };
 use agentd_runner::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 
@@ -171,7 +170,7 @@ fn wait_for_path_removal(path: &std::path::Path) {
 }
 
 #[test]
-fn daemon_reports_manual_run_outcome_back_through_client_request() {
+fn daemon_reports_run_outcome_back_through_client_request() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -191,9 +190,9 @@ fn daemon_reports_manual_run_outcome_back_through_client_request() {
     });
     wait_for_path(config.daemon().socket_path());
 
-    let outcome = request_manual_run(
+    let outcome = request_run(
         config.daemon(),
-        &ManualRunRequest {
+        &RunRequest {
             agent: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: Some("task-42".to_string()),
@@ -218,9 +217,9 @@ fn client_reports_clear_error_when_daemon_is_not_running() {
     let runtime_dir = unique_runtime_dir("not-running");
     let config = config_in_runtime_dir(&runtime_dir);
 
-    let error = request_manual_run(
+    let error = request_run(
         config.daemon(),
-        &ManualRunRequest {
+        &RunRequest {
             agent: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: None,
@@ -324,7 +323,7 @@ fn daemon_shutdown_removes_pid_file_and_socket() {
 }
 
 #[test]
-fn daemon_accepts_additional_manual_runs_while_a_previous_run_is_still_executing() {
+fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -348,9 +347,9 @@ fn daemon_accepts_additional_manual_runs_while_a_previous_run_is_still_executing
 
     let first_config = config.clone();
     let first_request = thread::spawn(move || {
-        request_manual_run(
+        request_run(
             first_config.daemon(),
-            &ManualRunRequest {
+            &RunRequest {
                 agent: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("first".to_string()),
@@ -362,9 +361,9 @@ fn daemon_accepts_additional_manual_runs_while_a_previous_run_is_still_executing
     let second_config = config.clone();
     let (second_tx, second_rx) = mpsc::channel();
     let second_request = thread::spawn(move || {
-        let outcome = request_manual_run(
+        let outcome = request_run(
             second_config.daemon(),
-            &ManualRunRequest {
+            &RunRequest {
                 agent: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("second".to_string()),
@@ -417,7 +416,7 @@ fn daemon_accepts_additional_manual_runs_while_a_previous_run_is_still_executing
 }
 
 #[test]
-fn daemon_shutdown_waits_for_an_in_flight_manual_run_to_finish() {
+fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -439,9 +438,9 @@ fn daemon_shutdown_waits_for_an_in_flight_manual_run_to_finish() {
 
     let client_config = config.clone();
     let client_request = thread::spawn(move || {
-        request_manual_run(
+        request_run(
             client_config.daemon(),
-            &ManualRunRequest {
+            &RunRequest {
                 agent: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("shutdown".to_string()),
@@ -457,7 +456,7 @@ fn daemon_shutdown_waits_for_an_in_flight_manual_run_to_finish() {
 
     assert!(
         !exited_before_release,
-        "daemon exited before the in-flight manual run finished"
+        "daemon exited before the in-flight run finished"
     );
 
     executor.release_first_run();
@@ -478,7 +477,7 @@ fn daemon_shutdown_waits_for_an_in_flight_manual_run_to_finish() {
 }
 
 #[test]
-fn daemon_shutdown_stops_accepting_new_manual_runs() {
+fn daemon_shutdown_stops_accepting_new_runs() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -500,9 +499,9 @@ fn daemon_shutdown_stops_accepting_new_manual_runs() {
 
     let first_config = config.clone();
     let first_request = thread::spawn(move || {
-        request_manual_run(
+        request_run(
             first_config.daemon(),
-            &ManualRunRequest {
+            &RunRequest {
                 agent: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("draining".to_string()),
@@ -514,15 +513,15 @@ fn daemon_shutdown_stops_accepting_new_manual_runs() {
     shutdown.store(true, Ordering::Release);
     wait_for_path_removal(config.daemon().socket_path());
 
-    let error = request_manual_run(
+    let error = request_run(
         config.daemon(),
-        &ManualRunRequest {
+        &RunRequest {
             agent: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: Some("rejected".to_string()),
         },
     )
-    .expect_err("new manual run should be rejected once shutdown begins");
+    .expect_err("new run should be rejected once shutdown begins");
 
     executor.release_first_run();
     handle

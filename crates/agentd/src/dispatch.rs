@@ -7,15 +7,15 @@ use agentd_runner::{
 
 use crate::config::Config;
 
-/// Operator-supplied parameters for a manual session trigger.
+/// Parameters for a daemon run request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManualRunRequest {
+pub struct RunRequest {
     pub agent: String,
     pub repo_url: String,
     pub work_unit: Option<String>,
 }
 
-/// Errors produced while mapping a manual run request into a runner session.
+/// Errors produced while mapping a run request into a runner session.
 #[derive(Debug)]
 pub enum DispatchError {
     UnknownAgent {
@@ -84,10 +84,10 @@ impl SessionExecutor for RunnerSessionExecutor {
     }
 }
 
-/// Resolve a named agent plus operator request into a runner session and run it.
-pub fn dispatch_manual_run(
+/// Resolve a named agent plus run request into a runner session and run it.
+pub fn dispatch_run(
     config: &Config,
-    request: &ManualRunRequest,
+    request: &RunRequest,
     executor: &impl SessionExecutor,
 ) -> Result<SessionOutcome, DispatchError> {
     let agent = config

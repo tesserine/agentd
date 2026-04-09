@@ -6,8 +6,7 @@ use std::{error::Error, fmt};
 
 use agentd::config::{Config, DaemonConfig};
 use agentd::{
-    ManualRunRequest, RunnerSessionExecutor, configure_tracing, request_manual_run,
-    run_daemon_until_shutdown,
+    RunRequest, RunnerSessionExecutor, configure_tracing, request_run, run_daemon_until_shutdown,
 };
 use clap::{Parser, Subcommand};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
@@ -105,9 +104,9 @@ fn run_client(
     repo: String,
     work_unit: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let outcome = request_manual_run(
+    let outcome = request_run(
         &config,
-        &ManualRunRequest {
+        &RunRequest {
             agent,
             repo_url: repo,
             work_unit,
