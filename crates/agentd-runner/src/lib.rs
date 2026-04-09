@@ -338,31 +338,43 @@ mod tests {
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[
                         (
-                            &["agentd-1a2b3c4d-codex-aaaaaaaa"],
+                            &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
-                        (&["agentd-1a2b3c4d-review-bbbbbbbb"], "dead", "Dead"),
+                        (&["agentd-1a2b3c4d-review-bbbbbbbbbbbbbbbb"], "dead", "Dead"),
                         (
-                            &["agentd-1a2b3c4d-build-cccccccc"],
+                            &["agentd-1a2b3c4d-build-cccccccccccccccc"],
                             "stopped",
                             "Exited (137) 5m ago",
                         ),
-                        (&["agentd-1a2b3c4d-prepare-dddddddd"], "created", "Created"),
                         (
-                            &["agentd-1a2b3c4d-init-12121212"],
+                            &["agentd-1a2b3c4d-prepare-dddddddddddddddd"],
+                            "created",
+                            "Created",
+                        ),
+                        (
+                            &["agentd-1a2b3c4d-init-1212121212121212"],
                             "initialized",
                             "Initialized",
                         ),
                         (
-                            &["agentd-1a2b3c4d-pause-eeeeeeee"],
+                            &["agentd-1a2b3c4d-pause-eeeeeeeeeeeeeeee"],
                             "paused",
                             "Up 2 minutes",
                         ),
-                        (&["agentd-1a2b3c4d-stop-ffffffff"], "stopping", "Stopping"),
-                        (&["agentd-1a2b3c4d-live-99999999"], "running", "Up 4 hours"),
                         (
-                            &["agentd-deadbeef-foreign-34343434"],
+                            &["agentd-1a2b3c4d-stop-ffffffffffffffff"],
+                            "stopping",
+                            "Stopping",
+                        ),
+                        (
+                            &["agentd-1a2b3c4d-live-9999999999999999"],
+                            "running",
+                            "Up 4 hours",
+                        ),
+                        (
+                            &["agentd-deadbeef-foreign-3434343434343434"],
                             "exited",
                             "Exited (0) 1m ago",
                         ),
@@ -370,15 +382,15 @@ mod tests {
                     ]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
-                    "agentd-1a2b3c4d-aaaaaaaa-0\n\
-                         agentd-1a2b3c4d-bbbbbbbb-0\n\
-                         agentd-1a2b3c4d-cccccccc-repo-token\n\
-                         agentd-1a2b3c4d-dddddddd-0\n\
-                         agentd-1a2b3c4d-12121212-0\n\
-                         agentd-1a2b3c4d-eeeeeeee-0\n\
-                         agentd-1a2b3c4d-ffffffff-0\n\
-                         agentd-1a2b3c4d-99999999-0\n\
-                         agentd-deadbeef-34343434-repo-token\n\
+                    "agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n\
+                         agentd-1a2b3c4d-bbbbbbbbbbbbbbbb-0\n\
+                         agentd-1a2b3c4d-cccccccccccccccc-repo-token\n\
+                         agentd-1a2b3c4d-dddddddddddddddd-0\n\
+                         agentd-1a2b3c4d-1212121212121212-0\n\
+                         agentd-1a2b3c4d-eeeeeeeeeeeeeeee-0\n\
+                         agentd-1a2b3c4d-ffffffffffffffff-0\n\
+                         agentd-1a2b3c4d-9999999999999999-0\n\
+                         agentd-deadbeef-3434343434343434-repo-token\n\
                          foreign-secret",
                 )))
                 .with_rm(CommandBehavior::from_outcome(
@@ -396,30 +408,30 @@ mod tests {
         assert_eq!(
             report.removed_container_names,
             vec![
-                "agentd-1a2b3c4d-codex-aaaaaaaa".to_string(),
-                "agentd-1a2b3c4d-review-bbbbbbbb".to_string(),
-                "agentd-1a2b3c4d-build-cccccccc".to_string(),
-                "agentd-1a2b3c4d-prepare-dddddddd".to_string(),
-                "agentd-1a2b3c4d-init-12121212".to_string(),
+                "agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string(),
+                "agentd-1a2b3c4d-review-bbbbbbbbbbbbbbbb".to_string(),
+                "agentd-1a2b3c4d-build-cccccccccccccccc".to_string(),
+                "agentd-1a2b3c4d-prepare-dddddddddddddddd".to_string(),
+                "agentd-1a2b3c4d-init-1212121212121212".to_string(),
             ]
         );
         assert_eq!(
             report.removed_secret_names,
             vec![
-                "agentd-1a2b3c4d-aaaaaaaa-0".to_string(),
-                "agentd-1a2b3c4d-bbbbbbbb-0".to_string(),
-                "agentd-1a2b3c4d-cccccccc-repo-token".to_string(),
-                "agentd-1a2b3c4d-dddddddd-0".to_string(),
-                "agentd-1a2b3c4d-12121212-0".to_string(),
+                "agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0".to_string(),
+                "agentd-1a2b3c4d-bbbbbbbbbbbbbbbb-0".to_string(),
+                "agentd-1a2b3c4d-cccccccccccccccc-repo-token".to_string(),
+                "agentd-1a2b3c4d-dddddddddddddddd-0".to_string(),
+                "agentd-1a2b3c4d-1212121212121212-0".to_string(),
             ]
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaa agentd-1a2b3c4d-review-bbbbbbbb agentd-1a2b3c4d-build-cccccccc agentd-1a2b3c4d-prepare-dddddddd agentd-1a2b3c4d-init-12121212\n"
+            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa agentd-1a2b3c4d-review-bbbbbbbbbbbbbbbb agentd-1a2b3c4d-build-cccccccccccccccc agentd-1a2b3c4d-prepare-dddddddddddddddd agentd-1a2b3c4d-init-1212121212121212\n"
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaa-0 agentd-1a2b3c4d-bbbbbbbb-0 agentd-1a2b3c4d-cccccccc-repo-token agentd-1a2b3c4d-dddddddd-0 agentd-1a2b3c4d-12121212-0\n"
+            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0 agentd-1a2b3c4d-bbbbbbbbbbbbbbbb-0 agentd-1a2b3c4d-cccccccccccccccc-repo-token agentd-1a2b3c4d-dddddddddddddddd-0 agentd-1a2b3c4d-1212121212121212-0\n"
         );
     }
 
@@ -433,13 +445,13 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[(
-                        &["agentd-1a2b3c4d-codex-dddddddd"],
+                        &["agentd-1a2b3c4d-codex-dddddddddddddddd"],
                         "running",
                         "Up 2 minutes",
                     )]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(
-                    CommandOutcome::new().stdout("agentd-1a2b3c4d-dddddddd-0"),
+                    CommandOutcome::new().stdout("agentd-1a2b3c4d-dddddddddddddddd-0"),
                 )),
         );
 
@@ -463,13 +475,13 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[(
-                        &["agentd-1a2b3c4d-codex-dddddddd"],
+                        &["agentd-1a2b3c4d-codex-dddddddddddddddd"],
                         "mystery-state",
                         "Something odd just happened",
                     )]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(
-                    CommandOutcome::new().stdout("agentd-1a2b3c4d-dddddddd-0"),
+                    CommandOutcome::new().stdout("agentd-1a2b3c4d-dddddddddddddddd-0"),
                 )),
         );
 
@@ -495,14 +507,14 @@ mod tests {
                     &fake_podman_ps_json(&[
                         (&["agentd-proxy"], "exited", "Exited (0) 10s ago"),
                         (
-                            &["agentd-1a2b3c4d-codex-aaaaaaaa"],
+                            &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
                     ]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(
-                    CommandOutcome::new().stdout("agentd-1a2b3c4d-aaaaaaaa-0"),
+                    CommandOutcome::new().stdout("agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0"),
                 ))
                 .with_rm(CommandBehavior::from_outcome(
                     CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
@@ -518,19 +530,19 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-1a2b3c4d-codex-aaaaaaaa".to_string(),]
+            vec!["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string(),]
         );
         assert_eq!(
             report.removed_secret_names,
-            vec!["agentd-1a2b3c4d-aaaaaaaa-0".to_string()]
+            vec!["agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0".to_string()]
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaa\n"
+            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaa-0\n"
+            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
         );
     }
 
@@ -545,20 +557,20 @@ mod tests {
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[
                         (
-                            &["agentd-1a2b3c4d-codex-AAAAAAAA"],
+                            &["agentd-1a2b3c4d-codex-AAAAAAAAAAAAAAAA"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
                         (
-                            &["agentd-1a2b3c4d-codex-aaaaaaaa"],
+                            &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
                     ]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
-                    "agentd-1a2b3c4d-AAAAAAAA-0\n\
-                     agentd-1a2b3c4d-aaaaaaaa-0",
+                    "agentd-1a2b3c4d-AAAAAAAAAAAAAAAA-0\n\
+                     agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0",
                 )))
                 .with_rm(CommandBehavior::from_outcome(
                     CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
@@ -574,19 +586,19 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-1a2b3c4d-codex-aaaaaaaa".to_string()]
+            vec!["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string()]
         );
         assert_eq!(
             report.removed_secret_names,
-            vec!["agentd-1a2b3c4d-aaaaaaaa-0".to_string()]
+            vec!["agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0".to_string()]
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaa\n"
+            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaa-0\n"
+            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
         );
     }
 
@@ -600,14 +612,14 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[(
-                        &["agentd-1a2b3c4d-codex-aaaaaaaa"],
+                        &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
                         "exited",
                         "Exited (0) 10s ago",
                     )]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
-                    "agentd-1a2b3c4d-aaaaaaaa-0\n\
-                     agentd-1a2b3c4d-aaaaaaaa-backup",
+                    "agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n\
+                     agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-backup",
                 )))
                 .with_rm(CommandBehavior::from_outcome(
                     CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
@@ -623,19 +635,19 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-1a2b3c4d-codex-aaaaaaaa".to_string()]
+            vec!["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string()]
         );
         assert_eq!(
             report.removed_secret_names,
-            vec!["agentd-1a2b3c4d-aaaaaaaa-0".to_string()]
+            vec!["agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0".to_string()]
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaa\n"
+            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaa-0\n"
+            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
         );
     }
 
@@ -713,7 +725,7 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[(
-                        &["agentd-1a2b3c4d-codex-aaaaaaaa"],
+                        &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
                         "exited",
                         "Exited (0) 10s ago",
                     )]),
@@ -742,7 +754,7 @@ mod tests {
                         "rm",
                         "--force",
                         "--ignore",
-                        "agentd-1a2b3c4d-codex-aaaaaaaa",
+                        "agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa",
                     ]
                 );
                 assert_eq!(status.code(), Some(51));
@@ -752,7 +764,7 @@ mod tests {
         }
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "--force --ignore agentd-1a2b3c4d-codex-aaaaaaaa\n"
+            "--force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
         );
     }
 
@@ -767,20 +779,20 @@ mod tests {
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[
                         (
-                            &["agentd-1a2b3c4d-codex-aaaaaaaa"],
+                            &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
                         (
-                            &["agentd-deadbeef-codex-bbbbbbbb"],
+                            &["agentd-deadbeef-codex-bbbbbbbbbbbbbbbb"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
                     ]),
                 )))
                 .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
-                    "agentd-1a2b3c4d-aaaaaaaa-0\n\
-                     agentd-deadbeef-bbbbbbbb-0",
+                    "agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n\
+                     agentd-deadbeef-bbbbbbbbbbbbbbbb-0",
                 )))
                 .with_rm(CommandBehavior::from_outcome(
                     CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
@@ -796,19 +808,19 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-1a2b3c4d-codex-aaaaaaaa".to_string()]
+            vec!["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string()]
         );
         assert_eq!(
             report.removed_secret_names,
-            vec!["agentd-1a2b3c4d-aaaaaaaa-0".to_string()]
+            vec!["agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0".to_string()]
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaa\n"
+            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaa-0\n"
+            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
         );
     }
 }

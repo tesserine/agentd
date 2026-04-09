@@ -700,7 +700,7 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
         format!("agentd-{daemon_instance_id}-{session_id}-0")
     );
     assert_eq!(daemon_instance_id.len(), 8);
-    assert_eq!(session_id.len(), 8);
+    assert_eq!(session_id.len(), 16);
 }
 
 #[test]

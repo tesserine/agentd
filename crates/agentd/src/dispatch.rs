@@ -5,7 +5,7 @@ use agentd_runner::{
     run_session,
 };
 
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
 
 /// Parameters for a daemon run request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +26,7 @@ pub enum DispatchError {
         credential: String,
         source: String,
     },
+    Config(ConfigError),
     Runner(RunnerError),
 }
 
@@ -41,6 +42,7 @@ impl fmt::Display for DispatchError {
                 f,
                 "agent '{agent}' credential '{credential}' requires daemon environment variable '{source}'"
             ),
+            Self::Config(error) => write!(f, "{error}"),
             Self::Runner(error) => write!(f, "{error}"),
         }
     }
@@ -49,9 +51,16 @@ impl fmt::Display for DispatchError {
 impl std::error::Error for DispatchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Config(error) => Some(error),
             Self::Runner(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<ConfigError> for DispatchError {
+    fn from(error: ConfigError) -> Self {
+        Self::Config(error)
     }
 }
 
@@ -95,6 +104,7 @@ pub fn dispatch_run(
         .ok_or_else(|| DispatchError::UnknownAgent {
             agent: request.agent.clone(),
         })?;
+    let daemon_instance_id = config.daemon().daemon_instance_id()?;
 
     let environment = agent
         .credentials()
@@ -123,7 +133,7 @@ pub fn dispatch_run(
     executor
         .run_session(
             SessionSpec {
-                daemon_instance_id: config.daemon().daemon_instance_id(),
+                daemon_instance_id,
                 agent_name: agent.name().to_string(),
                 base_image: agent.base_image().to_string(),
                 methodology_dir: agent.methodology_dir().to_path_buf(),

@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentd::config::Config;
+use agentd::config::{Config, ConfigError};
 use agentd::{
     ClientError, DaemonError, RunRequest, SessionExecutor, request_run, run_daemon_until_shutdown,
 };
@@ -649,4 +649,41 @@ fn daemon_startup_refuses_to_delete_a_non_socket_socket_path() {
             .expect("non-socket placeholder file should remain"),
         original_contents
     );
+}
+
+#[test]
+fn daemon_startup_rejects_relative_daemon_runtime_paths_before_claiming_runtime() {
+    let config = Config::from_str(
+        r#"
+[daemon]
+socket_path = "runtime/agentd.sock"
+pid_file = "runtime/agentd.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("config should parse");
+
+    let error = run_daemon_until_shutdown(
+        config,
+        FixedOutcomeExecutor {
+            outcome: SessionOutcome::Succeeded,
+        },
+        &AtomicBool::new(false),
+    )
+    .expect_err("relative daemon paths should abort startup");
+
+    match error {
+        DaemonError::Config(ConfigError::RelativeDaemonRuntimePath { field, path }) => {
+            assert_eq!(field, "daemon.socket_path");
+            assert_eq!(path, PathBuf::from("runtime/agentd.sock"));
+        }
+        other => panic!("expected config error, got {other:?}"),
+    }
 }

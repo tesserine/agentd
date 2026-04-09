@@ -75,9 +75,9 @@ A session is one execution of one agent from trigger to teardown.
 
 Before the daemon accepts any session trigger, it first reconciles stale
 runner-managed Podman resources from prior runs of the same daemon instance.
-Dead session containers named `agentd-{daemon8}-{agent}-{session8}` are
+Dead session containers named `agentd-{daemon8}-{agent}-{session16}` are
 removed, then orphaned runner-managed secrets named
-`agentd-{daemon8}-{session8}-{suffix}` whose session container no longer
+`agentd-{daemon8}-{session16}-{suffix}` whose session container no longer
 exists are removed. The daemon instance id is derived from the configured
 socket and PID paths, so distinct runtime-path pairs on the same host keep
 separate ownership scopes. Only after that cleanup succeeds does the daemon
@@ -149,8 +149,8 @@ Credentials are declared by agent configuration as daemon-side environment varia
 Because startup reconciliation is scoped per daemon instance rather than to the
 whole Podman namespace, the daemon removes only runner-managed resources whose
 names carry its own derived daemon id: dead
-`agentd-{daemon8}-{agent}-{session8}` containers are removed first, then
-orphaned `agentd-{daemon8}-{session8}-{suffix}` secrets whose session
+`agentd-{daemon8}-{agent}-{session16}` containers are removed first, then
+orphaned `agentd-{daemon8}-{session16}-{suffix}` secrets whose session
 container is gone.
 
 Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When an agent config declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before `runa run` starts so the token does not persist in git config or the agent runtime environment.

@@ -315,7 +315,14 @@ impl DaemonConfig {
     /// Stable daemon-instance identifier derived from the configured runtime
     /// path pair. Used to scope runner-managed Podman resource ownership to a
     /// single daemon instance.
-    pub fn daemon_instance_id(&self) -> String {
+    ///
+    /// Returns an error when either runtime path is relative. [`Config::load`]
+    /// resolves daemon runtime paths to absolute paths, but [`Config::from_str`]
+    /// preserves relative values as-is because it has no file base.
+    pub fn daemon_instance_id(&self) -> Result<String, ConfigError> {
+        validate_absolute_daemon_runtime_path("daemon.socket_path", &self.socket_path)?;
+        validate_absolute_daemon_runtime_path("daemon.pid_file", &self.pid_file)?;
+
         let mut hasher = Sha256::new();
         hasher.update(b"socket=");
         hasher.update(normalize_path_lexically(&self.socket_path).as_bytes());
@@ -324,7 +331,7 @@ impl DaemonConfig {
         hasher.update(b"\n");
 
         let digest = hasher.finalize();
-        hex_encode(&digest[..4])
+        Ok(hex_encode(&digest[..4]))
     }
 
     fn parse(raw: RawDaemonConfig, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
@@ -375,6 +382,8 @@ pub enum ConfigError {
         agent: Option<String>,
         credential: Option<String>,
     },
+    /// Deriving the daemon instance id requires absolute daemon runtime paths.
+    RelativeDaemonRuntimePath { field: &'static str, path: PathBuf },
     /// The `runa.command` array is empty for an agent.
     EmptyCommand { agent: String },
 }
@@ -441,6 +450,13 @@ impl fmt::Display for ConfigError {
                 }
 
                 Ok(())
+            }
+            ConfigError::RelativeDaemonRuntimePath { field, path } => {
+                write!(
+                    f,
+                    "field '{field}' must be absolute before deriving daemon instance id: {}",
+                    path.display()
+                )
             }
             ConfigError::EmptyCommand { agent } => {
                 write!(f, "agent '{agent}' must define a non-empty runa.command")
@@ -626,6 +642,20 @@ fn absolute_config_dir(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
 
 fn resolve_methodology_dir(base_dir: Option<&Path>, methodology_dir: &str) -> PathBuf {
     resolve_config_path(base_dir, methodology_dir)
+}
+
+fn validate_absolute_daemon_runtime_path(
+    field: &'static str,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    if path.is_absolute() {
+        return Ok(());
+    }
+
+    Err(ConfigError::RelativeDaemonRuntimePath {
+        field,
+        path: path.to_path_buf(),
+    })
 }
 
 fn resolve_config_path(base_dir: Option<&Path>, path: &str) -> PathBuf {

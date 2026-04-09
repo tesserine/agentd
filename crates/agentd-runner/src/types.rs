@@ -95,9 +95,9 @@ pub enum SessionOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StartupReconciliationReport {
     /// Stale runner-managed session containers matching
-    /// `agentd-{daemon8}-{agent}-{session8}` that were removed during startup.
+    /// `agentd-{daemon8}-{agent}-{session16}` that were removed during startup.
     pub removed_container_names: Vec<String>,
-    /// Orphaned runner-managed secrets matching `agentd-{daemon8}-{session8}-{suffix}`
+    /// Orphaned runner-managed secrets matching `agentd-{daemon8}-{session16}-{suffix}`
     /// that were removed during startup.
     pub removed_secret_names: Vec<String>,
 }

@@ -1,6 +1,6 @@
 pub(crate) const PODMAN_RESOURCE_PREFIX: &str = "agentd-";
 pub(crate) const DAEMON_INSTANCE_ID_LEN: usize = 8;
-pub(crate) const SESSION_ID_LEN: usize = 8;
+pub(crate) const SESSION_ID_LEN: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContainerNameParts<'a> {

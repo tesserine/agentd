@@ -29,8 +29,8 @@ agentd daemon --config /etc/agentd/agentd.toml
 `agentd` with no subcommand is the same as `agentd daemon`.
 
 Before the daemon binds its Unix socket, it reconciles stale runner-managed
-session containers named `agentd-{daemon8}-{agent}-{session8}` and orphaned
-runner-managed secrets named `agentd-{daemon8}-{session8}-{suffix}` left
+session containers named `agentd-{daemon8}-{agent}-{session16}` and orphaned
+runner-managed secrets named `agentd-{daemon8}-{session16}-{suffix}` left
 behind by prior runs of the same daemon instance. The daemon instance id is
 derived from the configured socket and PID paths, so different runtime-path
 pairs on the same host do not clean up each other's resources. Startup aborts

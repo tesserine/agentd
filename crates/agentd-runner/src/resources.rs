@@ -6,7 +6,7 @@
 //! leaked secrets or stale directories when resource creation fails midway.
 
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
-use crate::naming::format_secret_name;
+use crate::naming::{SESSION_ID_LEN, format_secret_name};
 use crate::podman::run_podman_command_with_input;
 use crate::types::{RunnerError, SessionInvocation, SessionSpec};
 use crate::validation::REPO_TOKEN_ENV;
@@ -232,14 +232,14 @@ fn create_directory_symlink(source: &Path, destination: &Path) -> Result<(), Run
     std::os::windows::fs::symlink_dir(source, destination).map_err(RunnerError::Io)
 }
 
-// Generates an 8-character hex string from 4 bytes of cryptographic randomness.
+// Generates a 16-character hex string from 8 bytes of cryptographic randomness.
 // Used to create unique container names and secret names that are unpredictable
 // across sessions, preventing name collisions and name-guessing attacks.
 fn unique_suffix_with<F>(fill_random: F) -> Result<String, RunnerError>
 where
     F: FnOnce(&mut [u8]) -> std::io::Result<()>,
 {
-    let mut bytes = [0_u8; 4];
+    let mut bytes = [0_u8; SESSION_ID_LEN / 2];
     fill_random(&mut bytes)?;
     Ok(hex_encode(&bytes))
 }
@@ -258,12 +258,30 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_session_resources;
+    use super::{prepare_session_resources, unique_suffix_with};
     use crate::test_support::{
         CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
         capture_tracing_events, fake_podman_lock, test_session_spec,
     };
     use crate::{ResolvedEnvironmentVariable, RunnerError, SessionInvocation};
+
+    #[test]
+    fn unique_suffix_with_encodes_eight_random_bytes_as_sixteen_lower_hex_characters() {
+        let suffix = unique_suffix_with(|bytes| {
+            bytes.copy_from_slice(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+            Ok(())
+        })
+        .expect("suffix generation should succeed");
+
+        assert_eq!(suffix, "0123456789abcdef");
+        assert_eq!(suffix.len(), 16);
+        assert!(
+            suffix
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+            "session suffix should be lowercase hex: {suffix}"
+        );
+    }
 
     #[test]
     fn prepare_session_resources_logs_cleanup_failure_after_environment_secret_create_failure() {
