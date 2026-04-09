@@ -45,7 +45,7 @@ enum Command {
     Daemon,
     /// Trigger a manual session through the running daemon.
     Run {
-        agent: String,
+        profile: String,
         repo: String,
         #[arg(long)]
         work_unit: Option<String>,
@@ -73,10 +73,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         None | Some(Command::Daemon) => run_daemon(Config::load(&cli.config)?),
         Some(Command::Run {
-            agent,
+            profile,
             repo,
             work_unit,
-        }) => run_client(DaemonConfig::load(&cli.config)?, agent, repo, work_unit),
+        }) => run_client(DaemonConfig::load(&cli.config)?, profile, repo, work_unit),
     }
 }
 
@@ -100,14 +100,14 @@ fn register_termination_handlers(shutdown: Arc<AtomicBool>) -> Result<(), std::i
 
 fn run_client(
     config: DaemonConfig,
-    agent: String,
+    profile: String,
     repo: String,
     work_unit: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outcome = request_run(
         &config,
         &RunRequest {
-            agent,
+            profile,
             repo_url: repo,
             work_unit,
         },

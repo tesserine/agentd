@@ -127,15 +127,15 @@ fn config_in_runtime_dir(runtime_dir: &std::path::Path) -> Config {
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[agents]]
+[[profiles]]
 name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 
-[[agents.credentials]]
+[[profiles.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
@@ -193,7 +193,7 @@ fn daemon_reports_run_outcome_back_through_client_request() {
     let outcome = request_run(
         config.daemon(),
         &RunRequest {
-            agent: "codex".to_string(),
+            profile: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: Some("task-42".to_string()),
         },
@@ -220,7 +220,7 @@ fn client_reports_clear_error_when_daemon_is_not_running() {
     let error = request_run(
         config.daemon(),
         &RunRequest {
-            agent: "codex".to_string(),
+            profile: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: None,
         },
@@ -350,7 +350,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
         request_run(
             first_config.daemon(),
             &RunRequest {
-                agent: "codex".to_string(),
+                profile: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("first".to_string()),
             },
@@ -364,7 +364,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
         let outcome = request_run(
             second_config.daemon(),
             &RunRequest {
-                agent: "codex".to_string(),
+                profile: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("second".to_string()),
             },
@@ -441,7 +441,7 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
         request_run(
             client_config.daemon(),
             &RunRequest {
-                agent: "codex".to_string(),
+                profile: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("shutdown".to_string()),
             },
@@ -502,7 +502,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
         request_run(
             first_config.daemon(),
             &RunRequest {
-                agent: "codex".to_string(),
+                profile: "codex".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("draining".to_string()),
             },
@@ -516,7 +516,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
     let error = request_run(
         config.daemon(),
         &RunRequest {
-            agent: "codex".to_string(),
+            profile: "codex".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: Some("rejected".to_string()),
         },
@@ -563,15 +563,15 @@ fn daemon_created_runtime_socket_and_directory_are_private() {
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[agents]]
+[[profiles]]
 name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 
-[[agents.credentials]]
+[[profiles.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
@@ -659,12 +659,12 @@ fn daemon_startup_rejects_relative_daemon_runtime_paths_before_claiming_runtime(
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[agents]]
+[[profiles]]
 name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )

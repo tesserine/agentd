@@ -56,16 +56,16 @@ impl SessionExecutor for RecordingExecutor {
 fn config_with_repo_token_source(repo_token_source: &str) -> Config {
     Config::from_str(&format!(
         r#"
-[[agents]]
+[[profiles]]
 name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "{repo_token_source}"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 
-[[agents.credentials]]
+[[profiles.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#
@@ -84,7 +84,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
     }
     let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
     let request = RunRequest {
-        agent: "codex".to_string(),
+        profile: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: Some("task-42".to_string()),
     };
@@ -104,7 +104,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
         .as_ref()
         .expect("executor should receive invocation");
 
-    assert_eq!(spec.agent_name, "codex");
+    assert_eq!(spec.profile_name, "codex");
     assert_eq!(spec.base_image, "ghcr.io/example/codex:latest");
     assert_eq!(spec.methodology_dir, Path::new("../groundwork"));
     assert_eq!(
@@ -115,7 +115,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
             .expect("daemon instance id should resolve")
     );
     assert_eq!(
-        spec.agent_command,
+        spec.command,
         vec!["codex".to_string(), "exec".to_string()]
     );
     assert_eq!(
@@ -147,7 +147,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_missing() {
     }
     let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
     let request = RunRequest {
-        agent: "codex".to_string(),
+        profile: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
@@ -179,7 +179,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_empty() {
     }
     let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
     let request = RunRequest {
-        agent: "codex".to_string(),
+        profile: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
@@ -212,7 +212,7 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
     }
     let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
     let request = RunRequest {
-        agent: "codex".to_string(),
+        profile: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
@@ -223,11 +223,11 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
 
     match error {
         DispatchError::MissingCredentialSource {
-            agent,
+            profile,
             credential,
             source,
         } => {
-            assert_eq!(agent, "codex");
+            assert_eq!(profile, "codex");
             assert_eq!(credential, "GITHUB_TOKEN");
             assert_eq!(source, "AGENTD_GITHUB_TOKEN");
         }
@@ -247,18 +247,18 @@ fn dispatch_run_rejects_relative_daemon_runtime_paths_as_config_errors() {
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[agents]]
+[[profiles]]
 name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
     .expect("config should parse");
     let request = RunRequest {
-        agent: "codex".to_string(),
+        profile: "codex".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };

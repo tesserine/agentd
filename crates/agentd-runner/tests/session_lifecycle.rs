@@ -30,10 +30,10 @@ fn succeeds_without_timeout_and_cleans_up_container() {
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "success-agent".to_string(),
+            profile_name: "success-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            agent_command: vec![
+            command: vec![
                 "codex".to_string(),
                 "exec".to_string(),
                 "--sandbox".to_string(),
@@ -79,10 +79,10 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "mixed-env-agent".to_string(),
+            profile_name: "mixed-env-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["codex".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -129,10 +129,10 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "failure-agent".to_string(),
+            profile_name: "failure-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["codex".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -175,10 +175,10 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "failure-agent-125".to_string(),
+            profile_name: "failure-agent-125".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["codex".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -222,10 +222,10 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "comma-methodology-agent".to_string(),
+            profile_name: "comma-methodology-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["codex".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -266,10 +266,10 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "timeout-agent".to_string(),
+            profile_name: "timeout-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            agent_command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["codex".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -313,10 +313,10 @@ fn releases_session_secret_after_container_reaches_running_state() {
         run_session(
             SessionSpec {
                 daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-                agent_name: "running-secret-agent".to_string(),
+                profile_name: "running-secret-agent".to_string(),
                 base_image: image,
                 methodology_dir,
-                agent_command: vec!["codex".to_string(), "exec".to_string()],
+                command: vec!["codex".to_string(), "exec".to_string()],
                 environment: vec![
                     ResolvedEnvironmentVariable {
                         name: "GITHUB_TOKEN".to_string(),
@@ -352,21 +352,21 @@ fn releases_session_secret_after_container_reaches_running_state() {
 
 struct SessionFixture {
     root: PathBuf,
-    agent_name: String,
+    profile_name: String,
     baseline_runner_secret_names: BTreeSet<String>,
     repo_server: RepoHttpServer,
 }
 
 impl SessionFixture {
-    fn new(agent_name: &str) -> Self {
-        Self::new_with_repo_server(agent_name, &format!("agentd-runner-{agent_name}"))
+    fn new(profile_name: &str) -> Self {
+        Self::new_with_repo_server(profile_name, &format!("agentd-runner-{profile_name}"))
     }
 
-    fn new_with_root_prefix(agent_name: &str, root_prefix: &str) -> Self {
-        Self::new_with_repo_server(agent_name, root_prefix)
+    fn new_with_root_prefix(profile_name: &str, root_prefix: &str) -> Self {
+        Self::new_with_repo_server(profile_name, root_prefix)
     }
 
-    fn new_with_repo_server(agent_name: &str, root_prefix: &str) -> Self {
+    fn new_with_repo_server(profile_name: &str, root_prefix: &str) -> Self {
         let root = unique_temp_dir(root_prefix);
         fs::create_dir_all(&root).expect("fixture root should be created");
 
@@ -384,7 +384,7 @@ impl SessionFixture {
 
         Self {
             root,
-            agent_name: agent_name.to_string(),
+            profile_name: profile_name.to_string(),
             baseline_runner_secret_names: list_runner_secret_names(),
             repo_server: RepoHttpServer::start(repo_root),
         }
@@ -411,7 +411,7 @@ impl SessionFixture {
         fs::write(context_dir.join("Containerfile"), CONTAINERFILE)
             .expect("containerfile should be written");
 
-        let tag = format!("agentd-runner-test:{}", self.agent_name);
+        let tag = format!("agentd-runner-test:{}", self.profile_name);
         let status = Command::new("podman")
             .args(["build", "--tag", &tag, context_dir.to_str().unwrap()])
             .stdout(Stdio::inherit())
@@ -435,7 +435,7 @@ impl SessionFixture {
         );
 
         let names = String::from_utf8(output.stdout).expect("podman ps output should be utf-8");
-        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.agent_name);
+        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.profile_name);
         assert!(
             !names.lines().any(|name| name.starts_with(&expected_prefix)),
             "runner left container behind with prefix {expected_prefix}: {names}"
@@ -457,7 +457,7 @@ impl SessionFixture {
 
     fn wait_for_runner_container_to_be_running(&self, timeout: Duration) -> String {
         let deadline = Instant::now() + timeout;
-        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.agent_name);
+        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.profile_name);
 
         loop {
             let running_container_names = list_running_container_names();
@@ -481,7 +481,7 @@ impl SessionFixture {
         let expected_secret_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{session_id}-");
         let expected_container_prefix = format!(
             "agentd-{TEST_DAEMON_INSTANCE_ID}-{}-{session_id}",
-            self.agent_name
+            self.profile_name
         );
 
         loop {
@@ -808,14 +808,14 @@ EOF
         ;;
     run)
         [ -f /agentd/methodology/manifest.toml ]
-        [ "${AGENT_NAME:-}" != "" ]
+        [ "${PROFILE_NAME:-}" != "" ]
         if [ "${GITHUB_TOKEN+set}" = "set" ]; then
             [ "${GITHUB_TOKEN}" = "test-token" ]
         fi
         [ "$(id -u)" != "0" ]
-        [ "$(id -un)" = "${AGENT_NAME}" ]
-        [ "${HOME:-}" = "/home/${AGENT_NAME}" ]
-        [ "$(pwd)" = "/home/${AGENT_NAME}/repo" ]
+        [ "$(id -un)" = "${PROFILE_NAME}" ]
+        [ "${HOME:-}" = "/home/${PROFILE_NAME}" ]
+        [ "$(pwd)" = "/home/${PROFILE_NAME}/repo" ]
         [ -w "${HOME}" ]
         [ -w "${HOME}/repo" ]
         [ -f "${HOME}/repo/README.md" ]

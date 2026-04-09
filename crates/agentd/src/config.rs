@@ -1,8 +1,8 @@
-//! TOML configuration parsing and validation for the daemon and agent registry.
+//! TOML configuration parsing and validation for the daemon and profile registry.
 //!
 //! Bridges operator-facing configuration to daemon dispatch and the runner's
 //! [`SessionSpec`] model. Validation here is stricter than the runner's own
-//! validation — it enforces uniqueness (no duplicate agent or credential
+//! validation — it enforces uniqueness (no duplicate profile or credential
 //! names), non-empty fields, and whitespace hygiene in addition to the
 //! runner's format and reservation rules. Relative daemon runtime paths and
 //! `methodology_dir` are resolved against the configuration file location when
@@ -15,13 +15,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use agentd_runner::{RunnerError, validate_agent_name, validate_environment_name};
+use agentd_runner::{RunnerError, validate_environment_name, validate_profile_name};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-/// Validated daemon and agent registry parsed from a TOML configuration file.
+/// Validated daemon and profile registry parsed from a TOML configuration file.
 ///
-/// Guarantees that daemon runtime paths are present, all agent names are
+/// Guarantees that daemon runtime paths are present, all profile names are
 /// unique and valid, all required fields are non-empty, and all credential
 /// names are valid environment variable names. Relative daemon runtime paths
 /// and `methodology_dir` paths are resolved against the configuration file's
@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     daemon: DaemonConfig,
-    agents: Vec<AgentConfig>,
+    profiles: Vec<ProfileConfig>,
 }
 
 impl Config {
@@ -45,9 +45,9 @@ impl Config {
         Self::parse(&contents, base_dir.as_deref())
     }
 
-    /// Returns all configured agents.
-    pub fn agents(&self) -> &[AgentConfig] {
-        &self.agents
+    /// Returns all configured profiles.
+    pub fn profiles(&self) -> &[ProfileConfig] {
+        &self.profiles
     }
 
     /// Returns the daemon-wide runtime paths.
@@ -55,55 +55,55 @@ impl Config {
         &self.daemon
     }
 
-    /// Looks up an agent by name. Returns `None` if no agent matches.
-    pub fn agent(&self, name: &str) -> Option<&AgentConfig> {
-        self.agents.iter().find(|agent| agent.name == name)
+    /// Looks up a profile by name. Returns `None` if no profile matches.
+    pub fn profile(&self, name: &str) -> Option<&ProfileConfig> {
+        self.profiles.iter().find(|profile| profile.name == name)
     }
 
     fn parse(contents: &str, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(contents)?;
         let daemon = DaemonConfig::parse(raw.daemon, base_dir)?;
 
-        if raw.agents.is_empty() {
-            return Err(ConfigError::NoAgents);
+        if raw.profiles.is_empty() {
+            return Err(ConfigError::NoProfiles);
         }
 
-        let mut seen_agents = HashSet::new();
-        let mut agents = Vec::with_capacity(raw.agents.len());
+        let mut seen_profiles = HashSet::new();
+        let mut profiles = Vec::with_capacity(raw.profiles.len());
 
-        for raw_agent in raw.agents {
-            validate_lookup_key("name", &raw_agent.name, None, None)?;
-            if validate_agent_name(&raw_agent.name).is_err() {
-                return Err(ConfigError::InvalidAgentName {
-                    name: raw_agent.name,
+        for raw_profile in raw.profiles {
+            validate_lookup_key("name", &raw_profile.name, None, None)?;
+            if validate_profile_name(&raw_profile.name).is_err() {
+                return Err(ConfigError::InvalidProfileName {
+                    name: raw_profile.name,
                 });
             }
 
-            if !seen_agents.insert(raw_agent.name.clone()) {
-                return Err(ConfigError::DuplicateAgentName {
-                    name: raw_agent.name,
+            if !seen_profiles.insert(raw_profile.name.clone()) {
+                return Err(ConfigError::DuplicateProfileName {
+                    name: raw_profile.name,
                 });
             }
 
             validate_non_empty(
                 "base_image",
-                &raw_agent.base_image,
-                Some(raw_agent.name.as_str()),
+                &raw_profile.base_image,
+                Some(raw_profile.name.as_str()),
                 None,
             )?;
             validate_non_empty(
                 "methodology_dir",
-                &raw_agent.methodology_dir,
-                Some(raw_agent.name.as_str()),
+                &raw_profile.methodology_dir,
+                Some(raw_profile.name.as_str()),
                 None,
             )?;
-            let repo_token_source = match raw_agent.repo_token_source {
+            let repo_token_source = match raw_profile.repo_token_source {
                 Some(value) if value.is_empty() => None,
                 Some(value) => {
                     validate_lookup_key(
                         "repo_token_source",
                         &value,
-                        Some(raw_agent.name.as_str()),
+                        Some(raw_profile.name.as_str()),
                         None,
                     )?;
                     Some(value)
@@ -111,48 +111,48 @@ impl Config {
                 None => None,
             };
 
-            if raw_agent.runa.command.is_empty() {
+            if raw_profile.runa.command.is_empty() {
                 return Err(ConfigError::EmptyCommand {
-                    agent: raw_agent.name.clone(),
+                    profile: raw_profile.name.clone(),
                 });
             }
 
-            let mut command = Vec::with_capacity(raw_agent.runa.command.len());
-            for element in raw_agent.runa.command {
+            let mut command = Vec::with_capacity(raw_profile.runa.command.len());
+            for element in raw_profile.runa.command {
                 validate_non_empty(
                     "runa.command",
                     &element,
-                    Some(raw_agent.name.as_str()),
+                    Some(raw_profile.name.as_str()),
                     None,
                 )?;
                 command.push(element);
             }
 
             let mut seen_credentials = HashSet::new();
-            let mut credentials = Vec::with_capacity(raw_agent.credentials.len());
-            for raw_credential in raw_agent.credentials {
+            let mut credentials = Vec::with_capacity(raw_profile.credentials.len());
+            for raw_credential in raw_profile.credentials {
                 validate_lookup_key(
                     "credentials.name",
                     &raw_credential.name,
-                    Some(raw_agent.name.as_str()),
+                    Some(raw_profile.name.as_str()),
                     None,
                 )?;
                 if validate_environment_name(&raw_credential.name).is_err() {
                     return Err(ConfigError::InvalidCredentialName {
-                        agent: raw_agent.name.clone(),
+                        profile: raw_profile.name.clone(),
                         name: raw_credential.name,
                     });
                 }
                 validate_non_empty(
                     "credentials.source",
                     &raw_credential.source,
-                    Some(raw_agent.name.as_str()),
+                    Some(raw_profile.name.as_str()),
                     Some(raw_credential.name.as_str()),
                 )?;
 
                 if !seen_credentials.insert(raw_credential.name.clone()) {
                     return Err(ConfigError::DuplicateCredentialName {
-                        agent: raw_agent.name.clone(),
+                        profile: raw_profile.name.clone(),
                         name: raw_credential.name,
                     });
                 }
@@ -163,10 +163,10 @@ impl Config {
                 });
             }
 
-            let methodology_dir = resolve_methodology_dir(base_dir, &raw_agent.methodology_dir);
-            agents.push(AgentConfig {
-                name: raw_agent.name,
-                base_image: raw_agent.base_image,
+            let methodology_dir = resolve_methodology_dir(base_dir, &raw_profile.methodology_dir);
+            profiles.push(ProfileConfig {
+                name: raw_profile.name,
+                base_image: raw_profile.base_image,
                 methodology_dir,
                 repo_token_source,
                 credentials,
@@ -174,7 +174,7 @@ impl Config {
             });
         }
 
-        Ok(Self { daemon, agents })
+        Ok(Self { daemon, profiles })
     }
 }
 
@@ -190,13 +190,13 @@ impl FromStr for Config {
     }
 }
 
-/// Configuration for a single agent in the registry.
+/// Configuration for a single profile in the registry.
 ///
-/// Fields are private; use the accessor methods to read values. The agent
+/// Fields are private; use the accessor methods to read values. The profile
 /// name has been validated as a legal unix username and is unique within the
 /// [`Config`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentConfig {
+pub struct ProfileConfig {
     name: String,
     base_image: String,
     methodology_dir: PathBuf,
@@ -205,13 +205,13 @@ pub struct AgentConfig {
     runa: RunaConfig,
 }
 
-impl AgentConfig {
-    /// Agent identity string, validated as a legal unix username.
+impl ProfileConfig {
+    /// Profile identity string, validated as a legal unix username.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Container image reference for this agent's sessions.
+    /// Container image reference for this profile's sessions.
     pub fn base_image(&self) -> &str {
         &self.base_image
     }
@@ -225,24 +225,24 @@ impl AgentConfig {
 
     /// Optional environment variable name resolved by the daemon at dispatch
     /// time to authenticate the runner-managed `git clone` only. This value is
-    /// not injected into the agent runtime environment.
+    /// not injected into the session runtime environment.
     pub fn repo_token_source(&self) -> Option<&str> {
         self.repo_token_source.as_deref()
     }
 
-    /// Declared credentials for this agent. Each credential's name is a
-    /// valid environment variable name, unique within this agent.
+    /// Declared credentials for this profile. Each credential's name is a
+    /// valid environment variable name, unique within this profile.
     pub fn credentials(&self) -> &[CredentialConfig] {
         &self.credentials
     }
 
-    /// Runa runtime configuration for this agent.
+    /// Runa runtime configuration for this profile.
     pub fn runa(&self) -> &RunaConfig {
         &self.runa
     }
 }
 
-/// A declared credential for an agent.
+/// A declared credential for a profile.
 ///
 /// The `name` becomes the environment variable name inside the container.
 /// The `source` is the name of an environment variable that the daemon reads
@@ -267,7 +267,7 @@ impl CredentialConfig {
     }
 }
 
-/// Runa runtime configuration for an agent.
+/// Runa runtime configuration for a profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunaConfig {
     command: Vec<String>,
@@ -294,7 +294,7 @@ impl DaemonConfig {
     /// configuration file at `path`.
     ///
     /// Relative daemon runtime paths are resolved against the directory
-    /// containing `path`. The agent registry is ignored entirely, but other
+    /// containing `path`. The profile registry is ignored entirely, but other
     /// top-level sections must match the daemon config schema.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
@@ -357,21 +357,21 @@ pub enum ConfigError {
     Io(std::io::Error),
     /// The file contains invalid TOML or violates the expected schema.
     Parse(toml::de::Error),
-    /// The configuration defines zero agents. At least one must be declared.
-    NoAgents,
-    /// Two agents share the same name.
-    DuplicateAgentName { name: String },
-    /// An agent name fails the runner's [`validate_agent_name`] rules.
-    InvalidAgentName { name: String },
-    /// Two credentials within the same agent share a name.
-    DuplicateCredentialName { agent: String, name: String },
+    /// The configuration defines zero profiles. At least one must be declared.
+    NoProfiles,
+    /// Two profiles share the same name.
+    DuplicateProfileName { name: String },
+    /// A profile name fails the runner's [`validate_profile_name`] rules.
+    InvalidProfileName { name: String },
+    /// Two credentials within the same profile share a name.
+    DuplicateCredentialName { profile: String, name: String },
     /// A credential name fails [`validate_environment_name`] (contains `,`
-    /// or `=`, or is the reserved `AGENT_NAME`).
-    InvalidCredentialName { agent: String, name: String },
+    /// or `=`, or is the reserved `PROFILE_NAME`).
+    InvalidCredentialName { profile: String, name: String },
     /// A required string field is empty or whitespace-only.
     EmptyField {
         field: &'static str,
-        agent: Option<String>,
+        profile: Option<String>,
         credential: Option<String>,
     },
     /// A lookup-key field has leading or trailing whitespace. Caught
@@ -379,13 +379,13 @@ pub enum ConfigError {
     /// whitespace itself is the error.
     FieldHasOuterWhitespace {
         field: &'static str,
-        agent: Option<String>,
+        profile: Option<String>,
         credential: Option<String>,
     },
     /// Deriving the daemon instance id requires absolute daemon runtime paths.
     RelativeDaemonRuntimePath { field: &'static str, path: PathBuf },
-    /// The `runa.command` array is empty for an agent.
-    EmptyCommand { agent: String },
+    /// The `runa.command` array is empty for a profile.
+    EmptyCommand { profile: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -393,38 +393,38 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::Io(error) => write!(f, "failed to read config: {error}"),
             ConfigError::Parse(error) => write!(f, "invalid config: {error}"),
-            ConfigError::NoAgents => write!(f, "config must define at least one agent"),
-            ConfigError::DuplicateAgentName { name } => {
-                write!(f, "duplicate agent name: {name}")
+            ConfigError::NoProfiles => write!(f, "config must define at least one profile"),
+            ConfigError::DuplicateProfileName { name } => {
+                write!(f, "duplicate profile name: {name}")
             }
-            ConfigError::InvalidAgentName { name } => {
+            ConfigError::InvalidProfileName { name } => {
                 write!(
                     f,
-                    "invalid agent name '{name}'; {}",
-                    RunnerError::InvalidAgentName
+                    "invalid profile name '{name}'; {}",
+                    RunnerError::InvalidProfileName
                 )
             }
-            ConfigError::DuplicateCredentialName { agent, name } => {
+            ConfigError::DuplicateCredentialName { profile, name } => {
                 write!(
                     f,
-                    "agent '{agent}' defines duplicate credential name '{name}'"
+                    "profile '{profile}' defines duplicate credential name '{name}'"
                 )
             }
-            ConfigError::InvalidCredentialName { agent, name } => {
+            ConfigError::InvalidCredentialName { profile, name } => {
                 write!(
                     f,
-                    "agent '{agent}' defines invalid credential name '{name}'; credential names must not contain ',' or '=' and must not use reserved name 'AGENT_NAME'"
+                    "profile '{profile}' defines invalid credential name '{name}'; credential names must not contain ',' or '=' and must not use reserved name 'PROFILE_NAME'"
                 )
             }
             ConfigError::EmptyField {
                 field,
-                agent,
+                profile,
                 credential,
             } => {
                 write!(f, "field '{field}' must not be empty")?;
 
-                if let Some(agent) = agent {
-                    write!(f, " for agent '{agent}'")?;
+                if let Some(profile) = profile {
+                    write!(f, " for profile '{profile}'")?;
                 }
                 if let Some(credential) = credential {
                     write!(f, " credential '{credential}'")?;
@@ -434,7 +434,7 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::FieldHasOuterWhitespace {
                 field,
-                agent,
+                profile,
                 credential,
             } => {
                 write!(
@@ -442,8 +442,8 @@ impl fmt::Display for ConfigError {
                     "field '{field}' must not have leading or trailing whitespace"
                 )?;
 
-                if let Some(agent) = agent {
-                    write!(f, " for agent '{agent}'")?;
+                if let Some(profile) = profile {
+                    write!(f, " for profile '{profile}'")?;
                 }
                 if let Some(credential) = credential {
                     write!(f, " credential '{credential}'")?;
@@ -458,8 +458,8 @@ impl fmt::Display for ConfigError {
                     path.display()
                 )
             }
-            ConfigError::EmptyCommand { agent } => {
-                write!(f, "agent '{agent}' must define a non-empty runa.command")
+            ConfigError::EmptyCommand { profile } => {
+                write!(f, "profile '{profile}' must define a non-empty runa.command")
             }
         }
     }
@@ -493,7 +493,7 @@ struct RawConfig {
     #[serde(default)]
     daemon: RawDaemonConfig,
     #[serde(default)]
-    agents: Vec<RawAgentConfig>,
+    profiles: Vec<RawProfileConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -501,8 +501,8 @@ struct RawConfig {
 struct RawDaemonOnlyConfig {
     #[serde(default)]
     daemon: RawDaemonConfig,
-    #[serde(default, rename = "agents")]
-    _agents: Option<toml::Value>,
+    #[serde(default, rename = "profiles")]
+    _profiles: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -525,7 +525,7 @@ impl Default for RawDaemonConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAgentConfig {
+struct RawProfileConfig {
     name: String,
     base_image: String,
     methodology_dir: String,
@@ -596,13 +596,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn validate_non_empty(
     field: &'static str,
     value: &str,
-    agent: Option<&str>,
+    profile: Option<&str>,
     credential: Option<&str>,
 ) -> Result<(), ConfigError> {
     if value.trim().is_empty() {
         return Err(ConfigError::EmptyField {
             field,
-            agent: agent.map(str::to_owned),
+            profile: profile.map(str::to_owned),
             credential: credential.map(str::to_owned),
         });
     }
@@ -613,15 +613,15 @@ fn validate_non_empty(
 fn validate_lookup_key(
     field: &'static str,
     value: &str,
-    agent: Option<&str>,
+    profile: Option<&str>,
     credential: Option<&str>,
 ) -> Result<(), ConfigError> {
-    validate_non_empty(field, value, agent, credential)?;
+    validate_non_empty(field, value, profile, credential)?;
 
     if value != value.trim() {
         return Err(ConfigError::FieldHasOuterWhitespace {
             field,
-            agent: agent.map(str::to_owned),
+            profile: profile.map(str::to_owned),
             credential: credential.map(str::to_owned),
         });
     }
