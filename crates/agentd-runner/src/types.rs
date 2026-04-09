@@ -90,7 +90,7 @@ pub enum SessionOutcome {
 /// any new sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StartupReconciliationReport {
-    /// Stale `agentd-*` containers that were removed during startup.
+    /// Stale runner-managed session containers that were removed during startup.
     pub removed_container_names: Vec<String>,
     /// Orphaned `agentd-secret-*` secrets that were removed during startup.
     pub removed_secret_names: Vec<String>,

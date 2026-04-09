@@ -28,9 +28,10 @@ agentd daemon --config /etc/agentd/agentd.toml
 
 `agentd` with no subcommand is the same as `agentd daemon`.
 
-Before the daemon binds its Unix socket, it reconciles stale `agentd-*`
-containers and orphaned `agentd-secret-*` Podman secrets left behind by prior
-runs. Startup aborts if that cleanup cannot complete.
+Before the daemon binds its Unix socket, it reconciles stale runner-managed
+session containers named `agentd-{agent}-{session_id}` and orphaned
+`agentd-secret-*` Podman secrets left behind by prior runs. Startup aborts if
+that cleanup cannot complete.
 
 The daemon is a foreground process. By default it uses:
 - socket: `/run/agentd/agentd.sock`

@@ -489,6 +489,58 @@ mod tests {
     }
 
     #[test]
+    fn startup_reconciliation_ignores_terminal_agentd_prefixed_non_session_containers() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[
+                        (&["agentd-proxy"], "exited", "Exited (0) 10s ago"),
+                        (
+                            &["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                            "exited",
+                            "Exited (0) 10s ago",
+                        ),
+                    ]),
+                )))
+                .with_secret_ls(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .stdout("agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0"),
+                ))
+                .with_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
+                ))
+                .with_secret_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("secret-commands.log", "rm"),
+                )),
+        );
+
+        let report = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect("startup reconciliation should succeed");
+
+        assert_eq!(
+            report.removed_container_names,
+            vec!["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),]
+        );
+        assert_eq!(
+            report.removed_secret_names,
+            vec!["agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0".to_string()]
+        );
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "rm --force --ignore agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        );
+        assert_eq!(
+            fixture.secret_commands(),
+            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0\n"
+        );
+    }
+
+    #[test]
     fn startup_reconciliation_returns_an_error_when_container_listing_json_is_malformed() {
         let _guard = fake_podman_lock()
             .lock()

@@ -88,7 +88,7 @@ fn parse_container_record(record: PodmanPsRecord) -> Option<ContainerRecord> {
     let name = record
         .names
         .into_iter()
-        .find(|name| name.starts_with(CONTAINER_PREFIX))?;
+        .find(|name| parse_container_session_id(name).is_some())?;
 
     Some(ContainerRecord {
         startup_reconciliation: classify_startup_reconciliation(record.state.trim()),

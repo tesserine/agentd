@@ -74,10 +74,11 @@ The workspace contains three crates because there are three distinct rates of ch
 A session is one execution of one agent from trigger to teardown.
 
 Before the daemon accepts any session trigger, it first reconciles stale
-runner-managed Podman resources from prior runs. Dead `agentd-*` containers
-are removed, then orphaned `agentd-secret-*` secrets whose session container
-no longer exists are removed. Only after that cleanup succeeds does the daemon
-bind its Unix socket and begin accepting requests.
+runner-managed Podman resources from prior runs. Dead session containers named
+`agentd-{agent}-{session_id}` are removed, then orphaned `agentd-secret-*`
+secrets whose session container no longer exists are removed. Only after that
+cleanup succeeds does the daemon bind its Unix socket and begin accepting
+requests.
 
 The daemon's Unix socket is the single intake for all session triggers. Manual
 CLI invocation connects to that socket as a client. Scheduling policy also
@@ -144,8 +145,8 @@ Credentials are declared by agent configuration as daemon-side environment varia
 
 Because the daemon owns the Podman session namespace, startup also reconciles
 stale runner-managed resources before any new session can start: dead
-`agentd-*` containers are removed first, then orphaned `agentd-secret-*`
-secrets whose session container is gone.
+`agentd-{agent}-{session_id}` containers are removed first, then orphaned
+`agentd-secret-*` secrets whose session container is gone.
 
 Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When an agent config declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before `runa run` starts so the token does not persist in git config or the agent runtime environment.
 
