@@ -24,13 +24,13 @@ fn succeeds_without_timeout_and_cleans_up_container() {
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("success-agent");
+    let fixture = SessionFixture::new("success-run");
     let image = fixture.build_image();
 
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "success-agent".to_string(),
+            profile_name: "success-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             command: vec![
@@ -73,13 +73,13 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("mixed-env-agent");
+    let fixture = SessionFixture::new("mixed-env-run");
     let image = fixture.build_image();
 
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "mixed-env-agent".to_string(),
+            profile_name: "mixed-env-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             command: vec!["codex".to_string(), "exec".to_string()],
@@ -123,13 +123,13 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("failure-agent");
+    let fixture = SessionFixture::new("failure-run");
     let image = fixture.build_image();
 
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "failure-agent".to_string(),
+            profile_name: "failure-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             command: vec!["codex".to_string(), "exec".to_string()],
@@ -169,13 +169,13 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("failure-agent-125");
+    let fixture = SessionFixture::new("failure-run-125");
     let image = fixture.build_image();
 
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "failure-agent-125".to_string(),
+            profile_name: "failure-run-125".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             command: vec!["codex".to_string(), "exec".to_string()],
@@ -214,7 +214,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
         .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new_with_root_prefix(
-        "comma-methodology-agent",
+        "comma-methodology-run",
         "agentd-runner,comma,methodology",
     );
     let image = fixture.build_image();
@@ -222,7 +222,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "comma-methodology-agent".to_string(),
+            profile_name: "comma-methodology-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             command: vec!["codex".to_string(), "exec".to_string()],
@@ -260,13 +260,13 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("timeout-agent");
+    let fixture = SessionFixture::new("timeout-run");
     let image = fixture.build_image();
 
     let outcome = run_session(
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "timeout-agent".to_string(),
+            profile_name: "timeout-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             command: vec!["codex".to_string(), "exec".to_string()],
@@ -304,7 +304,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("running-secret-agent");
+    let fixture = SessionFixture::new("running-secret-run");
     let image = fixture.build_image();
     let methodology_dir = fixture.methodology_dir();
     let repo_url = fixture.repo_url();
@@ -313,7 +313,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
         run_session(
             SessionSpec {
                 daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-                profile_name: "running-secret-agent".to_string(),
+                profile_name: "running-secret-run".to_string(),
                 base_image: image,
                 methodology_dir,
                 command: vec!["codex".to_string(), "exec".to_string()],
