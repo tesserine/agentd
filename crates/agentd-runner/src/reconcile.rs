@@ -81,7 +81,7 @@ fn parse_container_record_line(line: &str) -> Option<ContainerRecord> {
 
 fn classify_startup_reconciliation(state: &str) -> StartupReconciliation {
     match state {
-        "exited" | "dead" | "stopped" | "created" => StartupReconciliation::Remove,
+        "exited" | "dead" | "stopped" | "created" | "initialized" => StartupReconciliation::Remove,
         _ => StartupReconciliation::Preserve,
     }
 }
@@ -105,7 +105,11 @@ fn remove_containers(container_names: &[String]) -> Result<(), RunnerError> {
         return Ok(());
     }
 
-    let mut args = vec!["rm".to_string(), "--force".to_string()];
+    let mut args = vec![
+        "rm".to_string(),
+        "--force".to_string(),
+        "--ignore".to_string(),
+    ];
     args.extend(container_names.iter().cloned());
     run_podman_command(args).map(|_| ())
 }

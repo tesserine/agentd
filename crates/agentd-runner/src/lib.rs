@@ -330,6 +330,7 @@ mod tests {
                          agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb dead\n\
                          agentd-build-cccccccccccccccccccccccccccccccc stopped\n\
                          agentd-prepare-dddddddddddddddddddddddddddddddd created\n\
+                         agentd-init-12121212121212121212121212121212 initialized\n\
                          agentd-pause-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee paused\n\
                          agentd-stop-ffffffffffffffffffffffffffffffff stopping\n\
                          agentd-live-99999999999999999999999999999999 running\n\
@@ -340,10 +341,11 @@ mod tests {
                          agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0\n\
                          agentd-secret-cccccccccccccccccccccccccccccccc-repo-token\n\
                          agentd-secret-dddddddddddddddddddddddddddddddd-0\n\
+                         agentd-secret-12121212121212121212121212121212-0\n\
                          agentd-secret-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-0\n\
                          agentd-secret-ffffffffffffffffffffffffffffffff-0\n\
                          agentd-secret-99999999999999999999999999999999-0\n\
-                         agentd-secret-12121212121212121212121212121212-repo-token\n\
+                         agentd-secret-34343434343434343434343434343434-repo-token\n\
                          foreign-secret",
                 )))
                 .with_rm(CommandBehavior::from_outcome(
@@ -365,6 +367,7 @@ mod tests {
                 "agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
                 "agentd-build-cccccccccccccccccccccccccccccccc".to_string(),
                 "agentd-prepare-dddddddddddddddddddddddddddddddd".to_string(),
+                "agentd-init-12121212121212121212121212121212".to_string(),
             ]
         );
         assert_eq!(
@@ -374,16 +377,17 @@ mod tests {
                 "agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0".to_string(),
                 "agentd-secret-cccccccccccccccccccccccccccccccc-repo-token".to_string(),
                 "agentd-secret-dddddddddddddddddddddddddddddddd-0".to_string(),
-                "agentd-secret-12121212121212121212121212121212-repo-token".to_string(),
+                "agentd-secret-12121212121212121212121212121212-0".to_string(),
+                "agentd-secret-34343434343434343434343434343434-repo-token".to_string(),
             ]
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb agentd-build-cccccccccccccccccccccccccccccccc agentd-prepare-dddddddddddddddddddddddddddddddd\n"
+            "rm --force --ignore agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb agentd-build-cccccccccccccccccccccccccccccccc agentd-prepare-dddddddddddddddddddddddddddddddd agentd-init-12121212121212121212121212121212\n"
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0 agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0 agentd-secret-cccccccccccccccccccccccccccccccc-repo-token agentd-secret-dddddddddddddddddddddddddddddddd-0 agentd-secret-12121212121212121212121212121212-repo-token\n"
+            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0 agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0 agentd-secret-cccccccccccccccccccccccccccccccc-repo-token agentd-secret-dddddddddddddddddddddddddddddddd-0 agentd-secret-12121212121212121212121212121212-0 agentd-secret-34343434343434343434343434343434-repo-token\n"
         );
     }
 
@@ -472,5 +476,55 @@ mod tests {
             }
             other => panic!("expected podman command failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn startup_reconciliation_returns_an_error_when_container_removal_fails() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .stdout("agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa exited"),
+                ))
+                .with_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .write_args_to("rm-commands.log")
+                        .stderr("rm failed")
+                        .exit_code(51),
+                )),
+        );
+
+        let error = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect_err("startup reconciliation should fail when container removal fails");
+
+        match error {
+            RunnerError::PodmanCommandFailed {
+                args,
+                status,
+                stderr,
+            } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "rm",
+                        "--force",
+                        "--ignore",
+                        "agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ]
+                );
+                assert_eq!(status.code(), Some(51));
+                assert_eq!(stderr.trim(), "rm failed");
+            }
+            other => panic!("expected podman command failure, got {other:?}"),
+        }
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "--force --ignore agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        );
     }
 }
