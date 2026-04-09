@@ -8,6 +8,9 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
+# Optional environment variable name resolved by the daemon for clone-only
+# repository authentication. This value does not flow into the agent runtime.
+repo_token_source = "CODEX_REPO_TOKEN"
 
 [agents.runa]
 # Static agent-runtime command executed by runa inside the container.
