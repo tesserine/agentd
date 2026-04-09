@@ -13,6 +13,8 @@ use agentd_runner::{
     ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec, run_session,
 };
 
+const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
+
 #[test]
 fn succeeds_without_timeout_and_cleans_up_container() {
     if skip_if_podman_unavailable("succeeds_without_timeout_and_cleans_up_container") {
@@ -27,6 +29,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
 
     let outcome = run_session(
         SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             agent_name: "success-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
@@ -75,6 +78,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
 
     let outcome = run_session(
         SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             agent_name: "mixed-env-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
@@ -124,6 +128,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
 
     let outcome = run_session(
         SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             agent_name: "failure-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
@@ -169,6 +174,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
 
     let outcome = run_session(
         SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             agent_name: "failure-agent-125".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
@@ -215,6 +221,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
 
     let outcome = run_session(
         SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             agent_name: "comma-methodology-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
@@ -258,6 +265,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
 
     let outcome = run_session(
         SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             agent_name: "timeout-agent".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
@@ -304,6 +312,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
     let session = thread::spawn(move || {
         run_session(
             SessionSpec {
+                daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
                 agent_name: "running-secret-agent".to_string(),
                 base_image: image,
                 methodology_dir,
@@ -426,7 +435,7 @@ impl SessionFixture {
         );
 
         let names = String::from_utf8(output.stdout).expect("podman ps output should be utf-8");
-        let expected_prefix = format!("agentd-{}-", self.agent_name);
+        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.agent_name);
         assert!(
             !names.lines().any(|name| name.starts_with(&expected_prefix)),
             "runner left container behind with prefix {expected_prefix}: {names}"
@@ -448,7 +457,7 @@ impl SessionFixture {
 
     fn wait_for_runner_container_to_be_running(&self, timeout: Duration) -> String {
         let deadline = Instant::now() + timeout;
-        let expected_prefix = format!("agentd-{}-", self.agent_name);
+        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.agent_name);
 
         loop {
             let running_container_names = list_running_container_names();
@@ -469,8 +478,11 @@ impl SessionFixture {
 
     fn wait_for_runner_secrets_to_be_released(&self, session_id: &str, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let expected_secret_prefix = format!("agentd-secret-{session_id}-");
-        let expected_container_prefix = format!("agentd-{}-{session_id}", self.agent_name);
+        let expected_secret_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{session_id}-");
+        let expected_container_prefix = format!(
+            "agentd-{TEST_DAEMON_INSTANCE_ID}-{}-{session_id}",
+            self.agent_name
+        );
 
         loop {
             let matching_secret_names = list_runner_secret_names()
@@ -583,7 +595,7 @@ fn list_runner_secret_names() -> BTreeSet<String> {
     String::from_utf8(output.stdout)
         .expect("podman secret ls output should be utf-8")
         .lines()
-        .filter(|name| name.starts_with("agentd-secret-"))
+        .filter(|name| name.starts_with("agentd-"))
         .map(str::to_string)
         .collect()
 }

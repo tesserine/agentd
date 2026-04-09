@@ -2,7 +2,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use agentd::config::Config;
+use agentd::config::{Config, ConfigError};
 use agentd::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 use agentd_runner::{
     ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
@@ -107,6 +107,13 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
     assert_eq!(spec.agent_name, "codex");
     assert_eq!(spec.base_image, "ghcr.io/example/codex:latest");
     assert_eq!(spec.methodology_dir, Path::new("../groundwork"));
+    assert_eq!(
+        spec.daemon_instance_id,
+        config
+            .daemon()
+            .daemon_instance_id()
+            .expect("daemon instance id should resolve")
+    );
     assert_eq!(
         spec.agent_command,
         vec!["codex".to_string(), "exec".to_string()]
@@ -229,5 +236,42 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
 
     unsafe {
         std::env::remove_var("CODEX_REPO_TOKEN");
+    }
+}
+
+#[test]
+fn dispatch_run_rejects_relative_daemon_runtime_paths_as_config_errors() {
+    let config = Config::from_str(
+        r#"
+[daemon]
+socket_path = "runtime/agentd.sock"
+pid_file = "runtime/agentd.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("config should parse");
+    let request = RunRequest {
+        agent: "codex".to_string(),
+        repo_url: "https://example.com/repo.git".to_string(),
+        work_unit: None,
+    };
+    let (executor, _state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
+
+    let error =
+        dispatch_run(&config, &request, &executor).expect_err("relative daemon paths should fail");
+
+    match error {
+        DispatchError::Config(ConfigError::RelativeDaemonRuntimePath { field, path }) => {
+            assert_eq!(field, "daemon.socket_path");
+            assert_eq!(path, Path::new("runtime/agentd.sock"));
+        }
+        other => panic!("expected config error, got {other:?}"),
     }
 }

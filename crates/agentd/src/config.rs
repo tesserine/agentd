@@ -17,6 +17,7 @@ use std::str::FromStr;
 
 use agentd_runner::{RunnerError, validate_agent_name, validate_environment_name};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// Validated daemon and agent registry parsed from a TOML configuration file.
 ///
@@ -311,6 +312,28 @@ impl DaemonConfig {
         &self.pid_file
     }
 
+    /// Stable daemon-instance identifier derived from the configured runtime
+    /// path pair. Used to scope runner-managed Podman resource ownership to a
+    /// single daemon instance.
+    ///
+    /// Returns an error when either runtime path is relative. [`Config::load`]
+    /// resolves daemon runtime paths to absolute paths, but [`Config::from_str`]
+    /// preserves relative values as-is because it has no file base.
+    pub fn daemon_instance_id(&self) -> Result<String, ConfigError> {
+        validate_absolute_daemon_runtime_path("daemon.socket_path", &self.socket_path)?;
+        validate_absolute_daemon_runtime_path("daemon.pid_file", &self.pid_file)?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"socket=");
+        hasher.update(normalize_path_lexically(&self.socket_path).as_bytes());
+        hasher.update(b"\npid=");
+        hasher.update(normalize_path_lexically(&self.pid_file).as_bytes());
+        hasher.update(b"\n");
+
+        let digest = hasher.finalize();
+        Ok(hex_encode(&digest[..4]))
+    }
+
     fn parse(raw: RawDaemonConfig, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
         validate_non_empty("daemon.socket_path", &raw.socket_path, None, None)?;
         validate_non_empty("daemon.pid_file", &raw.pid_file, None, None)?;
@@ -359,6 +382,8 @@ pub enum ConfigError {
         agent: Option<String>,
         credential: Option<String>,
     },
+    /// Deriving the daemon instance id requires absolute daemon runtime paths.
+    RelativeDaemonRuntimePath { field: &'static str, path: PathBuf },
     /// The `runa.command` array is empty for an agent.
     EmptyCommand { agent: String },
 }
@@ -425,6 +450,13 @@ impl fmt::Display for ConfigError {
                 }
 
                 Ok(())
+            }
+            ConfigError::RelativeDaemonRuntimePath { field, path } => {
+                write!(
+                    f,
+                    "field '{field}' must be absolute before deriving daemon instance id: {}",
+                    path.display()
+                )
             }
             ConfigError::EmptyCommand { agent } => {
                 write!(f, "agent '{agent}' must define a non-empty runa.command")
@@ -524,6 +556,43 @@ fn default_daemon_pid_file() -> String {
     "/run/agentd/agentd.pid".to_string()
 }
 
+fn normalize_path_lexically(path: &Path) -> String {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        normalized.to_string_lossy().into_owned()
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+
+    encoded
+}
+
 fn validate_non_empty(
     field: &'static str,
     value: &str,
@@ -573,6 +642,20 @@ fn absolute_config_dir(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
 
 fn resolve_methodology_dir(base_dir: Option<&Path>, methodology_dir: &str) -> PathBuf {
     resolve_config_path(base_dir, methodology_dir)
+}
+
+fn validate_absolute_daemon_runtime_path(
+    field: &'static str,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    if path.is_absolute() {
+        return Ok(());
+    }
+
+    Err(ConfigError::RelativeDaemonRuntimePath {
+        field,
+        path: path.to_path_buf(),
+    })
 }
 
 fn resolve_config_path(base_dir: Option<&Path>, path: &str) -> PathBuf {

@@ -685,17 +685,22 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
         .nth(1)
         .expect("secret create should include a secret name");
 
-    let container_prefix = format!("agentd-{agent_name}-");
-    let container_suffix = container_name
+    let daemon_instance_id = test_session_spec().daemon_instance_id;
+    let container_prefix = format!("agentd-{daemon_instance_id}-{agent_name}-");
+    let session_id = container_name
         .strip_prefix(&container_prefix)
-        .expect("container name should include agent prefix");
+        .expect("container name should include daemon and agent prefix");
     let stage_suffix = stage_dir_name
         .strip_prefix("agentd-session-stage-")
         .expect("staging dir should include session stage prefix");
 
-    assert_eq!(stage_suffix, container_suffix);
-    assert_eq!(secret_name, format!("agentd-secret-{container_suffix}-0"));
-    assert_eq!(container_suffix.len(), 32);
+    assert_eq!(stage_suffix, session_id);
+    assert_eq!(
+        secret_name,
+        format!("agentd-{daemon_instance_id}-{session_id}-0")
+    );
+    assert_eq!(daemon_instance_id.len(), 8);
+    assert_eq!(session_id.len(), 16);
 }
 
 #[test]

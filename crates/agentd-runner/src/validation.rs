@@ -5,6 +5,7 @@
 //! ([`validate_agent_name`] and [`validate_environment_name`]) are also used
 //! by the configuration layer in the `agentd` crate.
 
+use crate::naming::is_daemon_instance_id;
 use crate::types::{
     AgentNameValidationError, EnvironmentNameValidationError, RunnerError, SessionInvocation,
     SessionSpec,
@@ -17,6 +18,9 @@ const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
 
 pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
+    if !is_daemon_instance_id(&spec.daemon_instance_id) {
+        return Err(RunnerError::InvalidDaemonInstanceId);
+    }
     if validate_agent_name(&spec.agent_name).is_err() {
         return Err(RunnerError::InvalidAgentName);
     }
@@ -217,6 +221,22 @@ mod tests {
                 }
                 other => panic!("expected ReservedEnvironmentName, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_invalid_daemon_instance_ids() {
+        for daemon_instance_id in ["", "abcd123", "abcd12345", "ABCDEF12", "zzzzzzzz"] {
+            let error = validate_spec(&SessionSpec {
+                daemon_instance_id: daemon_instance_id.to_string(),
+                ..test_session_spec()
+            })
+            .expect_err("daemon instance ids must be eight lowercase hex characters");
+
+            assert!(
+                matches!(error, RunnerError::InvalidDaemonInstanceId),
+                "expected InvalidDaemonInstanceId for {daemon_instance_id:?}, got {error:?}"
+            );
         }
     }
 

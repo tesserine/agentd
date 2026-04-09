@@ -242,6 +242,124 @@ command = ["codex", "exec"]
 }
 
 #[test]
+fn daemon_instance_id_is_stable_for_the_same_runtime_paths() {
+    let config = Config::from_str(
+        r#"
+[daemon]
+socket_path = "/run/agentd/a.sock"
+pid_file = "/run/agentd/a.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("config should parse");
+
+    let first = config
+        .daemon()
+        .daemon_instance_id()
+        .expect("daemon instance id should resolve");
+    let second = config
+        .daemon()
+        .daemon_instance_id()
+        .expect("daemon instance id should resolve");
+
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 8);
+    assert!(
+        first
+            .chars()
+            .all(|character| matches!(character, '0'..='9' | 'a'..='f')),
+        "daemon instance id should be lowercase hex: {first}"
+    );
+}
+
+#[test]
+fn daemon_instance_id_changes_when_daemon_runtime_paths_change() {
+    let first = Config::from_str(
+        r#"
+[daemon]
+socket_path = "/run/agentd/a.sock"
+pid_file = "/run/agentd/a.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("first config should parse");
+    let second = Config::from_str(
+        r#"
+[daemon]
+socket_path = "/run/agentd/b.sock"
+pid_file = "/run/agentd/a.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("second config should parse");
+
+    assert_ne!(
+        first
+            .daemon()
+            .daemon_instance_id()
+            .expect("first daemon instance id should resolve"),
+        second
+            .daemon()
+            .daemon_instance_id()
+            .expect("second daemon instance id should resolve")
+    );
+}
+
+#[test]
+fn daemon_instance_id_rejects_relative_daemon_runtime_paths_from_str_configs() {
+    let config = Config::from_str(
+        r#"
+[daemon]
+socket_path = "runtime/agentd.sock"
+pid_file = "runtime/agentd.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("config should parse");
+
+    let error = config
+        .daemon()
+        .daemon_instance_id()
+        .expect_err("relative daemon runtime paths should be rejected");
+
+    match error {
+        ConfigError::RelativeDaemonRuntimePath { field, path } => {
+            assert_eq!(field, "daemon.socket_path");
+            assert_eq!(path, Path::new("runtime/agentd.sock"));
+        }
+        other => panic!("expected relative daemon runtime path error, got {other}"),
+    }
+}
+
+#[test]
 fn parses_default_daemon_paths_when_daemon_section_is_omitted() {
     let config = Config::from_str(
         r#"
@@ -264,6 +382,39 @@ command = ["codex", "exec"]
         config.daemon().pid_file(),
         Path::new("/run/agentd/agentd.pid")
     );
+}
+
+#[test]
+fn daemon_instance_id_rejects_relative_pid_file_after_absolute_socket_path() {
+    let config = Config::from_str(
+        r#"
+[daemon]
+socket_path = "/run/agentd/agentd.sock"
+pid_file = "runtime/agentd.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect("config should parse");
+
+    let error = config
+        .daemon()
+        .daemon_instance_id()
+        .expect_err("relative pid file should be rejected");
+
+    match error {
+        ConfigError::RelativeDaemonRuntimePath { field, path } => {
+            assert_eq!(field, "daemon.pid_file");
+            assert_eq!(path, Path::new("runtime/agentd.pid"));
+        }
+        other => panic!("expected relative daemon runtime path error, got {other}"),
+    }
 }
 
 #[test]

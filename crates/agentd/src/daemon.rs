@@ -16,7 +16,7 @@ use agentd_runner::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, DaemonConfig};
+use crate::config::{Config, ConfigError, DaemonConfig};
 use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
@@ -28,6 +28,7 @@ const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
 #[derive(Debug)]
 pub enum DaemonError {
     AlreadyRunning { pid: Option<u32> },
+    Config(ConfigError),
     Io(io::Error),
     StartupReconciliation(RunnerError),
 }
@@ -39,6 +40,7 @@ impl fmt::Display for DaemonError {
                 write!(f, "agentd is already running (pid {pid})")
             }
             Self::AlreadyRunning { pid: None } => write!(f, "agentd is already running"),
+            Self::Config(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
             Self::StartupReconciliation(error) => {
                 write!(f, "startup reconciliation failed: {error}")
@@ -50,10 +52,17 @@ impl fmt::Display for DaemonError {
 impl std::error::Error for DaemonError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Config(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::StartupReconciliation(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<ConfigError> for DaemonError {
+    fn from(error: ConfigError) -> Self {
+        Self::Config(error)
     }
 }
 
@@ -161,8 +170,9 @@ pub fn run_daemon_until_shutdown(
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
     shutdown: &AtomicBool,
 ) -> Result<(), DaemonError> {
+    let daemon_instance_id = config.daemon().daemon_instance_id()?;
     run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
-        reconcile_startup_resources()
+        reconcile_startup_resources(&daemon_instance_id)
     })
 }
 
@@ -863,7 +873,12 @@ source = "AGENTD_GITHUB_TOKEN"
         let daemon_config = config.clone();
         let daemon_shutdown = shutdown.clone();
         let (started_tx, started_rx) = mpsc::channel();
+        let (daemon_id_tx, daemon_id_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let expected_daemon_instance_id = config
+            .daemon()
+            .daemon_instance_id()
+            .expect("daemon instance id should resolve");
 
         let handle = thread::spawn(move || {
             run_daemon_until_shutdown_with_reconciler(
@@ -871,6 +886,9 @@ source = "AGENTD_GITHUB_TOKEN"
                 FixedOutcomeExecutor,
                 daemon_shutdown.as_ref(),
                 move || {
+                    daemon_id_tx
+                        .send(expected_daemon_instance_id)
+                        .expect("reconciliation daemon id should be reported");
                     started_tx
                         .send(())
                         .expect("reconciliation start should be reported");
@@ -885,6 +903,15 @@ source = "AGENTD_GITHUB_TOKEN"
         started_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("startup reconciliation should start");
+        assert_eq!(
+            daemon_id_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("reconciliation daemon id should be available"),
+            config
+                .daemon()
+                .daemon_instance_id()
+                .expect("daemon instance id should resolve")
+        );
         assert!(
             !config.daemon().socket_path().exists(),
             "socket should not exist while startup reconciliation is still running"
