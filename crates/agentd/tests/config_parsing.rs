@@ -809,6 +809,26 @@ command = ["codex", "exec"]
 }
 
 #[test]
+fn loading_daemon_config_rejects_unknown_top_level_sections() {
+    let path = write_temp_config(
+        "daemon-only-unknown-top-level",
+        r#"
+[deamon]
+socket_path = "/tmp/agentd.sock"
+
+[[agents]]
+unexpected = "still allowed to exist here"
+"#,
+    );
+
+    let error =
+        DaemonConfig::load(&path).expect_err("unknown top-level sections should be rejected");
+
+    assert!(error.to_string().contains("unknown field"));
+    assert!(error.to_string().contains("deamon"));
+}
+
+#[test]
 fn loading_daemon_config_ignores_invalid_agent_registry_entries() {
     let path = write_temp_config(
         "daemon-only-ignores-agents",
@@ -818,12 +838,7 @@ socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
 [[agents]]
-name = "Codex"
-base_image = "ghcr.io/example/codex:latest"
-methodology_dir = "../groundwork"
-
-[agents.runa]
-command = ["codex", "exec"]
+unexpected = "daemon loader should ignore agent schema entirely"
 "#,
     );
 

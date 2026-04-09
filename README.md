@@ -51,9 +51,10 @@ Trigger a manual session through the running daemon:
 agentd run codex https://github.com/pentaxis93/agentd.git --work-unit issue-52
 ```
 
-`agentd run` reads the same config file for daemon runtime paths, but only the
-`[daemon]` section must be valid for the client command to reach an already
-running daemon.
+`agentd run` reads the same config file for daemon runtime paths. It ignores
+the `agents` registry, but the top-level config shape must still be valid, so
+typos like `[deamon]` fail instead of silently falling back to default daemon
+paths.
 
 `repo_token_source` is not a runtime credential. It is resolved by the daemon at dispatch time, mapped to `SessionInvocation.repo_token`, and used only for the runner-managed `git clone`.
 

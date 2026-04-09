@@ -165,7 +165,11 @@ pub fn run_daemon_until_shutdown(
         "agentd daemon started"
     );
 
-    while !shutdown.load(Ordering::Acquire) {
+    let loop_result = loop {
+        if shutdown.load(Ordering::Acquire) {
+            break Ok(());
+        }
+
         match runtime.accept() {
             Ok((stream, _)) => {
                 if shutdown.load(Ordering::Acquire) {
@@ -181,14 +185,41 @@ pub fn run_daemon_until_shutdown(
                 ));
             }
             Err(error) if accept_was_interrupted(&error) => continue,
-            Err(error) => return Err(DaemonError::Io(error)),
+            Err(error) => break Err(error),
         }
-    }
+    };
 
-    runtime.begin_shutdown()?;
-    join_connection_handlers(handlers);
+    finish_daemon_loop(|| runtime.begin_shutdown(), handlers, loop_result)
+        .map_err(DaemonError::Io)?;
     tracing::info!(event = "agentd.daemon_stopped", "agentd daemon stopped");
     Ok(())
+}
+
+fn finish_daemon_loop<F>(
+    begin_shutdown: F,
+    handlers: Vec<JoinHandle<()>>,
+    loop_result: Result<(), io::Error>,
+) -> Result<(), io::Error>
+where
+    F: FnOnce() -> Result<(), io::Error>,
+{
+    let shutdown_result = begin_shutdown();
+    join_connection_handlers(handlers);
+
+    match (loop_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(loop_error), Err(shutdown_error)) => {
+            tracing::warn!(
+                event = "agentd.daemon_shutdown_cleanup_failed_after_accept_error",
+                accept_error = %loop_error,
+                cleanup_error = %shutdown_error,
+                "daemon cleanup failed after listener accept error"
+            );
+            Err(loop_error)
+        }
+    }
 }
 
 fn accept_was_interrupted(error: &io::Error) -> bool {
@@ -557,10 +588,20 @@ fn read_pid(pid_file: &Path) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::reap_finished_handlers;
+    use super::{finish_daemon_loop, reap_finished_handlers};
+    use std::io;
     use std::sync::mpsc;
+    use std::sync::mpsc::Sender;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    fn spawn_blocked_handler() -> (thread::JoinHandle<()>, Sender<()>) {
+        let (tx, rx) = mpsc::channel();
+        let handler = thread::spawn(move || {
+            rx.recv().expect("blocked thread should be released");
+        });
+        (handler, tx)
+    }
 
     #[test]
     fn reaping_finished_handlers_keeps_only_live_threads() {
@@ -599,5 +640,82 @@ mod tests {
             handlers.is_empty(),
             "finished panicked handlers should be reaped"
         );
+    }
+
+    #[test]
+    fn finishing_after_accept_error_waits_for_in_flight_handlers() {
+        let (handler, tx) = spawn_blocked_handler();
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            tx.send(()).expect("blocked thread should be released");
+        });
+
+        let start = Instant::now();
+        let error = finish_daemon_loop(
+            || Ok(()),
+            vec![handler],
+            Err(io::Error::other("accept failed")),
+        )
+        .expect_err("accept error should be returned");
+
+        releaser
+            .join()
+            .expect("release helper thread should join cleanly");
+        assert!(
+            start.elapsed() >= Duration::from_millis(100),
+            "cleanup should wait for the blocked handler before returning"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "accept failed");
+    }
+
+    #[test]
+    fn finishing_after_shutdown_error_still_joins_handlers() {
+        let (handler, tx) = spawn_blocked_handler();
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            tx.send(()).expect("blocked thread should be released");
+        });
+
+        let start = Instant::now();
+        let error = finish_daemon_loop(
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "cleanup failed",
+                ))
+            },
+            vec![handler],
+            Ok(()),
+        )
+        .expect_err("cleanup failure should be returned");
+
+        releaser
+            .join()
+            .expect("release helper thread should join cleanly");
+        assert!(
+            start.elapsed() >= Duration::from_millis(100),
+            "cleanup failure should not skip joining blocked handlers"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "cleanup failed");
+    }
+
+    #[test]
+    fn finishing_after_accept_error_prefers_the_accept_error_over_cleanup_error() {
+        let error = finish_daemon_loop(
+            || {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "cleanup failed",
+                ))
+            },
+            Vec::new(),
+            Err(io::Error::other("accept failed")),
+        )
+        .expect_err("accept error should win over cleanup error");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "accept failed");
     }
 }

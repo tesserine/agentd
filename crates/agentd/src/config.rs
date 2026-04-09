@@ -293,7 +293,8 @@ impl DaemonConfig {
     /// configuration file at `path`.
     ///
     /// Relative daemon runtime paths are resolved against the directory
-    /// containing `path`. Non-daemon sections are ignored entirely.
+    /// containing `path`. The agent registry is ignored entirely, but other
+    /// top-level sections must match the daemon config schema.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
         let base_dir = absolute_config_dir(path)?;
@@ -464,9 +465,12 @@ struct RawConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawDaemonOnlyConfig {
     #[serde(default)]
     daemon: RawDaemonConfig,
+    #[serde(default, rename = "agents")]
+    _agents: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
