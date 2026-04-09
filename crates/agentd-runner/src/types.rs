@@ -17,6 +17,10 @@ use std::time::Duration;
 /// [`run_session`](crate::run_session) before any resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSpec {
+    /// Stable daemon-instance identifier used in runner-managed Podman
+    /// resource names so startup reconciliation can scope ownership to one
+    /// daemon instance.
+    pub daemon_instance_id: String,
     /// Agent identity string. Doubles as the in-container unix username, a
     /// component of the container name, and the value of the `AGENT_NAME`
     /// environment variable. Must pass
@@ -90,9 +94,11 @@ pub enum SessionOutcome {
 /// any new sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StartupReconciliationReport {
-    /// Stale runner-managed session containers that were removed during startup.
+    /// Stale runner-managed session containers matching
+    /// `agentd-{daemon8}-{agent}-{session8}` that were removed during startup.
     pub removed_container_names: Vec<String>,
-    /// Orphaned `agentd-secret-*` secrets that were removed during startup.
+    /// Orphaned runner-managed secrets matching `agentd-{daemon8}-{session8}-{suffix}`
+    /// that were removed during startup.
     pub removed_secret_names: Vec<String>,
 }
 
@@ -130,6 +136,9 @@ pub enum AgentNameValidationError {
 /// occur after resource allocation has begun.
 #[derive(Debug)]
 pub enum RunnerError {
+    /// The daemon-instance identifier must be exactly eight lowercase hex
+    /// characters.
+    InvalidDaemonInstanceId,
     /// The methodology directory does not contain `manifest.toml`. Produced
     /// during resource allocation, after spec and invocation validation pass.
     MissingMethodologyManifest { path: PathBuf },
@@ -168,6 +177,12 @@ pub enum RunnerError {
 impl fmt::Display for RunnerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RunnerError::InvalidDaemonInstanceId => {
+                write!(
+                    f,
+                    "daemon_instance_id must be exactly 8 lowercase hex characters"
+                )
+            }
             RunnerError::MissingMethodologyManifest { path } => {
                 write!(
                     f,

@@ -6,6 +6,7 @@
 //! leaked secrets or stale directories when resource creation fails midway.
 
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
+use crate::naming::format_secret_name;
 use crate::podman::run_podman_command_with_input;
 use crate::types::{RunnerError, SessionInvocation, SessionSpec};
 use crate::validation::REPO_TOKEN_ENV;
@@ -14,7 +15,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
-const SESSION_SECRET_PREFIX: &str = "agentd-secret-";
 const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +75,8 @@ pub(crate) fn prepare_session_resources(
             continue;
         }
 
-        let secret_name = format!("{SESSION_SECRET_PREFIX}{session_id}-{index}");
+        let secret_name =
+            format_secret_name(&spec.daemon_instance_id, session_id, &index.to_string());
         if let Err(error) = create_podman_secret(&secret_name, &variable.value) {
             return Err(rollback_failed_resource_allocation(
                 &resources, session_id, error,
@@ -92,7 +93,7 @@ pub(crate) fn prepare_session_resources(
         .as_deref()
         .filter(|token| !token.is_empty())
     {
-        let secret_name = format!("{SESSION_SECRET_PREFIX}{session_id}-repo-token");
+        let secret_name = format_secret_name(&spec.daemon_instance_id, session_id, "repo-token");
         if let Err(error) = create_podman_secret(&secret_name, repo_token) {
             return Err(rollback_failed_resource_allocation(
                 &resources, session_id, error,
@@ -231,14 +232,14 @@ fn create_directory_symlink(source: &Path, destination: &Path) -> Result<(), Run
     std::os::windows::fs::symlink_dir(source, destination).map_err(RunnerError::Io)
 }
 
-// Generates a 32-character hex string from 16 bytes of cryptographic randomness.
+// Generates an 8-character hex string from 4 bytes of cryptographic randomness.
 // Used to create unique container names and secret names that are unpredictable
 // across sessions, preventing name collisions and name-guessing attacks.
 fn unique_suffix_with<F>(fill_random: F) -> Result<String, RunnerError>
 where
     F: FnOnce(&mut [u8]) -> std::io::Result<()>,
 {
-    let mut bytes = [0_u8; 16];
+    let mut bytes = [0_u8; 4];
     fill_random(&mut bytes)?;
     Ok(hex_encode(&bytes))
 }
@@ -362,7 +363,10 @@ mod tests {
                     vec![
                         "secret".to_string(),
                         "create".to_string(),
-                        format!("agentd-secret-{session_id}-1"),
+                        format!(
+                            "agentd-{}-{session_id}-1",
+                            test_session_spec().daemon_instance_id
+                        ),
                         "-".to_string(),
                     ]
                 );
@@ -431,7 +435,10 @@ mod tests {
                     vec![
                         "secret".to_string(),
                         "create".to_string(),
-                        format!("agentd-secret-{session_id}-repo-token"),
+                        format!(
+                            "agentd-{}-{session_id}-repo-token",
+                            test_session_spec().daemon_instance_id
+                        ),
                         "-".to_string(),
                     ]
                 );

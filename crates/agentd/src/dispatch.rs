@@ -123,6 +123,7 @@ pub fn dispatch_run(
     executor
         .run_session(
             SessionSpec {
+                daemon_instance_id: config.daemon().daemon_instance_id(),
                 agent_name: agent.name().to_string(),
                 base_image: agent.base_image().to_string(),
                 methodology_dir: agent.methodology_dir().to_path_buf(),

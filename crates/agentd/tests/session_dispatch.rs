@@ -108,6 +108,10 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
     assert_eq!(spec.base_image, "ghcr.io/example/codex:latest");
     assert_eq!(spec.methodology_dir, Path::new("../groundwork"));
     assert_eq!(
+        spec.daemon_instance_id,
+        config.daemon().daemon_instance_id()
+    );
+    assert_eq!(
         spec.agent_command,
         vec!["codex".to_string(), "exec".to_string()]
     );

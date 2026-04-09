@@ -161,8 +161,9 @@ pub fn run_daemon_until_shutdown(
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
     shutdown: &AtomicBool,
 ) -> Result<(), DaemonError> {
+    let daemon_instance_id = config.daemon().daemon_instance_id();
     run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
-        reconcile_startup_resources()
+        reconcile_startup_resources(&daemon_instance_id)
     })
 }
 
@@ -863,7 +864,9 @@ source = "AGENTD_GITHUB_TOKEN"
         let daemon_config = config.clone();
         let daemon_shutdown = shutdown.clone();
         let (started_tx, started_rx) = mpsc::channel();
+        let (daemon_id_tx, daemon_id_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let expected_daemon_instance_id = config.daemon().daemon_instance_id();
 
         let handle = thread::spawn(move || {
             run_daemon_until_shutdown_with_reconciler(
@@ -871,6 +874,9 @@ source = "AGENTD_GITHUB_TOKEN"
                 FixedOutcomeExecutor,
                 daemon_shutdown.as_ref(),
                 move || {
+                    daemon_id_tx
+                        .send(expected_daemon_instance_id)
+                        .expect("reconciliation daemon id should be reported");
                     started_tx
                         .send(())
                         .expect("reconciliation start should be reported");
@@ -885,6 +891,12 @@ source = "AGENTD_GITHUB_TOKEN"
         started_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("startup reconciliation should start");
+        assert_eq!(
+            daemon_id_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("reconciliation daemon id should be available"),
+            config.daemon().daemon_instance_id()
+        );
         assert!(
             !config.daemon().socket_path().exists(),
             "socket should not exist while startup reconciliation is still running"
