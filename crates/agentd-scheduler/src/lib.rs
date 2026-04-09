@@ -1,8 +1,10 @@
 //! Job scheduling primitives for agentd.
 //!
 //! This crate will own scheduling policy and timing — determining when agents
-//! run and with what mission context, then handing identity and invocation
-//! parameters to `agentd-runner` for execution. Currently a placeholder
-//! pending scheduler implementation.
+//! run and with what mission context, then dispatching run requests through
+//! the daemon's Unix socket using the same intake path as manual invocation.
+//! The scheduler does not call `agentd-runner` directly. Currently a
+//! placeholder pending scheduler implementation.
 //!
-//! See `ARCHITECTURE.md` section "Scheduler" for the design-level treatment.
+//! See `ARCHITECTURE.md` section "Session Lifecycle" for the design-level
+//! treatment.

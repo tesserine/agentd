@@ -63,7 +63,7 @@ The workspace contains three crates because there are three distinct rates of ch
 
 | Crate | Responsibility | Needs Served | Boundary Rationale |
 |---|---|---|---|
-| `agentd` | Composition root and daemon entrypoint. Parses configuration, assembles runner and scheduler components, and starts the process. | All, as orchestration | Keeps the binary thin and prevents subsystem concerns from collapsing into the entrypoint. |
+| `agentd` | Composition root and daemon entrypoint. Parses configuration, owns the Unix socket intake, assembles runner and scheduler components, and starts the process. | All, as orchestration | Keeps the binary thin and prevents subsystem concerns from collapsing into the entrypoint while preserving one uniform dispatch path into session execution. |
 | `agentd-runner` | Session lifecycle. Creates execution environments, injects identity, credentials, context, and tool configuration, launches runtimes, and tears sessions down. | Identity, Credentials, Mission, Tool Availability, Context, Network policy application | Session mechanics change independently from scheduling policy and should remain isolated. |
 | `agentd-scheduler` | Triggering and timing. Determines when an agent session should start and with what mission context. | Mission | Scheduling policy has its own evolution path and should not be coupled to session setup mechanics. |
 
@@ -72,6 +72,12 @@ The workspace contains three crates because there are three distinct rates of ch
 ## 4. Session Lifecycle
 
 A session is one execution of one agent from trigger to teardown.
+
+The daemon's Unix socket is the single intake for all session triggers. Manual
+CLI invocation connects to that socket as a client. Scheduling policy also
+connects to that socket as a client when it decides work should start. The
+daemon accepts those run requests uniformly and dispatches them into session
+execution.
 
 Operational visibility for that lifecycle uses structured tracing events written
 to stderr. The production default is timestamped JSON lines at `info` so
@@ -83,7 +89,11 @@ environment configuration.
 
 ### Phase 1: Scheduling (`agentd-scheduler`)
 
-The scheduler determines when an agent should run. Triggers may come from time-based schedules, external events, or manual invocation. The scheduler passes agent identity plus mission context to the runner.
+The scheduler determines when an agent should run. Triggers may come from
+time-based schedules, external events, or continuous policies. When scheduling
+decides to start a session, the scheduler is a socket client: it dispatches a
+run request through the daemon's Unix socket, using the same intake path as
+manual CLI invocation. The scheduler does not call the runner directly.
 
 ### Phase 2: Session Setup (`agentd-runner`)
 
