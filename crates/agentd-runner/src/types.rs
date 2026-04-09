@@ -86,6 +86,16 @@ pub enum SessionOutcome {
     TimedOut,
 }
 
+/// Summary of what startup reconciliation removed before the daemon accepted
+/// any new sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StartupReconciliationReport {
+    /// Stale runner-managed session containers that were removed during startup.
+    pub removed_container_names: Vec<String>,
+    /// Orphaned `agentd-secret-*` secrets that were removed during startup.
+    pub removed_secret_names: Vec<String>,
+}
+
 /// Error returned by
 /// [`validate_environment_name`](crate::validate_environment_name) when a
 /// name violates naming rules.
@@ -143,7 +153,8 @@ pub enum RunnerError {
     /// An environment variable name collides with a runner-managed name.
     /// Produced during spec validation.
     ReservedEnvironmentName { name: String },
-    /// Filesystem or process I/O failure.
+    /// Filesystem failure, process I/O failure, or invalid external command
+    /// output received after a successful process exit.
     Io(std::io::Error),
     /// A podman CLI invocation returned a non-zero exit status. Captures the
     /// argument list, exit status, and stderr for diagnostics.

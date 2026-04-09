@@ -92,7 +92,8 @@ fn architecture_describes_uniform_socket_intake_for_session_triggers() {
         "architecture should describe the scheduler as a socket client"
     );
     assert!(
-        !architecture.contains("The scheduler passes agent identity plus mission context to the runner."),
+        !architecture
+            .contains("The scheduler passes agent identity plus mission context to the runner."),
         "architecture should not describe the scheduler as handing work directly to the runner"
     );
 }

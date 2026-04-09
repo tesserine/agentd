@@ -14,6 +14,7 @@
 mod container;
 mod lifecycle;
 mod podman;
+mod reconcile;
 mod resources;
 mod types;
 mod validation;
@@ -21,9 +22,10 @@ mod validation;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use reconcile::reconcile_startup_resources;
 pub use types::{
     AgentNameValidationError, EnvironmentNameValidationError, ResolvedEnvironmentVariable,
-    RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
+    RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
 };
 pub use validation::{validate_agent_name, validate_environment_name};
 
@@ -176,7 +178,8 @@ mod tests {
     use super::*;
     use crate::test_support::{
         CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
-        capture_tracing_events, fake_podman_lock, test_session_spec, unique_temp_dir,
+        capture_tracing_events, fake_podman_lock, fake_podman_ps_json, test_session_spec,
+        unique_temp_dir,
     };
     use std::fs;
 
@@ -313,5 +316,449 @@ mod tests {
         assert_eq!(events[2]["fields"]["stage"], "session_resource_allocation");
         assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
         assert_eq!(events[3]["fields"]["result"], "skipped");
+    }
+
+    #[test]
+    fn startup_reconciliation_removes_only_terminal_agentd_containers_and_orphaned_secrets() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[
+                        (
+                            &["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                            "exited",
+                            "Exited (0) 10s ago",
+                        ),
+                        (
+                            &["agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+                            "dead",
+                            "Dead",
+                        ),
+                        (
+                            &["agentd-build-cccccccccccccccccccccccccccccccc"],
+                            "stopped",
+                            "Exited (137) 5m ago",
+                        ),
+                        (
+                            &["agentd-prepare-dddddddddddddddddddddddddddddddd"],
+                            "created",
+                            "Created",
+                        ),
+                        (
+                            &["agentd-init-12121212121212121212121212121212"],
+                            "initialized",
+                            "Initialized",
+                        ),
+                        (
+                            &["agentd-pause-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+                            "paused",
+                            "Up 2 minutes",
+                        ),
+                        (
+                            &["agentd-stop-ffffffffffffffffffffffffffffffff"],
+                            "stopping",
+                            "Stopping",
+                        ),
+                        (
+                            &["agentd-live-99999999999999999999999999999999"],
+                            "running",
+                            "Up 4 hours",
+                        ),
+                        (&["postgres-db"], "exited", "Exited (0) 1h ago"),
+                    ]),
+                )))
+                .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    "agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0\n\
+                         agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0\n\
+                         agentd-secret-cccccccccccccccccccccccccccccccc-repo-token\n\
+                         agentd-secret-dddddddddddddddddddddddddddddddd-0\n\
+                         agentd-secret-12121212121212121212121212121212-0\n\
+                         agentd-secret-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-0\n\
+                         agentd-secret-ffffffffffffffffffffffffffffffff-0\n\
+                         agentd-secret-99999999999999999999999999999999-0\n\
+                         agentd-secret-34343434343434343434343434343434-repo-token\n\
+                         foreign-secret",
+                )))
+                .with_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
+                ))
+                .with_secret_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("secret-commands.log", "rm"),
+                )),
+        );
+
+        let report = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect("startup reconciliation should succeed");
+
+        assert_eq!(
+            report.removed_container_names,
+            vec![
+                "agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                "agentd-build-cccccccccccccccccccccccccccccccc".to_string(),
+                "agentd-prepare-dddddddddddddddddddddddddddddddd".to_string(),
+                "agentd-init-12121212121212121212121212121212".to_string(),
+            ]
+        );
+        assert_eq!(
+            report.removed_secret_names,
+            vec![
+                "agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0".to_string(),
+                "agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0".to_string(),
+                "agentd-secret-cccccccccccccccccccccccccccccccc-repo-token".to_string(),
+                "agentd-secret-dddddddddddddddddddddddddddddddd-0".to_string(),
+                "agentd-secret-12121212121212121212121212121212-0".to_string(),
+                "agentd-secret-34343434343434343434343434343434-repo-token".to_string(),
+            ]
+        );
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "rm --force --ignore agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa agentd-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb agentd-build-cccccccccccccccccccccccccccccccc agentd-prepare-dddddddddddddddddddddddddddddddd agentd-init-12121212121212121212121212121212\n"
+        );
+        assert_eq!(
+            fixture.secret_commands(),
+            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0 agentd-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0 agentd-secret-cccccccccccccccccccccccccccccccc-repo-token agentd-secret-dddddddddddddddddddddddddddddddd-0 agentd-secret-12121212121212121212121212121212-0 agentd-secret-34343434343434343434343434343434-repo-token\n"
+        );
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_running_agentd_containers_and_their_secrets() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[(
+                        &["agentd-codex-dddddddddddddddddddddddddddddddd"],
+                        "running",
+                        "Up 2 minutes",
+                    )]),
+                )))
+                .with_secret_ls(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .stdout("agentd-secret-dddddddddddddddddddddddddddddddd-0"),
+                )),
+        );
+
+        let report = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect("startup reconciliation should succeed");
+
+        assert!(report.removed_container_names.is_empty());
+        assert!(report.removed_secret_names.is_empty());
+        assert_eq!(fixture.read_log("rm-commands.log"), "");
+        assert_eq!(fixture.secret_commands(), "");
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_unknown_state_agentd_containers_and_their_secrets() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[(
+                        &["agentd-codex-dddddddddddddddddddddddddddddddd"],
+                        "mystery-state",
+                        "Something odd just happened",
+                    )]),
+                )))
+                .with_secret_ls(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .stdout("agentd-secret-dddddddddddddddddddddddddddddddd-0"),
+                )),
+        );
+
+        let report = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect("startup reconciliation should succeed");
+
+        assert!(report.removed_container_names.is_empty());
+        assert!(report.removed_secret_names.is_empty());
+        assert_eq!(fixture.read_log("rm-commands.log"), "");
+        assert_eq!(fixture.secret_commands(), "");
+    }
+
+    #[test]
+    fn startup_reconciliation_ignores_terminal_agentd_prefixed_non_session_containers() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[
+                        (&["agentd-proxy"], "exited", "Exited (0) 10s ago"),
+                        (
+                            &["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                            "exited",
+                            "Exited (0) 10s ago",
+                        ),
+                    ]),
+                )))
+                .with_secret_ls(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .stdout("agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0"),
+                ))
+                .with_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
+                ))
+                .with_secret_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("secret-commands.log", "rm"),
+                )),
+        );
+
+        let report = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect("startup reconciliation should succeed");
+
+        assert_eq!(
+            report.removed_container_names,
+            vec!["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),]
+        );
+        assert_eq!(
+            report.removed_secret_names,
+            vec!["agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0".to_string()]
+        );
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "rm --force --ignore agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        );
+        assert_eq!(
+            fixture.secret_commands(),
+            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0\n"
+        );
+    }
+
+    #[test]
+    fn startup_reconciliation_ignores_terminal_agentd_containers_with_uppercase_session_ids() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[
+                        (
+                            &["agentd-codex-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
+                            "exited",
+                            "Exited (0) 10s ago",
+                        ),
+                        (
+                            &["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                            "exited",
+                            "Exited (0) 10s ago",
+                        ),
+                    ]),
+                )))
+                .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    "agentd-secret-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-0\n\
+                     agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0",
+                )))
+                .with_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
+                ))
+                .with_secret_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("secret-commands.log", "rm"),
+                )),
+        );
+
+        let report = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect("startup reconciliation should succeed");
+
+        assert_eq!(
+            report.removed_container_names,
+            vec!["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]
+        );
+        assert_eq!(
+            report.removed_secret_names,
+            vec!["agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0".to_string()]
+        );
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "rm --force --ignore agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        );
+        assert_eq!(
+            fixture.secret_commands(),
+            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0\n"
+        );
+    }
+
+    #[test]
+    fn startup_reconciliation_ignores_secrets_with_non_runner_suffixes() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[(
+                        &["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                        "exited",
+                        "Exited (0) 10s ago",
+                    )]),
+                )))
+                .with_secret_ls(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    "agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0\n\
+                     agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-backup",
+                )))
+                .with_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("rm-commands.log", "rm"),
+                ))
+                .with_secret_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new().append_args_with_prefix("secret-commands.log", "rm"),
+                )),
+        );
+
+        let report = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect("startup reconciliation should succeed");
+
+        assert_eq!(
+            report.removed_container_names,
+            vec!["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]
+        );
+        assert_eq!(
+            report.removed_secret_names,
+            vec!["agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0".to_string()]
+        );
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "rm --force --ignore agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        );
+        assert_eq!(
+            fixture.secret_commands(),
+            "rm --ignore agentd-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0\n"
+        );
+    }
+
+    #[test]
+    fn startup_reconciliation_returns_an_error_when_container_listing_json_is_malformed() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new().with_ps(CommandBehavior::from_outcome(
+                CommandOutcome::new().stdout("{not-json"),
+            )),
+        );
+
+        let error = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect_err(
+                "startup reconciliation should fail when container listing JSON is invalid",
+            );
+
+        match error {
+            RunnerError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert!(
+                    error.to_string().contains("podman ps --format json"),
+                    "expected invalid json error to mention podman ps output, got {error}"
+                );
+            }
+            other => panic!("expected invalid-data io error, got {other:?}"),
+        }
+        assert_eq!(fixture.read_log("rm-commands.log"), "");
+        assert_eq!(fixture.secret_commands(), "");
+    }
+
+    #[test]
+    fn startup_reconciliation_returns_an_error_when_container_listing_fails() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new().with_ps(CommandBehavior::from_outcome(
+                CommandOutcome::new()
+                    .stderr("container list failed")
+                    .exit_code(29),
+            )),
+        );
+
+        let error = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect_err("startup reconciliation should fail when container listing fails");
+
+        match error {
+            RunnerError::PodmanCommandFailed {
+                args,
+                status,
+                stderr,
+            } => {
+                assert_eq!(args, vec!["ps", "-a", "--format", "json"]);
+                assert_eq!(status.code(), Some(29));
+                assert_eq!(stderr.trim(), "container list failed");
+            }
+            other => panic!("expected podman command failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn startup_reconciliation_returns_an_error_when_container_removal_fails() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
+                    &fake_podman_ps_json(&[(
+                        &["agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                        "exited",
+                        "Exited (0) 10s ago",
+                    )]),
+                )))
+                .with_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .write_args_to("rm-commands.log")
+                        .stderr("rm failed")
+                        .exit_code(51),
+                )),
+        );
+
+        let error = fixture
+            .run_with_fake_podman_env(reconcile_startup_resources)
+            .expect_err("startup reconciliation should fail when container removal fails");
+
+        match error {
+            RunnerError::PodmanCommandFailed {
+                args,
+                status,
+                stderr,
+            } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "rm",
+                        "--force",
+                        "--ignore",
+                        "agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ]
+                );
+                assert_eq!(status.code(), Some(51));
+                assert_eq!(stderr.trim(), "rm failed");
+            }
+            other => panic!("expected podman command failure, got {other:?}"),
+        }
+        assert_eq!(
+            fixture.read_log("rm-commands.log"),
+            "--force --ignore agentd-codex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        );
     }
 }
