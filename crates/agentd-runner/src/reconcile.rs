@@ -153,10 +153,17 @@ fn parse_container_session_id(name: &str) -> Option<&str> {
 
 fn parse_secret_session_id(name: &str) -> Option<&str> {
     let suffix = name.strip_prefix(SECRET_PREFIX)?;
-    let (session_id, _) = suffix.split_once('-')?;
-    is_session_id(session_id).then_some(session_id)
+    let (session_id, secret_suffix) = suffix.split_once('-')?;
+    (is_session_id(session_id) && is_owned_secret_suffix(secret_suffix)).then_some(session_id)
 }
 
 fn is_session_id(value: &str) -> bool {
-    value.len() == SESSION_ID_LEN && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == SESSION_ID_LEN
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_owned_secret_suffix(value: &str) -> bool {
+    value == "repo-token" || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
 }
