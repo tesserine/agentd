@@ -462,6 +462,14 @@ struct DaemonRuntime {
     _pid_lock: File,
     pid_file: PathBuf,
     socket_path: PathBuf,
+    socket_cleanup_state: SocketCleanupState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SocketCleanupState {
+    Unbound,
+    Bound,
+    Cleaned,
 }
 
 impl DaemonRuntime {
@@ -504,11 +512,13 @@ impl DaemonRuntime {
             _pid_lock: pid_lock,
             pid_file: pid_file.to_path_buf(),
             socket_path: socket_path.to_path_buf(),
+            socket_cleanup_state: SocketCleanupState::Unbound,
         })
     }
 
     fn bind_listener(&mut self) -> Result<(), io::Error> {
         let listener = UnixListener::bind(&self.socket_path)?;
+        self.socket_cleanup_state = SocketCleanupState::Bound;
         restrict_file_permissions(&self.socket_path, SOCKET_MODE)?;
         set_listener_receive_timeout(&listener, ACCEPT_TIMEOUT)?;
         self.listener = Some(listener);
@@ -524,13 +534,21 @@ impl DaemonRuntime {
 
     fn begin_shutdown(&mut self) -> Result<(), io::Error> {
         self.listener.take();
-        remove_socket_file_if_present(&self.socket_path)
+        if self.socket_cleanup_state != SocketCleanupState::Bound {
+            return Ok(());
+        }
+
+        remove_socket_file_if_present(&self.socket_path)?;
+        self.socket_cleanup_state = SocketCleanupState::Cleaned;
+        Ok(())
     }
 }
 
 impl Drop for DaemonRuntime {
     fn drop(&mut self) {
-        let _ = remove_socket_file_if_present(&self.socket_path);
+        if self.socket_cleanup_state == SocketCleanupState::Bound {
+            let _ = remove_socket_file_if_present(&self.socket_path);
+        }
         let _ = fs::remove_file(&self.pid_file);
     }
 }
@@ -637,6 +655,7 @@ mod tests {
     use agentd_runner::{
         RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
     };
+    use std::fs;
     use std::io;
     use std::path::PathBuf;
     use std::str::FromStr;
@@ -646,6 +665,7 @@ mod tests {
     use std::sync::mpsc::Sender;
     use std::thread;
     use std::time::{Duration, Instant};
+    use std::{os::unix::fs::FileTypeExt, os::unix::net::UnixListener};
 
     #[derive(Clone)]
     struct FixedOutcomeExecutor;
@@ -905,6 +925,33 @@ source = "AGENTD_GITHUB_TOKEN"
         assert!(
             !config.daemon().socket_path().exists(),
             "socket should not be created when startup reconciliation fails"
+        );
+    }
+
+    #[test]
+    fn dropping_claimed_but_unbound_runtime_does_not_remove_socket_it_does_not_own() {
+        let runtime_dir = unique_runtime_dir("drop-unbound-runtime");
+        let config = config_in_runtime_dir(&runtime_dir);
+        let socket_path = config.daemon().socket_path();
+        let pid_file = config.daemon().pid_file();
+
+        let runtime = super::DaemonRuntime::claim(socket_path, pid_file)
+            .expect("daemon runtime should claim pid file and prepare socket path");
+        let _foreign_listener = UnixListener::bind(socket_path)
+            .expect("test should bind a foreign listener after claim");
+
+        drop(runtime);
+
+        assert!(
+            !pid_file.exists(),
+            "dropping the runtime should still clean up the pid file"
+        );
+
+        let socket_metadata =
+            fs::symlink_metadata(socket_path).expect("foreign listener socket should remain");
+        assert!(
+            socket_metadata.file_type().is_socket(),
+            "foreign listener socket should still be present after dropping the unbound runtime"
         );
     }
 }
