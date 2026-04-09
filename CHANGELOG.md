@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Clarified the credential source contract so examples, config doc comments, and architecture docs now describe `source` as a daemon-process environment variable name resolved with `std::env::var`, not an opaque secret-store reference.
+- Renamed the `agentd` crate's shared dispatch-layer request and helper APIs from manual/operator-specific names to source-agnostic run names, including the socket-interface integration test surface, so scheduler and operator callers share one clearly neutral dispatch path.
 - Removed the placeholder `mcp-transport` and `forgejo-mcp` crates so the workspace now contains only `agentd`, `agentd-runner`, and `agentd-scheduler`, and added coverage that enforces that three-crate contract.
 - Removed the vendored methodology skill distribution layer from the repository, including loadout configuration, manifests, sync and verify scripts, vendored skill copies, and related smoke tests.
 - Replaced the old skill-focused GitHub Actions workflow with a Rust workspace CI workflow that runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace`, and `cargo test --workspace`.

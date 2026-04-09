@@ -9,9 +9,9 @@ pub mod daemon;
 pub mod dispatch;
 pub mod logging;
 
-pub use daemon::{ClientError, DaemonError, request_manual_run, run_daemon_until_shutdown};
+pub use daemon::{ClientError, DaemonError, request_run, run_daemon_until_shutdown};
 pub use dispatch::{
-    DispatchError, ManualRunRequest, RunnerSessionExecutor, SessionExecutor, dispatch_manual_run,
+    DispatchError, RunRequest, RunnerSessionExecutor, SessionExecutor, dispatch_run,
 };
 pub use logging::{
     LogFormat, LoggingError, ResolvedLoggingConfig, configure_tracing, resolve_logging_config,
