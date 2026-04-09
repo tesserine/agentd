@@ -84,11 +84,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_daemon(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let shutdown = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(SIGINT, shutdown.clone())?;
-    signal_hook::flag::register(SIGTERM, shutdown.clone())?;
+    register_termination_handlers(shutdown.clone())?;
 
     let executor = RunnerSessionExecutor;
     run_daemon_until_shutdown(config, executor, shutdown.as_ref())?;
+    Ok(())
+}
+
+fn register_termination_handlers(shutdown: Arc<AtomicBool>) -> Result<(), std::io::Error> {
+    for signal in [SIGINT, SIGTERM] {
+        signal_hook::flag::register_conditional_shutdown(signal, 1, shutdown.clone())?;
+        signal_hook::flag::register(signal, shutdown.clone())?;
+    }
+
     Ok(())
 }
 
@@ -116,5 +124,62 @@ fn run_client(
             Err(Box::new(RunCommandError::Failed { exit_code }))
         }
         agentd_runner::SessionOutcome::TimedOut => Err(Box::new(RunCommandError::TimedOut)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::register_termination_handlers;
+    use std::io::Error;
+    use std::ptr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn second_sigterm_exits_immediately_after_first_starts_shutdown() {
+        unsafe {
+            libc::alarm(10);
+            match libc::fork() {
+                -1 => panic!("fork failed: {}", Error::last_os_error()),
+                0 => {
+                    let shutdown = Arc::new(AtomicBool::new(false));
+                    register_termination_handlers(Arc::clone(&shutdown))
+                        .expect("termination handlers should register");
+
+                    while !shutdown.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+
+                    loop {
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                }
+                pid => {
+                    thread::sleep(Duration::from_millis(250));
+                    assert_eq!(
+                        0,
+                        libc::kill(pid, libc::SIGTERM),
+                        "first SIGTERM should send"
+                    );
+                    thread::sleep(Duration::from_millis(100));
+
+                    let terminated = libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG);
+                    assert_eq!(
+                        0, terminated,
+                        "process should still be draining after the first SIGTERM"
+                    );
+
+                    assert_eq!(
+                        0,
+                        libc::kill(pid, libc::SIGTERM),
+                        "second SIGTERM should send"
+                    );
+                    let terminated = libc::waitpid(pid, ptr::null_mut(), 0);
+                    assert_eq!(pid, terminated, "process should exit on the second SIGTERM");
+                }
+            }
+        }
     }
 }

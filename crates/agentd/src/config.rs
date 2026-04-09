@@ -4,7 +4,9 @@
 //! [`SessionSpec`] model. Validation here is stricter than the runner's own
 //! validation — it enforces uniqueness (no duplicate agent or credential
 //! names), non-empty fields, and whitespace hygiene in addition to the
-//! runner's format and reservation rules.
+//! runner's format and reservation rules. Relative daemon runtime paths and
+//! `methodology_dir` are resolved against the configuration file location when
+//! loaded from disk.
 //!
 //! [`SessionSpec`]: agentd_runner::SessionSpec
 
@@ -20,8 +22,9 @@ use serde::Deserialize;
 ///
 /// Guarantees that daemon runtime paths are present, all agent names are
 /// unique and valid, all required fields are non-empty, and all credential
-/// names are valid environment variable names. Relative `methodology_dir`
-/// paths are resolved against the configuration file's parent directory.
+/// names are valid environment variable names. Relative daemon runtime paths
+/// and `methodology_dir` paths are resolved against the configuration file's
+/// parent directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     daemon: DaemonConfig,
@@ -31,9 +34,10 @@ pub struct Config {
 impl Config {
     /// Reads and parses a TOML configuration file at `path`.
     ///
-    /// Relative `methodology_dir` values in the file are resolved against
-    /// the directory containing `path`. Returns [`ConfigError`] on I/O
-    /// failure, parse failure, or any validation violation.
+    /// Relative daemon runtime paths and `methodology_dir` values in the file
+    /// are resolved against the directory containing `path`. Returns
+    /// [`ConfigError`] on I/O failure, parse failure, or any validation
+    /// violation.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
         let base_dir = absolute_config_dir(path)?;
@@ -172,8 +176,8 @@ impl Config {
 
         Ok(Self {
             daemon: DaemonConfig {
-                socket_path: PathBuf::from(raw.daemon.socket_path),
-                pid_file: PathBuf::from(raw.daemon.pid_file),
+                socket_path: resolve_config_path(base_dir, &raw.daemon.socket_path),
+                pid_file: resolve_config_path(base_dir, &raw.daemon.pid_file),
             },
             agents,
         })
@@ -539,8 +543,17 @@ fn absolute_config_dir(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
 }
 
 fn resolve_methodology_dir(base_dir: Option<&Path>, methodology_dir: &str) -> PathBuf {
+    resolve_config_path(base_dir, methodology_dir)
+}
+
+fn resolve_config_path(base_dir: Option<&Path>, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
     match base_dir {
-        Some(base_dir) => base_dir.join(methodology_dir),
-        None => PathBuf::from(methodology_dir),
+        Some(base_dir) => base_dir.join(path),
+        None => path.to_path_buf(),
     }
 }

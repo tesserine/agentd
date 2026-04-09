@@ -161,6 +161,87 @@ command = ["codex", "exec"]
 }
 
 #[test]
+fn loading_config_resolves_relative_daemon_paths_from_file_location() {
+    let path = write_temp_config(
+        "relative-daemon-paths",
+        r#"
+[daemon]
+socket_path = "runtime/agentd.sock"
+pid_file = "runtime/agentd.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    );
+
+    let config = Config::load(&path).expect("config file should parse");
+    let base_dir = path
+        .parent()
+        .expect("config file should have a parent directory");
+
+    assert_eq!(
+        config.daemon().socket_path(),
+        base_dir.join("runtime/agentd.sock")
+    );
+    assert_eq!(
+        config.daemon().pid_file(),
+        base_dir.join("runtime/agentd.pid")
+    );
+}
+
+#[test]
+fn loading_config_from_a_relative_path_resolves_relative_daemon_paths_from_an_absolute_base_dir() {
+    let current_dir = std::env::current_dir().expect("current directory should be available");
+    let path = write_temp_config_under(
+        &current_dir.join("target"),
+        "relative-daemon-load-path",
+        r#"
+[daemon]
+socket_path = "runtime/agentd.sock"
+pid_file = "runtime/agentd.pid"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+"#,
+    );
+    let relative_path = path
+        .strip_prefix(&current_dir)
+        .expect("fixture path should be under the current directory");
+
+    let config = Config::load(relative_path).expect("config file should parse");
+    let base_dir = path
+        .parent()
+        .expect("config file should have a parent directory");
+
+    assert_eq!(
+        config.daemon().socket_path(),
+        base_dir.join("runtime/agentd.sock")
+    );
+    assert_eq!(
+        config.daemon().pid_file(),
+        base_dir.join("runtime/agentd.pid")
+    );
+    assert!(
+        config.daemon().socket_path().is_absolute(),
+        "loaded socket_path should be absolute when loaded from a file"
+    );
+    assert!(
+        config.daemon().pid_file().is_absolute(),
+        "loaded pid_file should be absolute when loaded from a file"
+    );
+}
+
+#[test]
 fn parses_default_daemon_paths_when_daemon_section_is_omitted() {
     let config = Config::from_str(
         r#"

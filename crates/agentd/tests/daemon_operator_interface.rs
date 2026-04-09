@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -155,6 +156,18 @@ fn wait_for_path(path: &std::path::Path) {
     }
 
     panic!("timed out waiting for {}", path.display());
+}
+
+fn wait_for_path_removal(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if !path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    panic!("timed out waiting for removal of {}", path.display());
 }
 
 #[test]
@@ -404,7 +417,7 @@ fn daemon_accepts_additional_manual_runs_while_a_previous_run_is_still_executing
 }
 
 #[test]
-fn daemon_shutdown_returns_promptly_while_a_manual_run_is_still_executing() {
+fn daemon_shutdown_waits_for_an_in_flight_manual_run_to_finish() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -439,25 +452,19 @@ fn daemon_shutdown_returns_promptly_while_a_manual_run_is_still_executing() {
 
     shutdown.store(true, Ordering::Release);
 
-    let (join_tx, join_rx) = mpsc::channel();
-    thread::spawn(move || {
-        let result = handle.join();
-        let _ = join_tx.send(result);
-    });
-    let exited_promptly = match join_rx.recv_timeout(Duration::from_millis(500)) {
-        Ok(result) => {
-            result
-                .expect("daemon thread should not panic")
-                .expect("daemon should exit cleanly");
-            true
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => false,
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            panic!("daemon join helper disconnected before reporting a result");
-        }
-    };
+    thread::sleep(Duration::from_millis(500));
+    let exited_before_release = handle.is_finished();
+
+    assert!(
+        !exited_before_release,
+        "daemon exited before the in-flight manual run finished"
+    );
 
     executor.release_first_run();
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
     assert_eq!(
         client_request
             .join()
@@ -468,10 +475,149 @@ fn daemon_shutdown_returns_promptly_while_a_manual_run_is_still_executing() {
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
     }
+}
 
-    assert!(
-        exited_promptly,
-        "daemon did not exit promptly while a manual run was still executing"
+#[test]
+fn daemon_shutdown_stops_accepting_new_manual_runs() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("shutdown-rejects-new-runs");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let executor =
+        BlockingFirstRunExecutor::new(SessionOutcome::Succeeded, SessionOutcome::Succeeded);
+    let daemon_executor = executor.clone();
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown.as_ref())
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let first_config = config.clone();
+    let first_request = thread::spawn(move || {
+        request_manual_run(
+            &first_config,
+            &ManualRunRequest {
+                agent: "codex".to_string(),
+                repo_url: "https://example.com/repo.git".to_string(),
+                work_unit: Some("draining".to_string()),
+            },
+        )
+    });
+    executor.wait_for_first_run_to_start();
+
+    shutdown.store(true, Ordering::Release);
+    wait_for_path_removal(config.daemon().socket_path());
+
+    let error = request_manual_run(
+        &config,
+        &ManualRunRequest {
+            agent: "codex".to_string(),
+            repo_url: "https://example.com/repo.git".to_string(),
+            work_unit: Some("rejected".to_string()),
+        },
+    )
+    .expect_err("new manual run should be rejected once shutdown begins");
+
+    executor.release_first_run();
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+    assert_eq!(
+        first_request
+            .join()
+            .expect("first request thread should join")
+            .expect("first client request should succeed"),
+        SessionOutcome::Succeeded
+    );
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+
+    match error {
+        ClientError::DaemonNotRunning { path } => {
+            assert_eq!(path, config.daemon().socket_path());
+        }
+        other => panic!("expected daemon-not-running error, got {other:?}"),
+    }
+}
+
+#[test]
+fn daemon_created_runtime_socket_and_directory_are_private() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_root = unique_runtime_dir("runtime-permissions");
+    let socket_dir = runtime_root.join("private-runtime");
+    let config = Config::from_str(&format!(
+        r#"
+[daemon]
+socket_path = "{socket_path}"
+pid_file = "{pid_file}"
+
+[[agents]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[agents.runa]
+command = ["codex", "exec"]
+
+[[agents.credentials]]
+name = "GITHUB_TOKEN"
+source = "AGENTD_GITHUB_TOKEN"
+"#,
+        socket_path = socket_dir.join("agentd.sock").display(),
+        pid_file = socket_dir.join("agentd.pid").display(),
+    ))
+    .expect("config should parse");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown(
+            daemon_config,
+            FixedOutcomeExecutor {
+                outcome: SessionOutcome::Succeeded,
+            },
+            daemon_shutdown.as_ref(),
+        )
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let socket_mode = std::fs::metadata(config.daemon().socket_path())
+        .expect("socket metadata should be readable")
+        .permissions()
+        .mode()
+        & 0o777;
+    let runtime_dir_mode = std::fs::metadata(&socket_dir)
+        .expect("runtime directory metadata should be readable")
+        .permissions()
+        .mode()
+        & 0o777;
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+
+    assert_eq!(socket_mode, 0o600, "socket should be private to the daemon");
+    assert_eq!(
+        runtime_dir_mode, 0o700,
+        "daemon-created runtime directory should be private to the daemon"
     );
 }
 

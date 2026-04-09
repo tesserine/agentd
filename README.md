@@ -39,6 +39,12 @@ socket_path = "/run/agentd/agentd.sock"
 pid_file = "/run/agentd/agentd.pid"
 ```
 
+Relative `socket_path` and `pid_file` values are resolved from the directory
+that contains the config file.
+
+On `SIGINT` or `SIGTERM`, the first signal stops accepting new operator
+connections and drains in-flight sessions. A second signal exits immediately.
+
 Trigger a manual session through the running daemon:
 
 ```bash

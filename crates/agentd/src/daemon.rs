@@ -1,13 +1,14 @@
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use agentd_runner::SessionOutcome;
@@ -17,6 +18,9 @@ use crate::config::Config;
 use crate::{DispatchError, ManualRunRequest, SessionExecutor, dispatch_manual_run};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
+const RUNTIME_DIR_MODE: u32 = 0o700;
+const SOCKET_MODE: u32 = 0o600;
+const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -143,14 +147,17 @@ impl From<OutcomeMessage> for SessionOutcome {
     }
 }
 
-/// Run the foreground daemon until `shutdown` becomes true.
+/// Run the foreground daemon until `shutdown` becomes true, then stop accepting
+/// new connections and wait for started handlers to finish.
 pub fn run_daemon_until_shutdown(
     config: Config,
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
     shutdown: &AtomicBool,
 ) -> Result<(), DaemonError> {
-    let runtime = DaemonRuntime::bind(config.daemon().socket_path(), config.daemon().pid_file())?;
+    let mut runtime =
+        DaemonRuntime::bind(config.daemon().socket_path(), config.daemon().pid_file())?;
     let executor = Arc::new(executor);
+    let mut handlers = Vec::new();
     tracing::info!(
         event = "agentd.daemon_started",
         socket_path = %config.daemon().socket_path().display(),
@@ -159,13 +166,26 @@ pub fn run_daemon_until_shutdown(
     );
 
     while !shutdown.load(Ordering::Acquire) {
-        match runtime.listener.accept() {
-            Ok((stream, _)) => spawn_connection_handler(stream, config.clone(), executor.clone()),
+        match runtime.accept() {
+            Ok((stream, _)) => {
+                if shutdown.load(Ordering::Acquire) {
+                    reject_connection_during_shutdown(stream);
+                    continue;
+                }
+
+                handlers.push(spawn_connection_handler(
+                    stream,
+                    config.clone(),
+                    executor.clone(),
+                ));
+            }
             Err(error) if accept_was_interrupted(&error) => continue,
             Err(error) => return Err(DaemonError::Io(error)),
         }
     }
 
+    runtime.begin_shutdown()?;
+    join_connection_handlers(handlers);
     tracing::info!(event = "agentd.daemon_stopped", "agentd daemon stopped");
     Ok(())
 }
@@ -177,13 +197,43 @@ fn accept_was_interrupted(error: &io::Error) -> bool {
     )
 }
 
-fn spawn_connection_handler<E>(stream: UnixStream, config: Config, executor: Arc<E>)
+fn spawn_connection_handler<E>(
+    stream: UnixStream,
+    config: Config,
+    executor: Arc<E>,
+) -> JoinHandle<()>
 where
     E: SessionExecutor + Send + Sync + 'static,
 {
     thread::spawn(move || {
         handle_connection(stream, &config, executor.as_ref());
-    });
+    })
+}
+
+fn reject_connection_during_shutdown(mut stream: UnixStream) {
+    if let Err(error) = write_response(
+        &mut stream,
+        &ResponseMessage::Error {
+            message: SHUTDOWN_MESSAGE.to_string(),
+        },
+    ) {
+        tracing::warn!(
+            event = "agentd.operator_connection_rejected_during_shutdown_failed",
+            error = %error,
+            "failed to reject operator connection during shutdown"
+        );
+    }
+}
+
+fn join_connection_handlers(handlers: Vec<JoinHandle<()>>) {
+    for handler in handlers {
+        if handler.join().is_err() {
+            tracing::error!(
+                event = "agentd.operator_connection_panicked",
+                "operator connection handler panicked during shutdown"
+            );
+        }
+    }
 }
 
 /// Trigger a manual run against the local daemon and wait for its terminal outcome.
@@ -324,7 +374,7 @@ fn dispatch_error_message(error: &DispatchError) -> String {
 }
 
 struct DaemonRuntime {
-    listener: UnixListener,
+    listener: Option<UnixListener>,
     _pid_lock: File,
     pid_file: PathBuf,
     socket_path: PathBuf,
@@ -332,11 +382,18 @@ struct DaemonRuntime {
 
 impl DaemonRuntime {
     fn bind(socket_path: &Path, pid_file: &Path) -> Result<Self, DaemonError> {
-        if let Some(parent) = pid_file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let socket_parent_created = socket_path
+            .parent()
+            .map(ensure_directory_exists)
+            .transpose()?
+            .unwrap_or(false);
         if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            if socket_parent_created {
+                restrict_directory_permissions(parent, RUNTIME_DIR_MODE)?;
+            }
+        }
+        if let Some(parent) = pid_file.parent() {
+            fs::create_dir_all(parent)?;
         }
 
         let mut pid_lock = OpenOptions::new()
@@ -359,29 +416,42 @@ impl DaemonRuntime {
         prepare_socket_path(socket_path)?;
 
         let listener = UnixListener::bind(socket_path)?;
+        restrict_file_permissions(socket_path, SOCKET_MODE)?;
         set_listener_receive_timeout(&listener, ACCEPT_TIMEOUT)?;
 
         Ok(Self {
-            listener,
+            listener: Some(listener),
             _pid_lock: pid_lock,
             pid_file: pid_file.to_path_buf(),
             socket_path: socket_path.to_path_buf(),
         })
+    }
+
+    fn accept(&self) -> Result<(UnixStream, std::os::unix::net::SocketAddr), io::Error> {
+        self.listener
+            .as_ref()
+            .expect("listener should exist while the daemon is accepting connections")
+            .accept()
+    }
+
+    fn begin_shutdown(&mut self) -> Result<(), io::Error> {
+        self.listener.take();
+        remove_socket_file_if_present(&self.socket_path)
     }
 }
 
 impl Drop for DaemonRuntime {
     fn drop(&mut self) {
         let _ = remove_socket_file_if_present(&self.socket_path);
-        let _ = std::fs::remove_file(&self.pid_file);
+        let _ = fs::remove_file(&self.pid_file);
     }
 }
 
 fn prepare_socket_path(socket_path: &Path) -> Result<(), DaemonError> {
-    match std::fs::symlink_metadata(socket_path) {
+    match fs::symlink_metadata(socket_path) {
         Ok(metadata) => {
             if metadata.file_type().is_socket() {
-                std::fs::remove_file(socket_path)?;
+                fs::remove_file(socket_path)?;
                 Ok(())
             } else {
                 Err(DaemonError::Io(io::Error::new(
@@ -399,12 +469,26 @@ fn prepare_socket_path(socket_path: &Path) -> Result<(), DaemonError> {
 }
 
 fn remove_socket_file_if_present(socket_path: &Path) -> Result<(), io::Error> {
-    match std::fs::symlink_metadata(socket_path) {
-        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(socket_path),
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(socket_path),
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn ensure_directory_exists(path: &Path) -> Result<bool, io::Error> {
+    let existed = path.exists();
+    fs::create_dir_all(path)?;
+    Ok(!existed)
+}
+
+fn restrict_directory_permissions(path: &Path, mode: u32) -> Result<(), io::Error> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+fn restrict_file_permissions(path: &Path, mode: u32) -> Result<(), io::Error> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 fn set_listener_receive_timeout(
@@ -449,7 +533,7 @@ fn try_lock_exclusive(file: &File) -> Result<bool, io::Error> {
 }
 
 fn read_pid(pid_file: &Path) -> Option<u32> {
-    std::fs::read_to_string(pid_file)
+    fs::read_to_string(pid_file)
         .ok()
         .and_then(|contents| contents.trim().parse::<u32>().ok())
 }
