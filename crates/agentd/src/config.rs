@@ -15,7 +15,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use agentd_runner::{RunnerError, validate_environment_name, validate_profile_name};
+use agentd_runner::{
+    RunnerError, validate_environment_name, validate_profile_name, validate_repo_url,
+};
+use croner::parser::{CronParser, Seconds, Year};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -97,6 +100,28 @@ impl Config {
                 Some(raw_profile.name.as_str()),
                 None,
             )?;
+            let repo = match raw_profile.repo {
+                Some(value) => {
+                    validate_lookup_key("repo", &value, Some(raw_profile.name.as_str()), None)?;
+                    validate_repo_url(&value).map_err(|error| ConfigError::InvalidRepo {
+                        profile: raw_profile.name.clone(),
+                        message: error.to_string(),
+                    })?;
+                    Some(value)
+                }
+                None => None,
+            };
+            let schedule = match raw_profile.schedule {
+                Some(value) => {
+                    validate_lookup_key("schedule", &value, Some(raw_profile.name.as_str()), None)?;
+                    validate_schedule(&value).map_err(|_| ConfigError::InvalidSchedule {
+                        profile: raw_profile.name.clone(),
+                        schedule: value.clone(),
+                    })?;
+                    Some(value)
+                }
+                None => None,
+            };
             let repo_token_source = match raw_profile.repo_token_source {
                 Some(value) if value.is_empty() => None,
                 Some(value) => {
@@ -158,11 +183,19 @@ impl Config {
                 });
             }
 
+            if schedule.is_some() && repo.is_none() {
+                return Err(ConfigError::ScheduleRequiresRepo {
+                    profile: raw_profile.name.clone(),
+                });
+            }
+
             let methodology_dir = resolve_methodology_dir(base_dir, &raw_profile.methodology_dir);
             profiles.push(ProfileConfig {
                 name: raw_profile.name,
                 base_image: raw_profile.base_image,
                 methodology_dir,
+                repo,
+                schedule,
                 repo_token_source,
                 credentials,
                 command,
@@ -195,6 +228,8 @@ pub struct ProfileConfig {
     name: String,
     base_image: String,
     methodology_dir: PathBuf,
+    repo: Option<String>,
+    schedule: Option<String>,
     repo_token_source: Option<String>,
     credentials: Vec<CredentialConfig>,
     command: Vec<String>,
@@ -216,6 +251,16 @@ impl ProfileConfig {
     /// constructed via the [`FromStr`] impl.
     pub fn methodology_dir(&self) -> &Path {
         &self.methodology_dir
+    }
+
+    /// Optional default repository URL for sessions launched from this profile.
+    pub fn repo(&self) -> Option<&str> {
+        self.repo.as_deref()
+    }
+
+    /// Optional five-field cron expression evaluated in daemon-local time.
+    pub fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
     }
 
     /// Optional environment variable name resolved by the daemon at dispatch
@@ -366,6 +411,12 @@ pub enum ConfigError {
     RelativeDaemonRuntimePath { field: &'static str, path: PathBuf },
     /// The `command` array is empty for a profile.
     EmptyCommand { profile: String },
+    /// A profile declares a default repository URL the runner would reject.
+    InvalidRepo { profile: String, message: String },
+    /// A profile declares an invalid cron expression.
+    InvalidSchedule { profile: String, schedule: String },
+    /// A scheduled profile must declare a default repo for autonomous runs.
+    ScheduleRequiresRepo { profile: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -441,6 +492,21 @@ impl fmt::Display for ConfigError {
             ConfigError::EmptyCommand { profile } => {
                 write!(f, "profile '{profile}' must define a non-empty command")
             }
+            ConfigError::InvalidRepo { profile, message } => {
+                write!(f, "profile '{profile}' defines invalid repo: {message}")
+            }
+            ConfigError::InvalidSchedule { profile, schedule } => {
+                write!(
+                    f,
+                    "profile '{profile}' defines invalid schedule '{schedule}'"
+                )
+            }
+            ConfigError::ScheduleRequiresRepo { profile } => {
+                write!(
+                    f,
+                    "profile '{profile}' defines schedule but no repo; scheduled profiles must define a repo"
+                )
+            }
         }
     }
 }
@@ -510,6 +576,8 @@ struct RawProfileConfig {
     base_image: String,
     methodology_dir: String,
     command: Vec<String>,
+    repo: Option<String>,
+    schedule: Option<String>,
     repo_token_source: Option<String>,
     #[serde(default)]
     credentials: Vec<RawCredentialConfig>,
@@ -616,6 +684,15 @@ fn absolute_config_dir(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
 
 fn resolve_methodology_dir(base_dir: Option<&Path>, methodology_dir: &str) -> PathBuf {
     resolve_config_path(base_dir, methodology_dir)
+}
+
+fn validate_schedule(schedule: &str) -> Result<(), croner::errors::CronError> {
+    CronParser::builder()
+        .seconds(Seconds::Disallowed)
+        .year(Year::Disallowed)
+        .build()
+        .parse(schedule)
+        .map(|_| ())
 }
 
 fn validate_absolute_daemon_runtime_path(

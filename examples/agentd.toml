@@ -1,5 +1,5 @@
 # Static profile registry for agentd.
-# Session-specific inputs such as repo and work unit come from the CLI at run time.
+# A profile can carry its own default repo and optional schedule.
 
 [[profiles]]
 # Stable operator-facing profile name used for lookup and container identity.
@@ -8,6 +8,11 @@ name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
+# Default repository URL cloned for manual runs when `agentd run` omits a repo,
+# and for each scheduled run of this profile.
+repo = "https://github.com/pentaxis93/agentd.git"
+# Optional five-field cron expression in daemon-local time.
+schedule = "*/15 * * * *"
 # Static session command executed from the cloned repository. This profile is
 # tightly bound to one codebase, so the session repo is the app it builds.
 command = [
@@ -40,6 +45,7 @@ source = "AGENTD_GITHUB_TOKEN"
 name = "code-reviewer"
 base_image = "ghcr.io/example/code-reviewer:latest"
 methodology_dir = "../groundwork"
+repo = "https://github.com/pentaxis93/agentd.git"
 command = [
   "/bin/sh",
   "-lc",

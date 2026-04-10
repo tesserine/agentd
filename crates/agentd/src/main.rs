@@ -17,6 +17,8 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
 enum RunCommandError {
     Failed { exit_code: i32 },
     TimedOut,
+    UnknownProfile { profile: String },
+    MissingRepo { profile: String },
 }
 
 impl fmt::Display for RunCommandError {
@@ -24,6 +26,11 @@ impl fmt::Display for RunCommandError {
         match self {
             Self::Failed { exit_code } => write!(f, "session failed (exit code {exit_code})"),
             Self::TimedOut => write!(f, "session timed out"),
+            Self::UnknownProfile { profile } => write!(f, "unknown profile '{profile}'"),
+            Self::MissingRepo { profile } => write!(
+                f,
+                "profile '{profile}' requires a repo argument or configured profile repo"
+            ),
         }
     }
 }
@@ -46,7 +53,7 @@ enum Command {
     /// Trigger a manual session through the running daemon.
     Run {
         profile: String,
-        repo: String,
+        repo: Option<String>,
         #[arg(long)]
         work_unit: Option<String>,
     },
@@ -76,7 +83,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             profile,
             repo,
             work_unit,
-        }) => run_client(DaemonConfig::load(&cli.config)?, profile, repo, work_unit),
+        }) => run_client(&cli.config, profile, repo, work_unit),
     }
 }
 
@@ -85,7 +92,7 @@ fn run_daemon(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     register_termination_handlers(shutdown.clone())?;
 
     let executor = RunnerSessionExecutor;
-    run_daemon_until_shutdown(config, executor, shutdown.as_ref())?;
+    run_daemon_until_shutdown(config, executor, shutdown)?;
     Ok(())
 }
 
@@ -99,13 +106,15 @@ fn register_termination_handlers(shutdown: Arc<AtomicBool>) -> Result<(), std::i
 }
 
 fn run_client(
-    config: DaemonConfig,
+    config_path: &std::path::Path,
     profile: String,
-    repo: String,
+    repo: Option<String>,
     work_unit: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = resolve_run_repo(config_path, &profile, repo)?;
+    let daemon_config = DaemonConfig::load(config_path)?;
     let outcome = request_run(
-        &config,
+        &daemon_config,
         &RunRequest {
             profile,
             repo_url: repo,
@@ -123,6 +132,29 @@ fn run_client(
         }
         agentd_runner::SessionOutcome::TimedOut => Err(Box::new(RunCommandError::TimedOut)),
     }
+}
+
+fn resolve_run_repo(
+    config_path: &std::path::Path,
+    profile: &str,
+    repo: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(repo) = repo {
+        return Ok(repo);
+    }
+
+    let config = Config::load(config_path)?;
+    let profile = config.profile(profile).ok_or_else(|| {
+        Box::new(RunCommandError::UnknownProfile {
+            profile: profile.to_string(),
+        }) as Box<dyn std::error::Error>
+    })?;
+
+    profile.repo().map(str::to_owned).ok_or_else(|| {
+        Box::new(RunCommandError::MissingRepo {
+            profile: profile.name().to_string(),
+        }) as Box<dyn std::error::Error>
+    })
 }
 
 #[cfg(test)]

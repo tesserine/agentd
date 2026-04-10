@@ -17,6 +17,7 @@ use agentd_runner::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, ConfigError, DaemonConfig};
+use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
 use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
@@ -168,7 +169,7 @@ impl From<OutcomeMessage> for SessionOutcome {
 pub fn run_daemon_until_shutdown(
     config: Config,
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
-    shutdown: &AtomicBool,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), DaemonError> {
     let daemon_instance_id = config.daemon().daemon_instance_id()?;
     run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
@@ -179,7 +180,7 @@ pub fn run_daemon_until_shutdown(
 fn run_daemon_until_shutdown_with_reconciler<F>(
     config: Config,
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
-    shutdown: &AtomicBool,
+    shutdown: Arc<AtomicBool>,
     reconcile_startup: F,
 ) -> Result<(), DaemonError>
 where
@@ -204,6 +205,7 @@ where
     runtime.bind_listener()?;
     let executor = Arc::new(executor);
     let mut handlers = Vec::new();
+    let scheduler_handle = spawn_scheduler_thread(&config, Arc::clone(&shutdown))?;
     tracing::info!(
         event = "agentd.daemon_started",
         socket_path = %config.daemon().socket_path().display(),
@@ -235,10 +237,16 @@ where
         }
     };
 
-    finish_daemon_loop(|| runtime.begin_shutdown(), handlers, loop_result)
-        .map_err(DaemonError::Io)?;
+    let finish_result = finish_daemon_loop(|| runtime.begin_shutdown(), handlers, loop_result);
+    stop_scheduler_thread(shutdown.as_ref(), scheduler_handle);
+    finish_result.map_err(DaemonError::Io)?;
     tracing::info!(event = "agentd.daemon_stopped", "agentd daemon stopped");
     Ok(())
+}
+
+fn stop_scheduler_thread(shutdown: &AtomicBool, handle: Option<JoinHandle<()>>) {
+    shutdown.store(true, Ordering::Release);
+    join_scheduler_thread(handle);
 }
 
 fn finish_daemon_loop<F>(
@@ -351,11 +359,41 @@ pub fn request_run(
     }
 }
 
+pub(crate) fn request_run_without_waiting(
+    config: &DaemonConfig,
+    request: &RunRequest,
+) -> Result<(), ClientError> {
+    send_request_without_response(
+        config.socket_path(),
+        &RequestMessage::Run {
+            profile: request.profile.clone(),
+            repo_url: request.repo_url.clone(),
+            work_unit: request.work_unit.clone(),
+        },
+    )
+}
+
 fn send_request(
     socket_path: &Path,
     request: &RequestMessage,
 ) -> Result<ResponseMessage, ClientError> {
-    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+    let mut stream = connect_to_daemon(socket_path)?;
+    write_request(&mut stream, request)?;
+
+    read_response(stream)
+}
+
+fn send_request_without_response(
+    socket_path: &Path,
+    request: &RequestMessage,
+) -> Result<(), ClientError> {
+    let mut stream = connect_to_daemon(socket_path)?;
+    write_request(&mut stream, request)?;
+    Ok(())
+}
+
+fn connect_to_daemon(socket_path: &Path) -> Result<UnixStream, ClientError> {
+    UnixStream::connect(socket_path).map_err(|error| {
         if matches!(
             error.kind(),
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
@@ -366,12 +404,19 @@ fn send_request(
         } else {
             ClientError::Io(error)
         }
-    })?;
+    })
+}
+
+fn write_request(stream: &mut UnixStream, request: &RequestMessage) -> Result<(), ClientError> {
     let payload = serde_json::to_vec(request)?;
     stream.write_all(&payload)?;
     stream.write_all(b"\n")?;
     stream.flush()?;
 
+    Ok(())
+}
+
+fn read_response(stream: UnixStream) -> Result<ResponseMessage, ClientError> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let bytes_read = reader.read_line(&mut line)?;
@@ -458,9 +503,28 @@ fn handle_connection_inner(
 fn write_response(stream: &mut UnixStream, response: &ResponseMessage) -> Result<(), io::Error> {
     let payload = serde_json::to_vec(response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    stream.write_all(&payload)?;
-    stream.write_all(b"\n")?;
-    stream.flush()
+    write_response_part(stream, &payload)?;
+    write_response_part(stream, b"\n")?;
+    match stream.flush() {
+        Ok(()) => Ok(()),
+        Err(error) if peer_disconnected_during_response(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_response_part(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), io::Error> {
+    match stream.write_all(bytes) {
+        Ok(()) => Ok(()),
+        Err(error) if peer_disconnected_during_response(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn peer_disconnected_during_response(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+    )
 }
 
 fn dispatch_error_message(error: &DispatchError) -> String {
@@ -657,8 +721,8 @@ fn read_pid(pid_file: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonError, finish_daemon_loop, reap_finished_handlers,
-        run_daemon_until_shutdown_with_reconciler,
+        DaemonError, ResponseMessage, finish_daemon_loop, reap_finished_handlers,
+        run_daemon_until_shutdown_with_reconciler, write_response,
     };
     use crate::config::Config;
     use crate::dispatch::SessionExecutor;
@@ -675,7 +739,10 @@ mod tests {
     use std::sync::mpsc::Sender;
     use std::thread;
     use std::time::{Duration, Instant};
-    use std::{os::unix::fs::FileTypeExt, os::unix::net::UnixListener};
+    use std::{
+        os::unix::fs::FileTypeExt,
+        os::unix::net::{UnixListener, UnixStream},
+    };
 
     #[derive(Clone)]
     struct FixedOutcomeExecutor;
@@ -788,6 +855,25 @@ source = "AGENTD_GITHUB_TOKEN"
     }
 
     #[test]
+    fn response_writes_ignore_a_peer_that_already_disconnected() {
+        let (mut daemon_stream, client_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        drop(client_stream);
+
+        let result = write_response(
+            &mut daemon_stream,
+            &ResponseMessage::Error {
+                message: "ignored disconnect".to_string(),
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "closed peer during response write should be treated as normal completion"
+        );
+    }
+
+    #[test]
     fn finishing_after_accept_error_waits_for_in_flight_handlers() {
         let (handler, tx) = spawn_blocked_handler();
         let releaser = thread::spawn(move || {
@@ -865,6 +951,42 @@ source = "AGENTD_GITHUB_TOKEN"
     }
 
     #[test]
+    fn stopping_scheduler_thread_sets_shutdown_before_joining() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let scheduler_shutdown = Arc::clone(&shutdown);
+        let scheduler = thread::spawn(move || {
+            while !scheduler_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let (done_tx, done_rx) = mpsc::channel();
+        let join_shutdown = Arc::clone(&shutdown);
+        let joiner = thread::spawn(move || {
+            super::stop_scheduler_thread(join_shutdown.as_ref(), Some(scheduler));
+            done_tx
+                .send(())
+                .expect("scheduler stop should report completion");
+        });
+
+        let finished_quickly = done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        if !finished_quickly {
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
+        }
+        joiner
+            .join()
+            .expect("scheduler stopper should join cleanly");
+
+        assert!(
+            finished_quickly,
+            "stopping the scheduler should set shutdown before joining"
+        );
+        assert!(
+            shutdown.load(std::sync::atomic::Ordering::Acquire),
+            "stopping the scheduler should leave shutdown asserted"
+        );
+    }
+
+    #[test]
     fn startup_reconciliation_completes_before_socket_binding() {
         let runtime_dir = unique_runtime_dir("startup-order");
         let config = config_in_runtime_dir(&runtime_dir);
@@ -883,7 +1005,7 @@ source = "AGENTD_GITHUB_TOKEN"
             run_daemon_until_shutdown_with_reconciler(
                 daemon_config,
                 FixedOutcomeExecutor,
-                daemon_shutdown.as_ref(),
+                daemon_shutdown,
                 move || {
                     daemon_id_tx
                         .send(expected_daemon_instance_id)
@@ -936,7 +1058,7 @@ source = "AGENTD_GITHUB_TOKEN"
         let error = run_daemon_until_shutdown_with_reconciler(
             config.clone(),
             FixedOutcomeExecutor,
-            &AtomicBool::new(false),
+            Arc::new(AtomicBool::new(false)),
             || Err(RunnerError::InvalidBaseImage),
         )
         .expect_err("startup reconciliation failure should abort daemon startup");

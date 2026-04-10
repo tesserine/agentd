@@ -28,19 +28,20 @@ startup, operator-triggered sessions, ephemeral Podman containers, credential
 injection, execution, and teardown. Startup reconciliation cleans stale
 resources from prior runs. Structured JSON tracing provides operational
 visibility.
-
-Scheduling policy does not exist yet — sessions are triggered manually via
-`agentd run`.
+Profiles may now declare a default repository and an optional cron schedule.
+Manual runs still flow through `agentd run`, and scheduled runs dispatch
+through the same daemon socket intake without introducing a separate job type.
 
 ## Configuration
 
 A profile is a named environment specification: base image, methodology
-directory, credentials, and runtime command. Define profiles in a TOML config
-file — start from [`examples/agentd.toml`](examples/agentd.toml):
+directory, optional default repo, optional cron schedule, credentials, and
+runtime command. Define profiles in a TOML config file — start from
+[`examples/agentd.toml`](examples/agentd.toml):
 
 ```toml
 # Static profile registry for agentd.
-# Session-specific inputs such as repo and work unit come from the CLI at run time.
+# A profile can carry its own default repo and optional schedule.
 
 [[profiles]]
 # Stable operator-facing profile name used for lookup and container identity.
@@ -49,6 +50,11 @@ name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
+# Default repository URL cloned for manual runs when `agentd run` omits a repo,
+# and for every scheduled run of this profile.
+repo = "https://github.com/pentaxis93/agentd.git"
+# Optional five-field cron expression in daemon-local time.
+schedule = "*/15 * * * *"
 # Static session command executed from the cloned repository. This profile is
 # tightly bound to one app, so the session repo is the project being built.
 command = [
@@ -82,6 +88,7 @@ source = "AGENTD_GITHUB_TOKEN"
 name = "code-reviewer"
 base_image = "ghcr.io/example/code-reviewer:latest"
 methodology_dir = "../groundwork"
+repo = "https://github.com/pentaxis93/agentd.git"
 command = [
   "/bin/sh",
   "-lc",
@@ -107,7 +114,9 @@ source = "AGENTD_GITHUB_TOKEN"
 Credential `source` fields name environment variables in the daemon's process
 environment — export them before starting the daemon. The base image must
 provide `/bin/sh`, `git`, `useradd`, `gosu`, and whatever binaries the
-configured session command uses.
+configured session command uses. When a profile declares `schedule`, it must
+also declare `repo`. Schedules are evaluated in daemon-local time and missed
+fires are not backfilled after downtime.
 
 ## Running a Session
 
@@ -131,12 +140,19 @@ signal exits immediately.
 Trigger a session through the running daemon:
 
 ```bash
-agentd run site-builder https://github.com/pentaxis93/agentd.git --work-unit issue-42
+agentd run site-builder --work-unit issue-42
 ```
 
 `agentd run` reads the same config file and connects to the socket path defined
-there. This dispatches a session using the `site-builder` profile. Inside the
-container, the agent sees:
+there. When the profile declares `repo`, the CLI can omit the positional repo
+argument; an explicit repo still overrides the configured default:
+
+```bash
+agentd run site-builder https://github.com/pentaxis93/agentd.git --work-unit issue-42
+```
+
+Both manual and scheduled dispatches use the same daemon socket intake. Inside
+the container, the agent sees:
 
 - An unprivileged user with `$HOME` at `/home/site-builder`
 - A fresh clone of the repository at `/home/site-builder/repo`
@@ -147,6 +163,14 @@ container, the agent sees:
 
 The container is force-removed on completion. No session state persists on the
 host.
+
+## Scheduled Runs
+
+Profiles with `schedule` run autonomously while the daemon is up. The scheduler
+evaluates cron expressions in daemon-local time and opens the same Unix-socket
+client path that `agentd run` uses. Multiple scheduled profiles may overlap,
+and their sessions dispatch independently. Session outcomes do not affect later
+schedule evaluation: the next occurrence runs at its next scheduled time.
 
 ## Going Deeper
 

@@ -8,6 +8,7 @@ pub mod config;
 pub mod daemon;
 pub mod dispatch;
 pub mod logging;
+mod scheduler;
 
 pub use daemon::{ClientError, DaemonError, request_run, run_daemon_until_shutdown};
 pub use dispatch::{

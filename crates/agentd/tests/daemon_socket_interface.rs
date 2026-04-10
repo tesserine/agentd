@@ -184,9 +184,8 @@ fn daemon_reports_run_outcome_back_through_client_request() {
     let executor = FixedOutcomeExecutor {
         outcome: SessionOutcome::Failed { exit_code: 23 },
     };
-    let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown.as_ref())
-    });
+    let handle =
+        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
     wait_for_path(config.daemon().socket_path());
 
     let outcome = request_run(
@@ -250,9 +249,8 @@ fn starting_second_daemon_instance_fails_with_existing_pid() {
     let executor = FixedOutcomeExecutor {
         outcome: SessionOutcome::Succeeded,
     };
-    let first_handle = thread::spawn(move || {
-        run_daemon_until_shutdown(first_config, executor, first_shutdown.as_ref())
-    });
+    let first_handle =
+        thread::spawn(move || run_daemon_until_shutdown(first_config, executor, first_shutdown));
     wait_for_path(config.daemon().socket_path());
 
     let second_result = run_daemon_until_shutdown(
@@ -260,7 +258,7 @@ fn starting_second_daemon_instance_fails_with_existing_pid() {
         FixedOutcomeExecutor {
             outcome: SessionOutcome::Succeeded,
         },
-        &AtomicBool::new(false),
+        Arc::new(AtomicBool::new(false)),
     );
 
     match second_result.expect_err("second daemon should fail to start") {
@@ -296,9 +294,8 @@ fn daemon_shutdown_removes_pid_file_and_socket() {
     let executor = FixedOutcomeExecutor {
         outcome: SessionOutcome::Succeeded,
     };
-    let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown.as_ref())
-    });
+    let handle =
+        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
     wait_for_path(config.daemon().socket_path());
     wait_for_path(config.daemon().pid_file());
 
@@ -340,7 +337,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
     );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown.as_ref())
+        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
@@ -431,7 +428,7 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
         BlockingFirstRunExecutor::new(SessionOutcome::Succeeded, SessionOutcome::Succeeded);
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown.as_ref())
+        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
@@ -492,7 +489,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
         BlockingFirstRunExecutor::new(SessionOutcome::Succeeded, SessionOutcome::Succeeded);
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown.as_ref())
+        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
@@ -586,7 +583,7 @@ source = "AGENTD_GITHUB_TOKEN"
             FixedOutcomeExecutor {
                 outcome: SessionOutcome::Succeeded,
             },
-            daemon_shutdown.as_ref(),
+            daemon_shutdown,
         )
     });
     wait_for_path(config.daemon().socket_path());
@@ -631,7 +628,7 @@ fn daemon_startup_refuses_to_delete_a_non_socket_socket_path() {
         FixedOutcomeExecutor {
             outcome: SessionOutcome::Succeeded,
         },
-        &AtomicBool::new(false),
+        Arc::new(AtomicBool::new(false)),
     )
     .expect_err("daemon startup should fail for a non-socket socket_path");
 
@@ -672,7 +669,7 @@ command = ["site-builder", "exec"]
         FixedOutcomeExecutor {
             outcome: SessionOutcome::Succeeded,
         },
-        &AtomicBool::new(false),
+        Arc::new(AtomicBool::new(false)),
     )
     .expect_err("relative daemon paths should abort startup");
 

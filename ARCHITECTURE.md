@@ -19,7 +19,7 @@ The key architectural consequence is simple: agentd may configure tool availabil
 
 ### Terminology
 
-- **Profile**: a named, reusable environment specification in the daemon config — base image, methodology, credentials, and command. What the operator declares.
+- **Profile**: a named, reusable environment specification in the daemon config — base image, methodology, optional default repo, optional schedule, credentials, and command. What the operator declares.
 - **Session**: a single execution created from a profile plus invocation parameters (repo, work unit, timeout). What the runner manages.
 
 ## 2. Agent Capability Needs
@@ -104,11 +104,13 @@ environment configuration.
 
 ### Phase 1: Scheduling (`agentd-scheduler`)
 
-The scheduler determines when a session should run. Triggers may come from
-time-based schedules, external events, or continuous policies. When scheduling
-decides to start a session, the scheduler is a socket client: it dispatches a
-run request through the daemon's Unix socket, using the same intake path as
-manual CLI invocation. The scheduler does not call the runner directly.
+The scheduler determines when a session should run. Today it evaluates each
+profile's optional cron schedule in daemon-local time. When scheduling decides
+to start a session, the scheduler is a socket client: it dispatches a run
+request through the daemon's Unix socket, using the same intake path as manual
+CLI invocation. The scheduler does not call the runner directly. Missed
+occurrences while the daemon is down are not backfilled, and session outcomes
+do not influence later schedule evaluation.
 
 ### Phase 2: Session Setup (`agentd-runner`)
 

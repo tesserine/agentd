@@ -97,6 +97,11 @@ fn parses_example_config_into_static_profile_settings() {
     );
     assert_eq!(site_builder.methodology_dir(), Path::new("../groundwork"));
     assert_eq!(
+        site_builder.repo(),
+        Some("https://github.com/pentaxis93/agentd.git")
+    );
+    assert_eq!(site_builder.schedule(), Some("*/15 * * * *"));
+    assert_eq!(
         site_builder.repo_token_source(),
         Some("SITE_BUILDER_REPO_TOKEN")
     );
@@ -119,6 +124,11 @@ fn parses_example_config_into_static_profile_settings() {
         "ghcr.io/example/code-reviewer:latest"
     );
     assert_eq!(code_reviewer.methodology_dir(), Path::new("../groundwork"));
+    assert_eq!(
+        code_reviewer.repo(),
+        Some("https://github.com/pentaxis93/agentd.git")
+    );
+    assert_eq!(code_reviewer.schedule(), None);
     assert_eq!(
         code_reviewer.repo_token_source(),
         Some("CODE_REVIEWER_REPO_TOKEN")
@@ -500,6 +510,51 @@ command = ["site-builder", "exec"]
 }
 
 #[test]
+fn parses_profile_repo_as_optional_default_clone_url() {
+    let config = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+repo = "https://example.com/agentd.git"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse repo");
+
+    let profile = config
+        .profile("site-builder")
+        .expect("profile should exist");
+
+    assert_eq!(profile.repo(), Some("https://example.com/agentd.git"));
+}
+
+#[test]
+fn parses_profile_schedule_as_optional_cron_expression() {
+    let config = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+repo = "https://example.com/agentd.git"
+schedule = "*/15 * * * *"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse schedule");
+
+    let profile = config
+        .profile("site-builder")
+        .expect("profile should exist");
+
+    assert_eq!(profile.schedule(), Some("*/15 * * * *"));
+}
+
+#[test]
 fn normalizes_empty_repo_token_source_to_none() {
     let config = Config::from_str(
         r#"
@@ -519,6 +574,73 @@ command = ["site-builder", "exec"]
         .expect("profile should exist");
 
     assert_eq!(profile.repo_token_source(), None);
+}
+
+#[test]
+fn rejects_schedule_without_repo() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+schedule = "*/15 * * * *"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect_err("scheduled profiles without repos should be rejected");
+
+    match error {
+        ConfigError::ScheduleRequiresRepo { profile } => assert_eq!(profile, "site-builder"),
+        other => panic!("expected schedule-requires-repo error, got {other}"),
+    }
+}
+
+#[test]
+fn rejects_invalid_profile_repo_url() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+repo = "/srv/test-repo.git"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect_err("invalid profile repos should be rejected");
+
+    match error {
+        ConfigError::InvalidRepo { profile, .. } => assert_eq!(profile, "site-builder"),
+        other => panic!("expected invalid repo error, got {other}"),
+    }
+}
+
+#[test]
+fn rejects_invalid_profile_schedule() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+repo = "https://example.com/agentd.git"
+schedule = "* * *"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect_err("invalid profile schedules should be rejected");
+
+    match error {
+        ConfigError::InvalidSchedule { profile, schedule } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(schedule, "* * *");
+        }
+        other => panic!("expected invalid schedule error, got {other}"),
+    }
 }
 
 #[test]
