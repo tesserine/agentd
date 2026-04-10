@@ -687,7 +687,7 @@ fn rejects_uppercase_profile_names_at_parse_time() {
 
 #[test]
 fn rejects_digit_prefixed_profile_names_at_parse_time() {
-    assert_invalid_profile_name_parse_error("123agent");
+    assert_invalid_profile_name_parse_error("123codex");
 }
 
 #[test]
