@@ -162,6 +162,8 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     if let Some(work_unit) = &invocation.work_unit {
         script.push_str("\nexport AGENTD_WORK_UNIT=");
         script.push_str(&shell_quote(work_unit));
+    } else {
+        script.push_str("\nunset AGENTD_WORK_UNIT");
     }
     script.push_str("\nexec gosu ");
     script.push_str(&shell_quote(&user_group));

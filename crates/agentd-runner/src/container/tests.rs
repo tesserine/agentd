@@ -175,6 +175,26 @@ fn build_container_script_creates_home_workspace_and_execs_profile_command_from_
     assert!(!script.contains("runa run"));
 }
 
+#[test]
+fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
+    let script = build_container_script(
+        &crate::SessionSpec {
+            profile_name: "myprofile".to_string(),
+            ..test_session_spec()
+        },
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    );
+
+    assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
+    assert!(script.contains("\nunset AGENTD_WORK_UNIT\n"));
+    assert!(script.contains("\nexec gosu 'myprofile:myprofile' 'codex' 'exec'"));
+}
+
 #[cfg(unix)]
 #[test]
 fn clone_command_passes_repo_token_to_git_via_environment_not_argv() {

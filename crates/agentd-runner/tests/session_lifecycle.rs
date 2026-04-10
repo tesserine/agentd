@@ -113,6 +113,44 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
 }
 
 #[test]
+fn clears_inherited_work_unit_when_invocation_omits_it() {
+    if skip_if_podman_unavailable("clears_inherited_work_unit_when_invocation_omits_it") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("unset-work-unit-run");
+    let image = fixture.build_image_with_agentd_work_unit("stale-from-image");
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "unset-work-unit-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            command: vec!["codex".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "success-without-work-unit".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Succeeded);
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
 fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
     if skip_if_podman_unavailable(
         "returns_failed_exit_code_without_timeout_and_cleans_up_container",
@@ -402,13 +440,27 @@ impl SessionFixture {
     }
 
     fn build_image(&self) -> String {
+        self.build_image_with_agentd_work_unit_line(None)
+    }
+
+    fn build_image_with_agentd_work_unit(&self, work_unit: &str) -> String {
+        self.build_image_with_agentd_work_unit_line(Some(work_unit))
+    }
+
+    fn build_image_with_agentd_work_unit_line(&self, work_unit: Option<&str>) -> String {
         let context_dir = self.root.join("image-context");
         fs::create_dir_all(&context_dir).expect("image context should be created");
 
         fs::write(context_dir.join("codex"), CODEX_STUB).expect("codex stub should be written");
         fs::write(context_dir.join("entrypoint.sh"), ENTRYPOINT_SH)
             .expect("entrypoint script should be written");
-        fs::write(context_dir.join("Containerfile"), CONTAINERFILE)
+        let containerfile = work_unit
+            .map(|work_unit| CONTAINERFILE.replace(
+                "FROM docker.io/library/debian:bookworm-slim\n",
+                &format!("FROM docker.io/library/debian:bookworm-slim\nENV AGENTD_WORK_UNIT={work_unit}\n"),
+            ))
+            .unwrap_or_else(|| CONTAINERFILE.to_string());
+        fs::write(context_dir.join("Containerfile"), containerfile)
             .expect("containerfile should be written");
 
         let tag = format!("agentd-runner-test:{}", self.profile_name);
@@ -819,6 +871,11 @@ case "$command_name" in
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "success-empty-env" ]; then
             [ "${EMPTY_SESSION_ENV-__missing__}" = "" ]
             [ "${AGENTD_WORK_UNIT:-}" = "task-42" ]
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "success-without-work-unit" ]; then
+            [ "${AGENTD_WORK_UNIT+set}" != "set" ]
             exit 0
         fi
 
