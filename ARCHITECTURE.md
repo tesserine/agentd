@@ -12,7 +12,7 @@ agentd is:
 agentd is not:
 - **A hosted platform**: there is no control plane operated elsewhere
 - **An AI model**: inference belongs to the chosen runtime or provider
-- **An MCP transport layer**: runtimes such as Codex or Claude Code already speak MCP directly
+- **An MCP transport layer**: MCP-capable runtimes already speak MCP directly
 - **An in-tree domain tool suite**: domain integrations live outside this workspace
 
 The key architectural consequence is simple: agentd may configure tool availability for a runtime, but it does not proxy the MCP wire protocol or ship domain-specific MCP servers inside this repository.

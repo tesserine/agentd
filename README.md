@@ -44,15 +44,13 @@ file — start from [`examples/agentd.toml`](examples/agentd.toml):
 
 [[profiles]]
 # Stable operator-facing profile name used for lookup and container identity.
-name = "codex"
+name = "site-builder"
 # Prebuilt image containing the agent runtime and runa.
-base_image = "ghcr.io/example/codex:latest"
+base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
-# Static session command executed from the cloned repository. This example
-# keeps runa as the runtime, so the profile owns runa initialization, the
-# agent command written into `.runa/config.toml`, and optional work-unit
-# forwarding from the generic AGENTD_WORK_UNIT contract.
+# Static session command executed from the cloned repository. This profile is
+# tightly bound to one app, so the session repo is the project being built.
 command = [
   "/bin/sh",
   "-lc",
@@ -60,7 +58,7 @@ command = [
 runa init --methodology /agentd/methodology/manifest.toml
 cat > .runa/config.toml <<'EOF'
 [agent]
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 EOF
 if [ -n "${AGENTD_WORK_UNIT:-}" ]; then
   exec runa run --work-unit "${AGENTD_WORK_UNIT}"
@@ -70,12 +68,39 @@ exec runa run
 ]
 # Optional environment variable name resolved by the daemon for clone-only
 # repository authentication. This value does not flow into the agent runtime.
-repo_token_source = "CODEX_REPO_TOKEN"
+repo_token_source = "SITE_BUILDER_REPO_TOKEN"
 
 [[profiles.credentials]]
 # Secret name exposed inside the session environment.
 name = "GITHUB_TOKEN"
 # Environment variable name read from the daemon's own process environment.
+source = "AGENTD_GITHUB_TOKEN"
+
+[[profiles]]
+# A home-repo review agent that carries its own review configuration and scans
+# repositories beyond the repo used to launch the session.
+name = "code-reviewer"
+base_image = "ghcr.io/example/code-reviewer:latest"
+methodology_dir = "../groundwork"
+command = [
+  "/bin/sh",
+  "-lc",
+  '''
+runa init --methodology /agentd/methodology/manifest.toml
+cat > .runa/config.toml <<'EOF'
+[agent]
+command = ["code-reviewer", "exec"]
+EOF
+if [ -n "${AGENTD_WORK_UNIT:-}" ]; then
+  exec runa run --work-unit "${AGENTD_WORK_UNIT}"
+fi
+exec runa run
+''',
+]
+repo_token_source = "CODE_REVIEWER_REPO_TOKEN"
+
+[[profiles.credentials]]
+name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 ```
 
@@ -106,15 +131,15 @@ signal exits immediately.
 Trigger a session through the running daemon:
 
 ```bash
-agentd run codex https://github.com/pentaxis93/agentd.git --work-unit issue-42
+agentd run site-builder https://github.com/pentaxis93/agentd.git --work-unit issue-42
 ```
 
 `agentd run` reads the same config file and connects to the socket path defined
-there. This dispatches a session using the `codex` profile. Inside the
+there. This dispatches a session using the `site-builder` profile. Inside the
 container, the agent sees:
 
-- An unprivileged user with `$HOME` at `/home/codex`
-- A fresh clone of the repository at `/home/codex/repo`
+- An unprivileged user with `$HOME` at `/home/site-builder`
+- A fresh clone of the repository at `/home/site-builder/repo`
 - Read-only methodology mount at `/agentd/methodology`
 - Credentials injected as environment variables
 - `AGENTD_WORK_UNIT` when the invocation includes one

@@ -127,7 +127,7 @@ fn build_container_script_terminates_git_clone_options_before_repo_url() {
         },
     );
 
-    assert!(script.contains("git clone --no-hardlinks -- '-repo.git' '/home/codex/repo'"));
+    assert!(script.contains("git clone --no-hardlinks -- '-repo.git' '/home/site-builder/repo'"));
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn build_container_script_creates_home_workspace_and_execs_profile_command_from_
     assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
     assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
     assert!(script.contains("\nexport AGENTD_WORK_UNIT='task-42'\n"));
-    assert!(script.contains("exec gosu 'myprofile:myprofile' 'codex' 'exec'"));
+    assert!(script.contains("exec gosu 'myprofile:myprofile' 'site-builder' 'exec'"));
     assert!(!script.contains("runa init"));
     assert!(!script.contains(".runa/config.toml"));
     assert!(!script.contains("runa run"));
@@ -192,7 +192,7 @@ fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
 
     assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
     assert!(script.contains("\nunset AGENTD_WORK_UNIT\n"));
-    assert!(script.contains("\nexec gosu 'myprofile:myprofile' 'codex' 'exec'"));
+    assert!(script.contains("\nexec gosu 'myprofile:myprofile' 'site-builder' 'exec'"));
 }
 
 #[cfg(unix)]
@@ -290,13 +290,13 @@ fn clone_command_omits_git_auth_environment_when_repo_token_is_absent() {
 #[test]
 fn shell_join_quotes_each_argument_for_direct_exec() {
     let joined = shell_join(&[
-        "codex".to_string(),
+        "site-builder".to_string(),
         "exec".to_string(),
         "--prompt".to_string(),
         "hello world".to_string(),
     ]);
 
-    assert_eq!(joined, "'codex' 'exec' '--prompt' 'hello world'");
+    assert_eq!(joined, "'site-builder' 'exec' '--prompt' 'hello world'");
 }
 
 #[test]

@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Replaced the old vendor-specific example profile across the workspace with role-based examples: operator-facing docs and `examples/agentd.toml` now show `site-builder` and `code-reviewer`, while single-profile tests and runner fixtures use realistic `site-builder` naming instead of product branding.
 - Renamed the config-level concept from "agent" to "profile" across the entire workspace: `[[agents]]` is now `[[profiles]]`, CLI positional argument is `<profile>`, types use `ProfileConfig`/`profile_name`/`validate_profile_name()`, the injected env var is `PROFILE_NAME`, and documentation, error messages, and examples reflect the new terminology. The daemon name `agentd` and references to the running entity as an "agent" are unchanged.
 - Decoupled the profile session-command interface from runa: profiles now declare a top-level `command` array, the runner executes that argv directly from the cloned repository, `AGENTD_WORK_UNIT` carries optional mission context into the runtime environment, and the runa example now shows the full operator-owned bootstrap in profile config.
 

@@ -14,10 +14,10 @@ const VALID_REMOTE_REPO_URL: &str = "https://example.com/agentd.git";
 pub(crate) fn test_session_spec() -> SessionSpec {
     SessionSpec {
         daemon_instance_id: "1a2b3c4d".to_string(),
-        profile_name: "codex".to_string(),
+        profile_name: "site-builder".to_string(),
         base_image: "image".to_string(),
         methodology_dir: PathBuf::from("/tmp/methodology"),
-        command: vec!["codex".to_string(), "exec".to_string()],
+        command: vec!["site-builder".to_string(), "exec".to_string()],
         environment: Vec::new(),
     }
 }
