@@ -133,12 +133,11 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 
 // Generates the shell script passed as the container entrypoint via
 // `/bin/sh -lc`. The script runs as root (UID 0) to perform privileged setup:
-// creating the profile's unix user, cloning the repository, initializing runa
-// with the methodology manifest, writing the command to runa config, and
-// transferring home directory ownership. It then drops privileges permanently
-// via `gosu` and `exec`s `runa run` as the unprivileged profile user. `set -eu`
-// at the top ensures any setup failure aborts immediately rather than
-// continuing with a broken workspace.
+// creating the profile's unix user, cloning the repository, and transferring
+// home directory ownership. It then drops privileges permanently via `gosu`
+// and `exec`s the configured session command as the unprivileged profile user
+// from the cloned repository. `set -eu` at the top ensures any setup failure
+// aborts immediately rather than continuing with a broken workspace.
 fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
     let username = &spec.profile_name;
     let home_dir = format!("{HOME_ROOT_DIR}/{username}");
@@ -154,27 +153,22 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script.push_str(&build_clone_command(invocation, &repo_dir));
     script.push_str("\ncd ");
     script.push_str(&shell_quote(&repo_dir));
-    script.push_str("\nruna init --methodology ");
-    script.push_str(&shell_quote(&format!(
-        "{METHODOLOGY_MOUNT_PATH}/manifest.toml"
-    )));
-    script.push_str("\ncat >> .runa/config.toml <<'EOF'\n[agent]\ncommand = ");
-    script.push_str(&toml_array(&spec.command));
-    script.push_str("\nEOF\nchown -R ");
+    script.push_str("\nchown -R ");
     script.push_str(&shell_quote(&user_group));
     script.push(' ');
     script.push_str(&shell_quote(&home_dir));
     script.push_str("\nexport HOME=");
     script.push_str(&shell_quote(&home_dir));
+    if let Some(work_unit) = &invocation.work_unit {
+        script.push_str("\nexport AGENTD_WORK_UNIT=");
+        script.push_str(&shell_quote(work_unit));
+    } else {
+        script.push_str("\nunset AGENTD_WORK_UNIT");
+    }
     script.push_str("\nexec gosu ");
     script.push_str(&shell_quote(&user_group));
-    script.push_str(" runa run");
-
-    if let Some(work_unit) = &invocation.work_unit {
-        script.push(' ');
-        script.push_str("--work-unit ");
-        script.push_str(&shell_quote(work_unit));
-    }
+    script.push(' ');
+    script.push_str(&shell_join(&spec.command));
 
     script
 }
@@ -633,34 +627,12 @@ fn shell_quote(value: &str) -> String {
     quoted
 }
 
-fn toml_array(values: &[String]) -> String {
-    let items = values
+fn shell_join(values: &[String]) -> String {
+    values
         .iter()
-        .map(|value| toml_string(value))
+        .map(|value| shell_quote(value))
         .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{items}]")
-}
-
-fn toml_string(value: &str) -> String {
-    let mut encoded = String::from("\"");
-    for character in value.chars() {
-        match character {
-            '\\' => encoded.push_str("\\\\"),
-            '"' => encoded.push_str("\\\""),
-            '\u{0008}' => encoded.push_str("\\b"),
-            '\u{000C}' => encoded.push_str("\\f"),
-            '\n' => encoded.push_str("\\n"),
-            '\r' => encoded.push_str("\\r"),
-            '\t' => encoded.push_str("\\t"),
-            other if other.is_control() => {
-                encoded.push_str(&format!("\\u{:04X}", other as u32));
-            }
-            other => encoded.push(other),
-        }
-    }
-    encoded.push('"');
-    encoded
+        .join(" ")
 }
 
 #[cfg(test)]

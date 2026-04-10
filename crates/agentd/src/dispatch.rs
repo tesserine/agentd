@@ -138,7 +138,7 @@ pub fn dispatch_run(
                 profile_name: profile.name().to_string(),
                 base_image: profile.base_image().to_string(),
                 methodology_dir: profile.methodology_dir().to_path_buf(),
-                command: profile.runa().command().to_vec(),
+                command: profile.command().to_vec(),
                 environment,
             },
             SessionInvocation {

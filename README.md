@@ -49,13 +49,28 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
+# Static session command executed from the cloned repository. This example
+# keeps runa as the runtime, so the profile owns runa initialization, the
+# agent command written into `.runa/config.toml`, and optional work-unit
+# forwarding from the generic AGENTD_WORK_UNIT contract.
+command = [
+  "/bin/sh",
+  "-lc",
+  '''
+runa init --methodology /agentd/methodology/manifest.toml
+cat > .runa/config.toml <<'EOF'
+[agent]
+command = ["codex", "exec"]
+EOF
+if [ -n "${AGENTD_WORK_UNIT:-}" ]; then
+  exec runa run --work-unit "${AGENTD_WORK_UNIT}"
+fi
+exec runa run
+''',
+]
 # Optional environment variable name resolved by the daemon for clone-only
 # repository authentication. This value does not flow into the agent runtime.
 repo_token_source = "CODEX_REPO_TOKEN"
-
-[profiles.runa]
-# Static agent-runtime command executed by runa inside the container.
-command = ["codex", "exec"]
 
 [[profiles.credentials]]
 # Secret name exposed inside the session environment.
@@ -66,7 +81,8 @@ source = "AGENTD_GITHUB_TOKEN"
 
 Credential `source` fields name environment variables in the daemon's process
 environment — export them before starting the daemon. The base image must
-provide `/bin/sh`, `git`, `useradd`, and `gosu` in `PATH`.
+provide `/bin/sh`, `git`, `useradd`, `gosu`, and whatever binaries the
+configured session command uses.
 
 ## Running a Session
 
@@ -101,7 +117,8 @@ container, the agent sees:
 - A fresh clone of the repository at `/home/codex/repo`
 - Read-only methodology mount at `/agentd/methodology`
 - Credentials injected as environment variables
-- `runa run` executing the configured command from the repo directory
+- `AGENTD_WORK_UNIT` when the invocation includes one
+- The configured session command executing from the repo directory
 
 The container is force-removed on completion. No session state persists on the
 host.

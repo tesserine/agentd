@@ -118,12 +118,12 @@ The runner prepares the execution environment:
 2. Sets identity inside the container, including `PROFILE_NAME` and a unique container name derived from the profile.
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only.
-5. Creates an unprivileged unix user whose username is the configured profile name, with home directory `/home/{username}`, clones the requested repository into `/home/{username}/repo`, and initializes runa from inside that repository so project state lives at `/home/{username}/repo/.runa/`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the agent runtime starts. Base images that lack `/bin/sh`, `git`, `useradd`, or `gosu` are not supported.
+5. Creates an unprivileged unix user whose username is the configured profile name, with home directory `/home/{username}`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the session command starts. Base images that lack `/bin/sh`, `git`, `useradd`, or `gosu` are not supported.
 6. Recursively transfers ownership of `/home/{username}` to that user, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready.
 
 ### Phase 3: Execution (`agentd-runner`)
 
-The runner drops privileges with `gosu` and launches `runa run` as the unprivileged session user from `/home/{username}/repo`, then supervises the container until natural completion or an optional timeout. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
+The runner drops privileges with `gosu` and launches the profile's configured session command as the unprivileged session user from `/home/{username}/repo`, exporting `AGENTD_WORK_UNIT` when the invocation includes one, then supervises the container until natural completion or an optional timeout. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
 
 ### Phase 4: Teardown (`agentd-runner`)
 
@@ -135,7 +135,7 @@ agentd runs sessions in ephemeral Podman containers so agents remain separated f
 
 | Mount or Injection | Purpose | Need Served |
 |---|---|---|
-| Read-only methodology directory | Expose the runa methodology manifest and protocol assets without allowing mutation | Context |
+| Read-only methodology directory | Expose the configured methodology manifest and protocol assets without allowing mutation | Context |
 | Credentials | Authenticate to external systems without baking secrets into images | Credentials |
 | Home workspace at `/home/{username}` with repo at `/home/{username}/repo` | Give the session a writable standard Linux home and a clean project workspace that starts fresh each run | Mission, Tool Availability, Identity |
 
@@ -144,7 +144,7 @@ From inside the environment, an agent should see:
 - `$HOME` set to `/home/{username}`
 - a read-only methodology mount rooted at `manifest.toml`
 - a fresh writable repository checkout at `/home/{username}/repo`
-- runa project state at `/home/{username}/repo/.runa/`
+- any runtime-managed state the configured session command creates inside the repo or home directory
 - the tools and runtime configuration needed for its assigned work
 
 ## 6. Credential Flow
@@ -158,7 +158,7 @@ names carry its own derived daemon id: dead
 orphaned `agentd-{daemon8}-{session16}-{suffix}` secrets whose session
 container is gone.
 
-Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When a profile declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before `runa run` starts so the token does not persist in git config or the agent runtime environment.
+Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When a profile declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before the session command starts so the token does not persist in git config or the agent runtime environment.
 
 Isolation is per profile: one profile receives only its own declared credentials. Sharing access to the same external service still requires separate credential declarations per profile so compromise remains scoped.
 

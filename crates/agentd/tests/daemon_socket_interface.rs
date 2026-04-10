@@ -132,7 +132,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles.credentials]]
@@ -568,7 +567,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles.credentials]]
@@ -664,7 +662,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )

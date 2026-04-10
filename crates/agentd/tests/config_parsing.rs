@@ -24,7 +24,6 @@ name = "{name}"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#
     ))
@@ -92,10 +91,12 @@ fn parses_example_config_into_static_profile_settings() {
     assert_eq!(profile.base_image(), "ghcr.io/example/codex:latest");
     assert_eq!(profile.methodology_dir(), Path::new("../groundwork"));
     assert_eq!(profile.repo_token_source(), Some("CODEX_REPO_TOKEN"));
-    assert_eq!(
-        profile.runa().command(),
-        &["codex".to_string(), "exec".to_string()]
-    );
+    assert_eq!(profile.command()[0], "/bin/sh");
+    assert_eq!(profile.command()[1], "-lc");
+    assert!(profile.command()[2].contains("runa init --methodology"));
+    assert!(profile.command()[2].contains("/agentd/methodology/manifest.toml"));
+    assert!(profile.command()[2].contains("command = [\"codex\", \"exec\"]"));
+    assert!(profile.command()[2].contains("AGENTD_WORK_UNIT"));
     assert_eq!(profile.credentials().len(), 1);
     assert_eq!(profile.credentials()[0].name(), "GITHUB_TOKEN");
     assert_eq!(profile.credentials()[0].source(), "AGENTD_GITHUB_TOKEN");
@@ -111,7 +112,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     );
@@ -139,7 +139,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     );
@@ -176,7 +175,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     );
@@ -212,7 +210,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     );
@@ -256,7 +253,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -294,7 +290,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -310,7 +305,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -341,7 +335,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -370,7 +363,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -399,7 +391,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -432,7 +423,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -458,7 +448,6 @@ base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "CODEX_REPO_TOKEN"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -479,7 +468,6 @@ base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 repo_token_source = ""
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -501,7 +489,6 @@ base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "{repo_token_source}"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#
         ))
@@ -532,7 +519,6 @@ base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 extra = "nope"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -555,7 +541,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -574,7 +559,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles]]
@@ -582,7 +566,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:stable"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -610,7 +593,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles.credentials]]
@@ -642,7 +624,6 @@ name = ""
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     )
@@ -661,7 +642,6 @@ name = "{name}"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#
         ))
@@ -712,7 +692,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles.credentials]]
@@ -746,7 +725,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles.credentials]]
@@ -774,7 +752,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles.credentials]]
@@ -802,7 +779,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles.credentials]]
@@ -830,7 +806,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = []
 "#,
     )
@@ -843,7 +818,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", ""]
 "#,
     )
@@ -854,7 +828,7 @@ command = ["codex", ""]
 }
 
 #[test]
-fn rejects_missing_runa_table() {
+fn rejects_missing_command_field() {
     let error = Config::from_str(
         r#"
 [[profiles]]
@@ -863,7 +837,25 @@ base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 "#,
     )
-    .expect_err("missing runa table should be rejected");
+    .expect_err("missing command field should be rejected");
+
+    assert!(error.to_string().contains("command"));
+}
+
+#[test]
+fn rejects_legacy_runa_table() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "codex"
+base_image = "ghcr.io/example/codex:latest"
+methodology_dir = "../groundwork"
+
+[profiles.runa]
+command = ["codex", "exec"]
+"#,
+    )
+    .expect_err("legacy runa table should be rejected");
 
     assert!(error.to_string().contains("runa"));
 }
@@ -901,7 +893,6 @@ name = "Codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     );
@@ -925,7 +916,6 @@ name = "Codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     );
@@ -950,7 +940,6 @@ name = "Codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
     );
