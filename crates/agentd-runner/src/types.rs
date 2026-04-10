@@ -27,14 +27,15 @@ pub struct SessionSpec {
     /// [`validate_profile_name`](crate::validate_profile_name).
     pub profile_name: String,
     /// Container image reference. The image must provide `/bin/sh`, `git`,
-    /// `useradd`, `gosu`, and `runa` in `PATH`.
+    /// and the setup/session binaries required by the configured profile
+    /// command in `PATH`, including `useradd` and `gosu`.
     pub base_image: String,
     /// Host-side path to the methodology directory. Mounted read-only into
     /// the container at `/agentd/methodology`. Must contain `manifest.toml`.
     pub methodology_dir: PathBuf,
-    /// Command array written into `.runa/config.toml` as the
-    /// `[agent] command` value. Not a shell command — each element becomes a
-    /// TOML string in the array.
+    /// Command array executed directly from the cloned repository after
+    /// workspace setup. Not a shell command unless the profile explicitly
+    /// configures one (for example, `["/bin/sh", "-lc", "..."]`).
     pub command: Vec<String>,
     /// Caller-resolved environment variables injected into the container.
     /// Non-empty values are passed via ephemeral podman secrets; empty values
@@ -71,7 +72,8 @@ pub struct SessionInvocation {
     /// request for `https://` repository URLs. This token is not passed
     /// through to the agent runtime.
     pub repo_token: Option<String>,
-    /// Optional work unit identifier passed as `--work-unit` to `runa run`.
+    /// Optional work unit identifier exposed to the session command through
+    /// the runner-managed `AGENTD_WORK_UNIT` environment variable when set.
     pub work_unit: Option<String>,
     /// Optional session timeout. When set, the runner force-removes the
     /// container after this duration and returns

@@ -12,6 +12,7 @@ use crate::types::{
 };
 
 const PROFILE_NAME_ENV: &str = "PROFILE_NAME";
+const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
 pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
 const RESERVED_PROFILE_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
@@ -74,7 +75,8 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
 /// Validates an environment variable name against naming rules.
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
-/// runner-managed names (currently `PROFILE_NAME` and `AGENTD_REPO_TOKEN`). Used both by
+/// runner-managed names (currently `PROFILE_NAME`, `AGENTD_WORK_UNIT`, and
+/// `AGENTD_REPO_TOKEN`). Used both by
 /// [`run_session`](crate::run_session) during spec validation and by the
 /// configuration layer for credential name validation.
 pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValidationError> {
@@ -172,7 +174,7 @@ fn repo_token_requires_https_error() -> RunnerError {
 }
 
 fn is_reserved_environment_name(name: &str) -> bool {
-    matches!(name, PROFILE_NAME_ENV | REPO_TOKEN_ENV)
+    matches!(name, PROFILE_NAME_ENV | WORK_UNIT_ENV | REPO_TOKEN_ENV)
 }
 
 fn is_reserved_profile_name(name: &str) -> bool {
@@ -205,7 +207,7 @@ mod tests {
 
     #[test]
     fn validate_spec_rejects_reserved_environment_names() {
-        for reserved_name in ["PROFILE_NAME", REPO_TOKEN_ENV] {
+        for reserved_name in ["PROFILE_NAME", WORK_UNIT_ENV, REPO_TOKEN_ENV] {
             let error = validate_spec(&SessionSpec {
                 environment: vec![ResolvedEnvironmentVariable {
                     name: reserved_name.to_string(),

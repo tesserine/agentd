@@ -3,8 +3,8 @@
 //! Logging is configured entirely through environment variables for now:
 //! `RUST_LOG` overrides `AGENTD_LOG` for filter selection, and
 //! `AGENTD_LOG_FORMAT` selects `json` or `pretty` output on stderr. The
-//! configuration shape intentionally mirrors `runa` so the bootstrap can move
-//! into a shared ecosystem crate later without changing call sites.
+//! configuration shape stays environment-driven so the bootstrap can move into
+//! a shared ecosystem crate later without changing call sites.
 
 use std::fmt;
 use std::io::{self, Write};

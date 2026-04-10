@@ -146,7 +146,8 @@ fn build_container_script_disables_git_terminal_prompts() {
 }
 
 #[test]
-fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unprivileged_user() {
+fn build_container_script_creates_home_workspace_and_execs_profile_command_from_repo_as_unprivileged_user()
+ {
     let script = build_container_script(
         &crate::SessionSpec {
             profile_name: "myprofile".to_string(),
@@ -165,11 +166,13 @@ fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unp
         "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/myprofile/repo'"
     ));
     assert!(script.contains("\ncd '/home/myprofile/repo'\n"));
-    assert!(script.contains("runa init --methodology '/agentd/methodology/manifest.toml'"));
-    assert!(script.contains("cat >> .runa/config.toml <<'EOF'"));
     assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
     assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
-    assert!(script.contains("exec gosu 'myprofile:myprofile' runa run --work-unit 'task-42'"));
+    assert!(script.contains("\nexport AGENTD_WORK_UNIT='task-42'\n"));
+    assert!(script.contains("exec gosu 'myprofile:myprofile' 'codex' 'exec'"));
+    assert!(!script.contains("runa init"));
+    assert!(!script.contains(".runa/config.toml"));
+    assert!(!script.contains("runa run"));
 }
 
 #[cfg(unix)]
@@ -265,17 +268,15 @@ fn clone_command_omits_git_auth_environment_when_repo_token_is_absent() {
 }
 
 #[test]
-fn toml_string_escapes_control_characters_into_valid_toml() {
-    let original = "before\x08middle\x0cafter\0tail";
-    let encoded = toml_string(original);
-    let document = format!("value = {encoded}\n");
-    let parsed: toml::Value =
-        toml::from_str(&document).expect("escaped string should parse as TOML");
+fn shell_join_quotes_each_argument_for_direct_exec() {
+    let joined = shell_join(&[
+        "codex".to_string(),
+        "exec".to_string(),
+        "--prompt".to_string(),
+        "hello world".to_string(),
+    ]);
 
-    assert_eq!(
-        parsed.get("value").and_then(toml::Value::as_str),
-        Some(original)
-    );
+    assert_eq!(joined, "'codex' 'exec' '--prompt' 'hello world'");
 }
 
 #[test]

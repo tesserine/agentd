@@ -55,7 +55,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
         socket_path = socket_path.display(),
@@ -75,7 +74,6 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 
 [[profiles.credentials]]
@@ -367,7 +365,6 @@ name = "Codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
 command = ["codex", "exec"]
 "#,
             socket_path = socket_path.display(),

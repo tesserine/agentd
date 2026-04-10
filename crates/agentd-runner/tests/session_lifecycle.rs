@@ -45,7 +45,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
                     value: "test-token".to_string(),
                 },
                 ResolvedEnvironmentVariable {
-                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    name: "SESSION_TEST_BEHAVIOR".to_string(),
                     value: "success".to_string(),
                 },
             ],
@@ -93,7 +93,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
                     value: String::new(),
                 },
                 ResolvedEnvironmentVariable {
-                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    name: "SESSION_TEST_BEHAVIOR".to_string(),
                     value: "success-empty-env".to_string(),
                 },
             ],
@@ -139,7 +139,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
                     value: "test-token".to_string(),
                 },
                 ResolvedEnvironmentVariable {
-                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    name: "SESSION_TEST_BEHAVIOR".to_string(),
                     value: "fail".to_string(),
                 },
             ],
@@ -185,7 +185,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
                     value: "test-token".to_string(),
                 },
                 ResolvedEnvironmentVariable {
-                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    name: "SESSION_TEST_BEHAVIOR".to_string(),
                     value: "fail-125".to_string(),
                 },
             ],
@@ -232,7 +232,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
                     value: "test-token".to_string(),
                 },
                 ResolvedEnvironmentVariable {
-                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    name: "SESSION_TEST_BEHAVIOR".to_string(),
                     value: "success".to_string(),
                 },
             ],
@@ -276,7 +276,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
                     value: "test-token".to_string(),
                 },
                 ResolvedEnvironmentVariable {
-                    name: "RUNA_TEST_BEHAVIOR".to_string(),
+                    name: "SESSION_TEST_BEHAVIOR".to_string(),
                     value: "sleep".to_string(),
                 },
             ],
@@ -323,7 +323,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                         value: "test-token".to_string(),
                     },
                     ResolvedEnvironmentVariable {
-                        name: "RUNA_TEST_BEHAVIOR".to_string(),
+                        name: "SESSION_TEST_BEHAVIOR".to_string(),
                         value: "sleep-short".to_string(),
                     },
                 ],
@@ -405,7 +405,7 @@ impl SessionFixture {
         let context_dir = self.root.join("image-context");
         fs::create_dir_all(&context_dir).expect("image context should be created");
 
-        fs::write(context_dir.join("runa"), RUNA_STUB).expect("runa stub should be written");
+        fs::write(context_dir.join("codex"), CODEX_STUB).expect("codex stub should be written");
         fs::write(context_dir.join("entrypoint.sh"), ENTRYPOINT_SH)
             .expect("entrypoint script should be written");
         fs::write(context_dir.join("Containerfile"), CONTAINERFILE)
@@ -657,9 +657,9 @@ FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git gosu passwd \
     && rm -rf /var/lib/apt/lists/*
-COPY runa /usr/local/bin/runa
+COPY codex /usr/local/bin/codex
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /usr/local/bin/runa /entrypoint.sh
+RUN chmod +x /usr/local/bin/codex /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 "#;
 
@@ -790,23 +790,14 @@ fn write_http_response(stream: &mut TcpStream, status: &str, body: &[u8], head_o
     }
 }
 
-const RUNA_STUB: &str = r#"#!/bin/sh
+const CODEX_STUB: &str = r#"#!/bin/sh
 set -eu
 
 command_name="$1"
 shift
 
 case "$command_name" in
-    init)
-        [ "$1" = "--methodology" ]
-        [ -f "$2" ]
-        mkdir -p .runa
-        cat > .runa/config.toml <<'EOF'
-[project]
-name = "test-project"
-EOF
-        ;;
-    run)
+    exec)
         [ -f /agentd/methodology/manifest.toml ]
         [ "${PROFILE_NAME:-}" != "" ]
         if [ "${GITHUB_TOKEN+set}" = "set" ]; then
@@ -819,48 +810,43 @@ EOF
         [ -w "${HOME}" ]
         [ -w "${HOME}/repo" ]
         [ -f "${HOME}/repo/README.md" ]
-        [ -f "${HOME}/repo/.runa/config.toml" ]
-        [ ! -e "${HOME}/.runa/config.toml" ]
-        grep -F 'command = ["codex", "exec"' .runa/config.toml >/dev/null
 
-        if [ "${RUNA_TEST_BEHAVIOR:-success}" = "success" ]; then
-            [ "$1" = "--work-unit" ]
-            [ "$2" = "task-42" ]
+        if [ "${SESSION_TEST_BEHAVIOR:-success}" = "success" ]; then
+            [ "${AGENTD_WORK_UNIT:-}" = "task-42" ]
             exit 0
         fi
 
-        if [ "${RUNA_TEST_BEHAVIOR:-}" = "success-empty-env" ]; then
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "success-empty-env" ]; then
             [ "${EMPTY_SESSION_ENV-__missing__}" = "" ]
-            [ "$1" = "--work-unit" ]
-            [ "$2" = "task-42" ]
+            [ "${AGENTD_WORK_UNIT:-}" = "task-42" ]
             exit 0
         fi
 
-        if [ "${RUNA_TEST_BEHAVIOR:-}" = "fail" ]; then
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "fail" ]; then
             [ "$#" = "0" ]
             exit 23
         fi
 
-        if [ "${RUNA_TEST_BEHAVIOR:-}" = "fail-125" ]; then
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "fail-125" ]; then
             [ "$#" = "0" ]
             exit 125
         fi
 
-        if [ "${RUNA_TEST_BEHAVIOR:-}" = "sleep" ]; then
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "sleep" ]; then
             sleep 30
             exit 0
         fi
 
-        if [ "${RUNA_TEST_BEHAVIOR:-}" = "sleep-short" ]; then
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "sleep-short" ]; then
             sleep 5
             exit 0
         fi
 
-        echo "unknown RUNA_TEST_BEHAVIOR=${RUNA_TEST_BEHAVIOR:-}" >&2
+        echo "unknown SESSION_TEST_BEHAVIOR=${SESSION_TEST_BEHAVIOR:-}" >&2
         exit 99
         ;;
     *)
-        echo "unexpected runa subcommand: $command_name" >&2
+        echo "unexpected codex subcommand: $command_name" >&2
         exit 98
         ;;
 esac

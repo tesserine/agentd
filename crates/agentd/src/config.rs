@@ -111,20 +111,15 @@ impl Config {
                 None => None,
             };
 
-            if raw_profile.runa.command.is_empty() {
+            if raw_profile.command.is_empty() {
                 return Err(ConfigError::EmptyCommand {
                     profile: raw_profile.name.clone(),
                 });
             }
 
-            let mut command = Vec::with_capacity(raw_profile.runa.command.len());
-            for element in raw_profile.runa.command {
-                validate_non_empty(
-                    "runa.command",
-                    &element,
-                    Some(raw_profile.name.as_str()),
-                    None,
-                )?;
+            let mut command = Vec::with_capacity(raw_profile.command.len());
+            for element in raw_profile.command {
+                validate_non_empty("command", &element, Some(raw_profile.name.as_str()), None)?;
                 command.push(element);
             }
 
@@ -170,7 +165,7 @@ impl Config {
                 methodology_dir,
                 repo_token_source,
                 credentials,
-                runa: RunaConfig { command },
+                command,
             });
         }
 
@@ -202,7 +197,7 @@ pub struct ProfileConfig {
     methodology_dir: PathBuf,
     repo_token_source: Option<String>,
     credentials: Vec<CredentialConfig>,
-    runa: RunaConfig,
+    command: Vec<String>,
 }
 
 impl ProfileConfig {
@@ -236,9 +231,9 @@ impl ProfileConfig {
         &self.credentials
     }
 
-    /// Runa runtime configuration for this profile.
-    pub fn runa(&self) -> &RunaConfig {
-        &self.runa
+    /// Static session command executed from the cloned repository.
+    pub fn command(&self) -> &[String] {
+        &self.command
     }
 }
 
@@ -264,21 +259,6 @@ impl CredentialConfig {
     /// process environment.
     pub fn source(&self) -> &str {
         &self.source
-    }
-}
-
-/// Runa runtime configuration for a profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunaConfig {
-    command: Vec<String>,
-}
-
-impl RunaConfig {
-    /// Static command array written into `.runa/config.toml` as the
-    /// `[agent] command` value. Not a shell command — each element becomes
-    /// a TOML string in the array. Must contain at least one element.
-    pub fn command(&self) -> &[String] {
-        &self.command
     }
 }
 
@@ -384,7 +364,7 @@ pub enum ConfigError {
     },
     /// Deriving the daemon instance id requires absolute daemon runtime paths.
     RelativeDaemonRuntimePath { field: &'static str, path: PathBuf },
-    /// The `runa.command` array is empty for a profile.
+    /// The `command` array is empty for a profile.
     EmptyCommand { profile: String },
 }
 
@@ -459,10 +439,7 @@ impl fmt::Display for ConfigError {
                 )
             }
             ConfigError::EmptyCommand { profile } => {
-                write!(
-                    f,
-                    "profile '{profile}' must define a non-empty runa.command"
-                )
+                write!(f, "profile '{profile}' must define a non-empty command")
             }
         }
     }
@@ -532,10 +509,10 @@ struct RawProfileConfig {
     name: String,
     base_image: String,
     methodology_dir: String,
+    command: Vec<String>,
     repo_token_source: Option<String>,
     #[serde(default)]
     credentials: Vec<RawCredentialConfig>,
-    runa: RawRunaConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -543,12 +520,6 @@ struct RawProfileConfig {
 struct RawCredentialConfig {
     name: String,
     source: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawRunaConfig {
-    command: Vec<String>,
 }
 
 fn default_daemon_socket_path() -> String {

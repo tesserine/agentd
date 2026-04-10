@@ -8,13 +8,28 @@ name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
+# Static session command executed from the cloned repository. This example
+# keeps runa as the runtime, so the profile owns runa initialization, the
+# agent command written into `.runa/config.toml`, and optional work-unit
+# forwarding from the generic AGENTD_WORK_UNIT contract.
+command = [
+  "/bin/sh",
+  "-lc",
+  '''
+runa init --methodology /agentd/methodology/manifest.toml
+cat > .runa/config.toml <<'EOF'
+[agent]
+command = ["codex", "exec"]
+EOF
+if [ -n "${AGENTD_WORK_UNIT:-}" ]; then
+  exec runa run --work-unit "${AGENTD_WORK_UNIT}"
+fi
+exec runa run
+''',
+]
 # Optional environment variable name resolved by the daemon for clone-only
 # repository authentication. This value does not flow into the agent runtime.
 repo_token_source = "CODEX_REPO_TOKEN"
-
-[profiles.runa]
-# Static agent-runtime command executed by runa inside the container.
-command = ["codex", "exec"]
 
 [[profiles.credentials]]
 # Secret name exposed inside the session environment.
