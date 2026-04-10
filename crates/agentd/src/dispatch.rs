@@ -99,11 +99,12 @@ pub fn dispatch_run(
     request: &RunRequest,
     executor: &impl SessionExecutor,
 ) -> Result<SessionOutcome, DispatchError> {
-    let profile = config
-        .profile(&request.profile)
-        .ok_or_else(|| DispatchError::UnknownProfile {
-            profile: request.profile.clone(),
-        })?;
+    let profile =
+        config
+            .profile(&request.profile)
+            .ok_or_else(|| DispatchError::UnknownProfile {
+                profile: request.profile.clone(),
+            })?;
     let daemon_instance_id = config.daemon().daemon_instance_id()?;
 
     let environment = profile

@@ -200,7 +200,7 @@ fn is_valid_unix_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_support::test_session_spec, ResolvedEnvironmentVariable};
+    use crate::{ResolvedEnvironmentVariable, test_support::test_session_spec};
     use std::path::PathBuf;
 
     #[test]
@@ -354,8 +354,8 @@ mod tests {
     #[test]
     fn validate_profile_name_rejects_reserved_names() {
         for profile_name in ["root", "nobody", "daemon", "bin", "sys", "man", "mail"] {
-            let error = validate_profile_name(profile_name)
-                .expect_err("reserved names should be rejected");
+            let error =
+                validate_profile_name(profile_name).expect_err("reserved names should be rejected");
 
             assert_eq!(
                 error,

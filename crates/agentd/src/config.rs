@@ -459,7 +459,10 @@ impl fmt::Display for ConfigError {
                 )
             }
             ConfigError::EmptyCommand { profile } => {
-                write!(f, "profile '{profile}' must define a non-empty runa.command")
+                write!(
+                    f,
+                    "profile '{profile}' must define a non-empty runa.command"
+                )
             }
         }
     }

@@ -114,10 +114,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
             .daemon_instance_id()
             .expect("daemon instance id should resolve")
     );
-    assert_eq!(
-        spec.command,
-        vec!["codex".to_string(), "exec".to_string()]
-    );
+    assert_eq!(spec.command, vec!["codex".to_string(), "exec".to_string()]);
     assert_eq!(
         spec.environment,
         vec![ResolvedEnvironmentVariable {

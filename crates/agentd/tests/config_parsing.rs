@@ -75,7 +75,9 @@ fn write_temp_config_under(base_dir: &Path, name: &str, contents: &str) -> PathB
 #[test]
 fn parses_example_config_into_static_profile_settings() {
     let config = Config::from_str(&example_config()).expect("example config should parse");
-    let profile = config.profile("codex").expect("example profile should exist");
+    let profile = config
+        .profile("codex")
+        .expect("example profile should exist");
 
     assert_eq!(config.profiles().len(), 1);
     assert_eq!(
