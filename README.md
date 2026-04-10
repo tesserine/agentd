@@ -29,8 +29,8 @@ injection, execution, and teardown. Startup reconciliation cleans stale
 resources from prior runs. Structured JSON tracing provides operational
 visibility.
 
-Scheduling policy (the `agentd-scheduler` crate) does not exist yet — sessions
-are triggered manually through the daemon's Unix socket.
+Scheduling policy does not exist yet — sessions are triggered manually via
+`agentd run`.
 
 ## Configuration
 
@@ -79,9 +79,13 @@ Start the daemon:
 agentd daemon --config /etc/agentd/agentd.toml
 ```
 
+`agentd` with no subcommand is equivalent to `agentd daemon`.
+
 The daemon runs in the foreground, reconciles stale resources from prior runs,
 and binds a Unix socket for operator control. Default paths:
-`/run/agentd/agentd.sock` and `/run/agentd/agentd.pid`.
+`/run/agentd/agentd.sock` and `/run/agentd/agentd.pid`. On SIGINT or SIGTERM,
+the daemon stops accepting connections and drains in-flight sessions; a second
+signal exits immediately.
 
 Trigger a session through the running daemon:
 
@@ -89,8 +93,9 @@ Trigger a session through the running daemon:
 agentd run codex https://github.com/pentaxis93/agentd.git --work-unit issue-42
 ```
 
-This connects to the daemon's socket and dispatches a session using the `codex`
-profile. Inside the container, the agent sees:
+`agentd run` reads the same config file and connects to the socket path defined
+there. This dispatches a session using the `codex` profile. Inside the
+container, the agent sees:
 
 - An unprivileged user with `$HOME` at `/home/codex`
 - A fresh clone of the repository at `/home/codex/repo`
