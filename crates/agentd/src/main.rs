@@ -17,6 +17,7 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
 enum RunCommandError {
     Failed { exit_code: i32 },
     TimedOut,
+    UnknownProfile { profile: String },
     MissingRepo { profile: String },
 }
 
@@ -25,6 +26,7 @@ impl fmt::Display for RunCommandError {
         match self {
             Self::Failed { exit_code } => write!(f, "session failed (exit code {exit_code})"),
             Self::TimedOut => write!(f, "session timed out"),
+            Self::UnknownProfile { profile } => write!(f, "unknown profile '{profile}'"),
             Self::MissingRepo { profile } => write!(
                 f,
                 "profile '{profile}' requires a repo argument or configured profile repo"
@@ -142,15 +144,17 @@ fn resolve_run_repo(
     }
 
     let config = Config::load(config_path)?;
-    config
-        .profile(profile)
-        .and_then(|profile| profile.repo())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            Box::new(RunCommandError::MissingRepo {
-                profile: profile.to_string(),
-            }) as Box<dyn std::error::Error>
-        })
+    let profile = config.profile(profile).ok_or_else(|| {
+        Box::new(RunCommandError::UnknownProfile {
+            profile: profile.to_string(),
+        }) as Box<dyn std::error::Error>
+    })?;
+
+    profile.repo().map(str::to_owned).ok_or_else(|| {
+        Box::new(RunCommandError::MissingRepo {
+            profile: profile.name().to_string(),
+        }) as Box<dyn std::error::Error>
+    })
 }
 
 #[cfg(test)]

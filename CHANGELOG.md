@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file.
 
 - Clarified the credential source contract so examples, config doc comments, and architecture docs now describe `source` as a daemon-process environment variable name resolved with `std::env::var`, not an opaque secret-store reference.
 - Changed `agentd run` so the repo argument is optional when the selected profile declares a default `repo`, while an explicit CLI repo still overrides the configured default.
+- Fixed the daemon exit path for scheduled profiles so hard listener `accept()` failures now assert shared shutdown before joining the scheduler thread, avoiding a shutdown hang that could mask the original accept error.
+- Restored `agentd run <profile>` diagnostics when the repo argument is omitted so unknown profiles report `unknown profile '<name>'` instead of incorrectly reporting a missing configured repo.
 - Renamed the `agentd` crate's shared dispatch-layer request and helper APIs from manual/operator-specific names to source-agnostic run names, including the socket-interface integration test surface, so scheduler and operator callers share one clearly neutral dispatch path.
 - Removed the placeholder `mcp-transport` and `forgejo-mcp` crates so the workspace now contains only `agentd`, `agentd-runner`, and `agentd-scheduler`, and added coverage that enforces that three-crate contract.
 - Removed the vendored methodology skill distribution layer from the repository, including loadout configuration, manifests, sync and verify scripts, vendored skill copies, and related smoke tests.

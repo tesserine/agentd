@@ -427,6 +427,50 @@ fn binary_run_command_reports_clear_error_when_repo_is_missing_from_cli_and_prof
 }
 
 #[test]
+fn binary_run_command_reports_unknown_profile_when_repo_argument_is_omitted() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-unknown-profile-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-unknown-profile",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "unknown-profile",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        !output.status.success(),
+        "run command should fail for an unknown profile"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert!(
+        stderr.contains("unknown profile 'unknown-profile'"),
+        "expected unknown-profile error, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("requires a repo argument or configured profile repo"),
+        "unknown-profile failure should not be reported as missing repo: {stderr}"
+    );
+}
+
+#[test]
 fn binary_run_command_exits_non_zero_and_reports_failed_sessions_on_stderr() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-failed-{}-{}",

@@ -238,10 +238,15 @@ where
     };
 
     let finish_result = finish_daemon_loop(|| runtime.begin_shutdown(), handlers, loop_result);
-    join_scheduler_thread(scheduler_handle);
+    stop_scheduler_thread(shutdown.as_ref(), scheduler_handle);
     finish_result.map_err(DaemonError::Io)?;
     tracing::info!(event = "agentd.daemon_stopped", "agentd daemon stopped");
     Ok(())
+}
+
+fn stop_scheduler_thread(shutdown: &AtomicBool, handle: Option<JoinHandle<()>>) {
+    shutdown.store(true, Ordering::Release);
+    join_scheduler_thread(handle);
 }
 
 fn finish_daemon_loop<F>(
@@ -943,6 +948,42 @@ source = "AGENTD_GITHUB_TOKEN"
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(error.to_string(), "accept failed");
+    }
+
+    #[test]
+    fn stopping_scheduler_thread_sets_shutdown_before_joining() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let scheduler_shutdown = Arc::clone(&shutdown);
+        let scheduler = thread::spawn(move || {
+            while !scheduler_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let (done_tx, done_rx) = mpsc::channel();
+        let join_shutdown = Arc::clone(&shutdown);
+        let joiner = thread::spawn(move || {
+            super::stop_scheduler_thread(join_shutdown.as_ref(), Some(scheduler));
+            done_tx
+                .send(())
+                .expect("scheduler stop should report completion");
+        });
+
+        let finished_quickly = done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        if !finished_quickly {
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
+        }
+        joiner
+            .join()
+            .expect("scheduler stopper should join cleanly");
+
+        assert!(
+            finished_quickly,
+            "stopping the scheduler should set shutdown before joining"
+        );
+        assert!(
+            shutdown.load(std::sync::atomic::Ordering::Acquire),
+            "stopping the scheduler should leave shutdown asserted"
+        );
     }
 
     #[test]
