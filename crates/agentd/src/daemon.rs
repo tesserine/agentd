@@ -164,8 +164,11 @@ impl From<OutcomeMessage> for SessionOutcome {
     }
 }
 
-/// Run the foreground daemon until `shutdown` becomes true, then stop accepting
-/// new connections and wait for started handlers to finish.
+/// Run the foreground daemon through one structured lifecycle: claim runtime,
+/// reconcile startup resources, bind the listener, start the scheduler, accept
+/// connections until shutdown begins or listener accept fails, then assert the
+/// shared shutdown flag, stop accepting new connections, drain started
+/// handlers, stop the scheduler, and clean up runtime-owned resources.
 pub fn run_daemon_until_shutdown(
     config: Config,
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
