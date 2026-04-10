@@ -1,8 +1,8 @@
-# Static agent registry for agentd.
+# Static profile registry for agentd.
 # Session-specific inputs such as repo and work unit come from the CLI at run time.
 
-[[agents]]
-# Stable operator-facing agent name used for lookup and container identity.
+[[profiles]]
+# Stable operator-facing profile name used for lookup and container identity.
 name = "codex"
 # Prebuilt image containing the agent runtime and runa.
 base_image = "ghcr.io/example/codex:latest"
@@ -12,11 +12,11 @@ methodology_dir = "../groundwork"
 # repository authentication. This value does not flow into the agent runtime.
 repo_token_source = "CODEX_REPO_TOKEN"
 
-[agents.runa]
+[profiles.runa]
 # Static agent-runtime command executed by runa inside the container.
 command = ["codex", "exec"]
 
-[[agents.credentials]]
+[[profiles.credentials]]
 # Secret name exposed inside the session environment.
 name = "GITHUB_TOKEN"
 # Environment variable name read from the daemon's own process environment.

@@ -127,7 +127,7 @@ fn build_container_script_terminates_git_clone_options_before_repo_url() {
         },
     );
 
-    assert!(script.contains("git clone --no-hardlinks -- '-repo.git' '/home/agent/repo'"));
+    assert!(script.contains("git clone --no-hardlinks -- '-repo.git' '/home/codex/repo'"));
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn build_container_script_disables_git_terminal_prompts() {
 fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unprivileged_user() {
     let script = build_container_script(
         &crate::SessionSpec {
-            agent_name: "agent_name".to_string(),
+            profile_name: "myprofile".to_string(),
             ..test_session_spec()
         },
         &SessionInvocation {
@@ -160,16 +160,16 @@ fn build_container_script_creates_home_workspace_and_execs_runa_from_repo_as_unp
         },
     );
 
-    assert!(script.contains("useradd --create-home --home-dir '/home/agent_name' --shell /bin/sh --user-group 'agent_name'"));
+    assert!(script.contains("useradd --create-home --home-dir '/home/myprofile' --shell /bin/sh --user-group 'myprofile'"));
     assert!(script.contains(
-        "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/agent_name/repo'"
+        "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/myprofile/repo'"
     ));
-    assert!(script.contains("\ncd '/home/agent_name/repo'\n"));
+    assert!(script.contains("\ncd '/home/myprofile/repo'\n"));
     assert!(script.contains("runa init --methodology '/agentd/methodology/manifest.toml'"));
     assert!(script.contains("cat >> .runa/config.toml <<'EOF'"));
-    assert!(script.contains("\nchown -R 'agent_name:agent_name' '/home/agent_name'\n"));
-    assert!(script.contains("\nexport HOME='/home/agent_name'\n"));
-    assert!(script.contains("exec gosu 'agent_name:agent_name' runa run --work-unit 'task-42'"));
+    assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
+    assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
+    assert!(script.contains("exec gosu 'myprofile:myprofile' runa run --work-unit 'task-42'"));
 }
 
 #[cfg(unix)]
@@ -362,7 +362,7 @@ fn attached_start_classifies_exit_code_125_as_runner_error() {
 }
 
 #[test]
-fn attached_start_preserves_agent_exit_code_125_when_inspection_reports_terminal_exit() {
+fn attached_start_preserves_exit_code_125_when_inspection_reports_terminal_exit() {
     let outcome = classify_attached_start_result_with_inspector(
         vec![
             "start".to_string(),
@@ -390,7 +390,7 @@ fn attached_start_classifies_nonzero_exit_as_session_failure() {
         exit_status(23),
         String::new(),
     )
-    .expect("agent exit codes should remain session outcomes");
+    .expect("nonzero exit codes should remain session outcomes");
 
     assert_eq!(outcome, SessionOutcome::Failed { exit_code: 23 });
 }
@@ -461,7 +461,7 @@ fn logs_attached_start_finalization_failures_with_finalization_prefix() {
             "session execution",
             "agentd-agent-session",
             "session-123",
-            &RunnerError::InvalidAgentCommand,
+            &RunnerError::InvalidCommand,
         );
     });
 
@@ -472,7 +472,7 @@ fn logs_attached_start_finalization_failures_with_finalization_prefix() {
     );
     assert_eq!(
         event["fields"]["error"],
-        "agent_command must contain at least one argument"
+        "command must contain at least one argument"
     );
 }
 
@@ -650,11 +650,11 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let fixture = FakePodmanFixture::new();
     fixture.install(&FakePodmanScenario::new());
-    let agent_name = "agent_name";
+    let profile_name = "myprofile";
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        agent_name: agent_name.to_string(),
+        profile_name: profile_name.to_string(),
         methodology_dir,
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
@@ -686,10 +686,10 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
         .expect("secret create should include a secret name");
 
     let daemon_instance_id = test_session_spec().daemon_instance_id;
-    let container_prefix = format!("agentd-{daemon_instance_id}-{agent_name}-");
+    let container_prefix = format!("agentd-{daemon_instance_id}-{profile_name}-");
     let session_id = container_name
         .strip_prefix(&container_prefix)
-        .expect("container name should include daemon and agent prefix");
+        .expect("container name should include daemon and profile prefix");
     let stage_suffix = stage_dir_name
         .strip_prefix("agentd-session-stage-")
         .expect("staging dir should include session stage prefix");

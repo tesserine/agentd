@@ -17,6 +17,11 @@ agentd is not:
 
 The key architectural consequence is simple: agentd may configure tool availability for a runtime, but it does not proxy the MCP wire protocol or ship domain-specific MCP servers inside this repository.
 
+### Terminology
+
+- **Profile**: a named, reusable environment specification in the daemon config — base image, methodology, credentials, and command. What the operator declares.
+- **Session**: a single execution created from a profile plus invocation parameters (repo, work unit, timeout). What the runner manages.
+
 ## 2. Agent Capability Needs
 
 Every structural decision in the workspace traces to a capability an agent session must eventually have.
@@ -31,13 +36,13 @@ Every structural decision in the workspace traces to a capability an agent sessi
 
 **Need:** agents authenticate to those external services.
 
-**Constraint:** credentials are injected at session setup and remain scoped to the owning agent.
+**Constraint:** credentials are injected at session setup and remain scoped to the owning profile.
 
 ### Identity
 
 **Need:** agents know who they are and can be distinguished clearly per session.
 
-**Constraint:** each session receives stable identity variables and an agent-derived container name inside an ephemeral runtime.
+**Constraint:** each session receives stable identity variables and a profile-derived container name inside an ephemeral runtime.
 
 ### Mission
 
@@ -64,18 +69,18 @@ The workspace contains three crates because there are three distinct rates of ch
 | Crate | Responsibility | Needs Served | Boundary Rationale |
 |---|---|---|---|
 | `agentd` | Composition root and daemon entrypoint. Parses configuration, owns the Unix socket intake, assembles runner and scheduler components, and starts the process. | All, as orchestration | Keeps the binary thin and prevents subsystem concerns from collapsing into the entrypoint while preserving one uniform dispatch path into session execution. |
-| `agentd-runner` | Session lifecycle. Creates execution environments, injects identity, credentials, context, and tool configuration, launches runtimes, and tears sessions down. | Identity, Credentials, Mission, Tool Availability, Context, Network policy application | Session mechanics change independently from scheduling policy and should remain isolated. |
-| `agentd-scheduler` | Triggering and timing. Determines when an agent session should start and with what mission context. | Mission | Scheduling policy has its own evolution path and should not be coupled to session setup mechanics. |
+| `agentd-runner` | Session lifecycle. Creates execution environments, injects identity, credentials, context, and tool configuration, launches runtimes, and tears sessions down. | Identity, Credentials, Mission, Tool Availability, Context, Network policy application | Session mechanics change independently of scheduling policy and should remain isolated. |
+| `agentd-scheduler` | Triggering and timing. Determines when a session should start and with what mission context. | Mission | Scheduling policy has its own evolution path and should not be coupled to session setup mechanics. |
 
 **Reading the table:** if the change is about when work starts, it belongs in `agentd-scheduler`. If it is about how a session is prepared, launched, or cleaned up, it belongs in `agentd-runner`. If it is about wiring the whole daemon together, it belongs in `agentd`.
 
 ## 4. Session Lifecycle
 
-A session is one execution of one agent from trigger to teardown.
+A session is one execution created from a profile, spanning trigger to teardown.
 
 Before the daemon accepts any session trigger, it first reconciles stale
 runner-managed Podman resources from prior runs of the same daemon instance.
-Dead session containers named `agentd-{daemon8}-{agent}-{session16}` are
+Dead session containers named `agentd-{daemon8}-{profile}-{session16}` are
 removed, then orphaned runner-managed secrets named
 `agentd-{daemon8}-{session16}-{suffix}` whose session container no longer
 exists are removed. The daemon instance id is derived from the configured
@@ -99,7 +104,7 @@ environment configuration.
 
 ### Phase 1: Scheduling (`agentd-scheduler`)
 
-The scheduler determines when an agent should run. Triggers may come from
+The scheduler determines when a session should run. Triggers may come from
 time-based schedules, external events, or continuous policies. When scheduling
 decides to start a session, the scheduler is a socket client: it dispatches a
 run request through the daemon's Unix socket, using the same intake path as
@@ -109,16 +114,16 @@ manual CLI invocation. The scheduler does not call the runner directly.
 
 The runner prepares the execution environment:
 
-1. Creates an ephemeral Podman container from the agent's configured base image. That image must provide a POSIX-compatible shell at `/bin/sh` because the runner's container entrypoint executes through that path.
-2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
+1. Creates an ephemeral Podman container from the profile's configured base image. That image must provide a POSIX-compatible shell at `/bin/sh` because the runner's container entrypoint executes through that path.
+2. Sets identity inside the container, including `PROFILE_NAME` and a unique container name derived from the profile.
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only.
-5. Creates an unprivileged unix user whose username is the configured agent name, with home directory `/home/{username}`, clones the requested repository into `/home/{username}/repo`, and initializes runa from inside that repository so project state lives at `/home/{username}/repo/.runa/`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the agent runtime starts. Base images that lack `/bin/sh`, `git`, `useradd`, or `gosu` are not supported.
+5. Creates an unprivileged unix user whose username is the configured profile name, with home directory `/home/{username}`, clones the requested repository into `/home/{username}/repo`, and initializes runa from inside that repository so project state lives at `/home/{username}/repo/.runa/`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the agent runtime starts. Base images that lack `/bin/sh`, `git`, `useradd`, or `gosu` are not supported.
 6. Recursively transfers ownership of `/home/{username}` to that user, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready.
 
 ### Phase 3: Execution (`agentd-runner`)
 
-The runner drops privileges with `gosu` and launches `runa run` as the unprivileged agent user from `/home/{username}/repo`, then supervises the container until natural completion or an optional timeout. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
+The runner drops privileges with `gosu` and launches `runa run` as the unprivileged session user from `/home/{username}/repo`, then supervises the container until natural completion or an optional timeout. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
 
 ### Phase 4: Teardown (`agentd-runner`)
 
@@ -144,26 +149,26 @@ From inside the environment, an agent should see:
 
 ## 6. Credential Flow
 
-Credentials are declared by agent configuration as daemon-side environment variable names. For each configured credential, the daemon resolves `source` with `std::env::var(source)` from its own process environment before calling `agentd-runner`. Operators provide those values through normal host mechanisms such as systemd `EnvironmentFile=`, shell exports, or container environment injection. During session setup, the runner receives only the already-resolved credential values, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
+Credentials are declared by profile configuration as daemon-side environment variable names. For each configured credential, the daemon resolves `source` with `std::env::var(source)` from its own process environment before calling `agentd-runner`. Operators provide those values through normal host mechanisms such as systemd `EnvironmentFile=`, shell exports, or container environment injection. During session setup, the runner receives only the already-resolved credential values, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
 
 Because startup reconciliation is scoped per daemon instance rather than to the
 whole Podman namespace, the daemon removes only runner-managed resources whose
 names carry its own derived daemon id: dead
-`agentd-{daemon8}-{agent}-{session16}` containers are removed first, then
+`agentd-{daemon8}-{profile}-{session16}` containers are removed first, then
 orphaned `agentd-{daemon8}-{session16}-{suffix}` secrets whose session
 container is gone.
 
-Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When an agent config declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before `runa run` starts so the token does not persist in git config or the agent runtime environment.
+Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When a profile declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before `runa run` starts so the token does not persist in git config or the agent runtime environment.
 
-Isolation is per agent: one agent receives only its own declared credentials. Sharing access to the same external service still requires separate credential declarations per agent so compromise remains scoped.
+Isolation is per profile: one profile receives only its own declared credentials. Sharing access to the same external service still requires separate credential declarations per profile so compromise remains scoped.
 
 ## 7. Verification Matrix
 
 | Need | Architectural Decision | Workspace Evidence | Failure if Violated |
 |---|---|---|---|
 | Network | Session environments receive deployment-controlled network access | `agentd-runner` owns session setup | Agents cannot reach external services |
-| Credentials | Secrets are injected at launch, not stored in code or images | `agentd` resolves configured environment-variable sources and `agentd-runner` accepts the resolved values | Agents cannot authenticate or credentials leak across agents |
-| Identity | Each session receives stable in-container identity variables and container naming | `agentd-runner` session contract and Podman lifecycle | Operators cannot distinguish which agent a session belongs to |
+| Credentials | Secrets are injected at launch, not stored in code or images | `agentd` resolves configured environment-variable sources and `agentd-runner` accepts the resolved values | Sessions cannot authenticate or credentials leak across profiles |
+| Identity | Each session receives stable in-container identity variables and container naming | `agentd-runner` session contract and Podman lifecycle | Operators cannot distinguish which profile a session belongs to |
 | Mission | Scheduling or CLI invocation hands repo and optional work unit into session launch | `agentd-scheduler` plus `agentd-runner` boundary | Agents run without a reason or target |
 | Tool Availability | Tools are provided through the environment; MCP remains a runtime concern | Three-crate workspace with no transport crate | agentd would absorb protocol work it does not need |
 | Context | Methodology assets are mounted read-only into sessions and the repo is freshly cloned per run | `agentd-runner` boundary and crate intent | Agents operate without local awareness |

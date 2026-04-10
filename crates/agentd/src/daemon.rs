@@ -121,7 +121,7 @@ impl From<serde_json::Error> for ClientError {
 enum RequestMessage {
     Ping,
     Run {
-        agent: String,
+        profile: String,
         repo_url: String,
         work_unit: Option<String>,
     },
@@ -338,7 +338,7 @@ pub fn request_run(
     match send_request(
         config.socket_path(),
         &RequestMessage::Run {
-            agent: request.agent.clone(),
+            profile: request.profile.clone(),
             repo_url: request.repo_url.clone(),
             work_unit: request.work_unit.clone(),
         },
@@ -424,13 +424,13 @@ fn handle_connection_inner(
     let response = match request {
         RequestMessage::Ping => ResponseMessage::Pong,
         RequestMessage::Run {
-            agent,
+            profile,
             repo_url,
             work_unit,
         } => match dispatch_run(
             config,
             &RunRequest {
-                agent,
+                profile,
                 repo_url,
                 work_unit,
             },
@@ -711,15 +711,15 @@ mod tests {
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[agents]]
+[[profiles]]
 name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 
-[[agents.credentials]]
+[[profiles.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#,

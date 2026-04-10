@@ -2,18 +2,18 @@
 //!
 //! All validation runs before any filesystem or podman interaction, so invalid
 //! inputs are rejected without side effects. The two public validators
-//! ([`validate_agent_name`] and [`validate_environment_name`]) are also used
+//! ([`validate_profile_name`] and [`validate_environment_name`]) are also used
 //! by the configuration layer in the `agentd` crate.
 
 use crate::naming::is_daemon_instance_id;
 use crate::types::{
-    AgentNameValidationError, EnvironmentNameValidationError, RunnerError, SessionInvocation,
+    EnvironmentNameValidationError, ProfileNameValidationError, RunnerError, SessionInvocation,
     SessionSpec,
 };
 
-const AGENT_NAME_ENV: &str = "AGENT_NAME";
+const PROFILE_NAME_ENV: &str = "PROFILE_NAME";
 pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
-const RESERVED_AGENT_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
+const RESERVED_PROFILE_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
 
@@ -21,14 +21,14 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if !is_daemon_instance_id(&spec.daemon_instance_id) {
         return Err(RunnerError::InvalidDaemonInstanceId);
     }
-    if validate_agent_name(&spec.agent_name).is_err() {
-        return Err(RunnerError::InvalidAgentName);
+    if validate_profile_name(&spec.profile_name).is_err() {
+        return Err(RunnerError::InvalidProfileName);
     }
     if spec.base_image.trim().is_empty() || spec.base_image != spec.base_image.trim() {
         return Err(RunnerError::InvalidBaseImage);
     }
-    if spec.agent_command.is_empty() || spec.agent_command.iter().any(|arg| arg.is_empty()) {
-        return Err(RunnerError::InvalidAgentCommand);
+    if spec.command.is_empty() || spec.command.iter().any(|arg| arg.is_empty()) {
+        return Err(RunnerError::InvalidCommand);
     }
 
     for variable in &spec.environment {
@@ -74,7 +74,7 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
 /// Validates an environment variable name against naming rules.
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
-/// runner-managed names (currently `AGENT_NAME` and `AGENTD_REPO_TOKEN`). Used both by
+/// runner-managed names (currently `PROFILE_NAME` and `AGENTD_REPO_TOKEN`). Used both by
 /// [`run_session`](crate::run_session) during spec validation and by the
 /// configuration layer for credential name validation.
 pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValidationError> {
@@ -88,19 +88,19 @@ pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValida
     Ok(())
 }
 
-/// Validates an agent name against unix username rules and reserved names.
+/// Validates a profile name against unix username rules and reserved names.
 ///
 /// The name must start with a lowercase ASCII letter, contain only lowercase
 /// letters, digits, `_`, or `-`, and be at most 32 characters. Names matching
 /// reserved system usernames (`root`, `nobody`, `daemon`, `bin`, `sys`, `man`,
 /// `mail`) are also rejected. Used both by [`run_session`](crate::run_session)
 /// during spec validation and by the configuration layer.
-pub fn validate_agent_name(name: &str) -> Result<(), AgentNameValidationError> {
+pub fn validate_profile_name(name: &str) -> Result<(), ProfileNameValidationError> {
     if !is_valid_unix_username(name) {
-        return Err(AgentNameValidationError::Invalid);
+        return Err(ProfileNameValidationError::Invalid);
     }
-    if is_reserved_agent_name(name) {
-        return Err(AgentNameValidationError::Reserved);
+    if is_reserved_profile_name(name) {
+        return Err(ProfileNameValidationError::Reserved);
     }
 
     Ok(())
@@ -111,7 +111,7 @@ pub fn validate_agent_name(name: &str) -> Result<(), AgentNameValidationError> {
 /// These names are reserved — callers cannot use them in
 /// [`SessionSpec::environment`] because the runner injects them directly.
 pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1] {
-    [(AGENT_NAME_ENV, &spec.agent_name)]
+    [(PROFILE_NAME_ENV, &spec.profile_name)]
 }
 
 fn is_supported_repo_url(repo_url: &str) -> bool {
@@ -172,11 +172,11 @@ fn repo_token_requires_https_error() -> RunnerError {
 }
 
 fn is_reserved_environment_name(name: &str) -> bool {
-    matches!(name, AGENT_NAME_ENV | REPO_TOKEN_ENV)
+    matches!(name, PROFILE_NAME_ENV | REPO_TOKEN_ENV)
 }
 
-fn is_reserved_agent_name(name: &str) -> bool {
-    RESERVED_AGENT_NAMES.contains(&name)
+fn is_reserved_profile_name(name: &str) -> bool {
+    RESERVED_PROFILE_NAMES.contains(&name)
 }
 
 fn is_valid_unix_username(name: &str) -> bool {
@@ -200,12 +200,12 @@ fn is_valid_unix_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ResolvedEnvironmentVariable, test_support::test_session_spec};
+    use crate::{test_support::test_session_spec, ResolvedEnvironmentVariable};
     use std::path::PathBuf;
 
     #[test]
     fn validate_spec_rejects_reserved_environment_names() {
-        for reserved_name in ["AGENT_NAME", REPO_TOKEN_ENV] {
+        for reserved_name in ["PROFILE_NAME", REPO_TOKEN_ENV] {
             let error = validate_spec(&SessionSpec {
                 environment: vec![ResolvedEnvironmentVariable {
                     name: reserved_name.to_string(),
@@ -295,93 +295,95 @@ mod tests {
     }
 
     #[test]
-    fn validate_spec_accepts_valid_unix_agent_names() {
-        for agent_name in [
-            "agent",
-            "agent-01",
-            "agent_01",
-            "agent-name_01",
+    fn validate_spec_accepts_valid_unix_profile_names() {
+        for profile_name in [
+            "codex",
+            "codex-01",
+            "codex_01",
+            "codex-name_01",
             &"a".repeat(32),
         ] {
             validate_spec(&SessionSpec {
-                agent_name: agent_name.to_string(),
+                profile_name: profile_name.to_string(),
                 ..test_session_spec()
             })
-            .unwrap_or_else(|error| panic!("expected {agent_name:?} to be accepted, got {error}"));
-        }
-    }
-
-    #[test]
-    fn validate_agent_name_accepts_valid_unix_agent_names() {
-        for agent_name in [
-            "agent",
-            "agent-01",
-            "agent_01",
-            "agent-name_01",
-            &"a".repeat(32),
-        ] {
-            validate_agent_name(agent_name).unwrap_or_else(|error| {
-                panic!("expected {agent_name:?} to be accepted, got {error:?}")
+            .unwrap_or_else(|error| {
+                panic!("expected {profile_name:?} to be accepted, got {error}")
             });
         }
     }
 
     #[test]
-    fn validate_agent_name_rejects_invalid_unix_usernames() {
-        for agent_name in [
+    fn validate_profile_name_accepts_valid_unix_profile_names() {
+        for profile_name in [
+            "codex",
+            "codex-01",
+            "codex_01",
+            "codex-name_01",
+            &"a".repeat(32),
+        ] {
+            validate_profile_name(profile_name).unwrap_or_else(|error| {
+                panic!("expected {profile_name:?} to be accepted, got {error:?}")
+            });
+        }
+    }
+
+    #[test]
+    fn validate_profile_name_rejects_invalid_unix_usernames() {
+        for profile_name in [
             "",
             "   ",
-            "Agent 01",
-            "123agent",
+            "Codex 01",
+            "123codex",
             "---",
-            "_agent",
-            "agent__name!",
+            "_codex",
+            "codex__name!",
             &format!("a{}", "b".repeat(32)),
         ] {
-            let error = validate_agent_name(agent_name)
+            let error = validate_profile_name(profile_name)
                 .expect_err("invalid unix usernames should be rejected");
 
             assert_eq!(
                 error,
-                AgentNameValidationError::Invalid,
-                "expected Invalid for {agent_name:?}, got {error:?}"
+                ProfileNameValidationError::Invalid,
+                "expected Invalid for {profile_name:?}, got {error:?}"
             );
         }
     }
 
     #[test]
-    fn validate_agent_name_rejects_reserved_names() {
-        for agent_name in ["root", "nobody", "daemon", "bin", "sys", "man", "mail"] {
-            let error =
-                validate_agent_name(agent_name).expect_err("reserved names should be rejected");
+    fn validate_profile_name_rejects_reserved_names() {
+        for profile_name in ["root", "nobody", "daemon", "bin", "sys", "man", "mail"] {
+            let error = validate_profile_name(profile_name)
+                .expect_err("reserved names should be rejected");
 
             assert_eq!(
                 error,
-                AgentNameValidationError::Reserved,
-                "expected Reserved for {agent_name:?}, got {error:?}"
+                ProfileNameValidationError::Reserved,
+                "expected Reserved for {profile_name:?}, got {error:?}"
             );
         }
     }
 
     #[test]
-    fn validate_spec_maps_invalid_or_reserved_agent_names_to_runner_error() {
-        for agent_name in ["123agent", "root"] {
+    fn validate_spec_maps_invalid_or_reserved_profile_names_to_runner_error() {
+        for profile_name in ["123codex", "root"] {
             let error = validate_spec(&SessionSpec {
-                agent_name: agent_name.to_string(),
+                profile_name: profile_name.to_string(),
                 ..test_session_spec()
             })
-            .expect_err("invalid sanitized agent names should be rejected");
+            .expect_err("invalid profile names should be rejected");
 
             assert!(
-                matches!(error, RunnerError::InvalidAgentName),
-                "expected InvalidAgentName for {agent_name:?}, got {error:?}"
+                matches!(error, RunnerError::InvalidProfileName),
+                "expected InvalidProfileName for {profile_name:?}, got {error:?}"
             );
         }
     }
 
     #[test]
-    fn invalid_agent_name_error_mentions_format_and_reserved_names() {
-        let message = RunnerError::InvalidAgentName.to_string();
+    fn invalid_profile_name_error_mentions_format_and_reserved_names() {
+        let message = RunnerError::InvalidProfileName.to_string();
 
         assert!(
             message.contains("must already be a unix username"),
@@ -606,10 +608,10 @@ mod tests {
     }
 
     #[test]
-    fn run_session_rejects_reserved_agent_name_before_methodology_validation() {
+    fn run_session_rejects_reserved_profile_name_before_methodology_validation() {
         let error = crate::run_session(
             SessionSpec {
-                agent_name: "root".to_string(),
+                profile_name: "root".to_string(),
                 methodology_dir: PathBuf::from("/tmp/does-not-exist"),
                 ..test_session_spec()
             },
@@ -620,11 +622,11 @@ mod tests {
                 timeout: None,
             },
         )
-        .expect_err("reserved agent name should be rejected before setup");
+        .expect_err("reserved profile name should be rejected before setup");
 
         assert!(
-            matches!(error, RunnerError::InvalidAgentName),
-            "expected InvalidAgentName, got {error:?}"
+            matches!(error, RunnerError::InvalidProfileName),
+            "expected InvalidProfileName, got {error:?}"
         );
     }
 }

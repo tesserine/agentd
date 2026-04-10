@@ -50,12 +50,12 @@ fn daemon_test_config(socket_path: &Path, pid_file: &Path) -> String {
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[agents]]
+[[profiles]]
 name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 "#,
         socket_path = socket_path.display(),
@@ -70,15 +70,15 @@ fn daemon_test_config_with_credential(socket_path: &Path, pid_file: &Path) -> St
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[agents]]
+[[profiles]]
 name = "codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 
-[[agents.credentials]]
+[[profiles.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
@@ -336,7 +336,7 @@ fn binary_run_command_exits_non_zero_and_reports_timed_out_sessions_on_stderr() 
 }
 
 #[test]
-fn binary_run_command_succeeds_when_agent_registry_becomes_invalid_after_daemon_start() {
+fn binary_run_command_succeeds_when_profile_registry_becomes_invalid_after_daemon_start() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-invalid-registry-{}-{}",
         std::process::id(),
@@ -362,12 +362,12 @@ fn binary_run_command_succeeds_when_agent_registry_becomes_invalid_after_daemon_
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[agents]]
+[[profiles]]
 name = "Codex"
 base_image = "ghcr.io/example/codex:latest"
 methodology_dir = "../groundwork"
 
-[agents.runa]
+[profiles.runa]
 command = ["codex", "exec"]
 "#,
             socket_path = socket_path.display(),

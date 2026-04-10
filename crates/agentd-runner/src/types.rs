@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-/// Static configuration for an agent session.
+/// Static configuration for a session, derived from a profile.
 ///
-/// Describes the agent's identity, container image, methodology, command, and
+/// Describes the profile identity, container image, methodology, command, and
 /// caller-resolved environment variables. Validated by
 /// [`run_session`](crate::run_session) before any resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,11 +21,11 @@ pub struct SessionSpec {
     /// resource names so startup reconciliation can scope ownership to one
     /// daemon instance.
     pub daemon_instance_id: String,
-    /// Agent identity string. Doubles as the in-container unix username, a
-    /// component of the container name, and the value of the `AGENT_NAME`
+    /// Profile identity string. Doubles as the in-container unix username, a
+    /// component of the container name, and the value of the `PROFILE_NAME`
     /// environment variable. Must pass
-    /// [`validate_agent_name`](crate::validate_agent_name).
-    pub agent_name: String,
+    /// [`validate_profile_name`](crate::validate_profile_name).
+    pub profile_name: String,
     /// Container image reference. The image must provide `/bin/sh`, `git`,
     /// `useradd`, `gosu`, and `runa` in `PATH`.
     pub base_image: String,
@@ -35,7 +35,7 @@ pub struct SessionSpec {
     /// Command array written into `.runa/config.toml` as the
     /// `[agent] command` value. Not a shell command — each element becomes a
     /// TOML string in the array.
-    pub agent_command: Vec<String>,
+    pub command: Vec<String>,
     /// Caller-resolved environment variables injected into the container.
     /// Non-empty values are passed via ephemeral podman secrets; empty values
     /// are passed as direct `--env` assignments.
@@ -47,7 +47,7 @@ pub struct SessionSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedEnvironmentVariable {
     /// Variable name. Must not be empty, contain `,` or `=`, or collide with
-    /// runner-managed names (currently `AGENT_NAME`).
+    /// runner-managed names (currently `PROFILE_NAME`).
     pub name: String,
     /// Variable value. Empty values are legal and are injected as direct
     /// `--env NAME=` assignments rather than podman secrets, which reject
@@ -95,7 +95,7 @@ pub enum SessionOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StartupReconciliationReport {
     /// Stale runner-managed session containers matching
-    /// `agentd-{daemon8}-{agent}-{session16}` that were removed during startup.
+    /// `agentd-{daemon8}-{profile}-{session16}` that were removed during startup.
     pub removed_container_names: Vec<String>,
     /// Orphaned runner-managed secrets matching `agentd-{daemon8}-{session16}-{suffix}`
     /// that were removed during startup.
@@ -113,10 +113,10 @@ pub enum EnvironmentNameValidationError {
     Reserved,
 }
 
-/// Error returned by [`validate_agent_name`](crate::validate_agent_name)
+/// Error returned by [`validate_profile_name`](crate::validate_profile_name)
 /// when a name violates naming rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentNameValidationError {
+pub enum ProfileNameValidationError {
     /// The name is not a valid unix username: must start with a lowercase
     /// letter, contain only lowercase letters, digits, `_`, or `-`, and be
     /// at most 32 characters.
@@ -128,7 +128,7 @@ pub enum AgentNameValidationError {
 
 /// Errors produced during session execution.
 ///
-/// Validation errors ([`InvalidAgentName`](Self::InvalidAgentName),
+/// Validation errors ([`InvalidProfileName`](Self::InvalidProfileName),
 /// [`InvalidBaseImage`](Self::InvalidBaseImage), etc.) are returned before
 /// any resources are allocated. Resource and execution errors
 /// ([`MissingMethodologyManifest`](Self::MissingMethodologyManifest),
@@ -142,9 +142,9 @@ pub enum RunnerError {
     /// The methodology directory does not contain `manifest.toml`. Produced
     /// during resource allocation, after spec and invocation validation pass.
     MissingMethodologyManifest { path: PathBuf },
-    /// The agent name fails unix username rules or matches a reserved system
+    /// The profile name fails unix username rules or matches a reserved system
     /// name. Produced during spec validation.
-    InvalidAgentName,
+    InvalidProfileName,
     /// The base image string is empty or has surrounding whitespace. Produced
     /// during spec validation.
     InvalidBaseImage,
@@ -153,9 +153,9 @@ pub enum RunnerError {
     /// `repo_token` without using `https://`. Produced during invocation
     /// validation.
     InvalidRepoUrl { message: String },
-    /// The agent command array is empty or contains an empty element.
+    /// The command array is empty or contains an empty element.
     /// Produced during spec validation.
-    InvalidAgentCommand,
+    InvalidCommand,
     /// An environment variable name is empty or contains `,` or `=`.
     /// Produced during spec validation.
     InvalidEnvironmentName { name: String },
@@ -190,14 +190,14 @@ impl fmt::Display for RunnerError {
                     path.display()
                 )
             }
-            RunnerError::InvalidAgentName => write!(
+            RunnerError::InvalidProfileName => write!(
                 f,
-                "agent_name must already be a unix username starting with a lowercase letter, containing only lowercase letters, digits, '_', or '-', be at most 32 characters, and not be one of the reserved system names root, nobody, daemon, bin, sys, man, or mail"
+                "profile_name must already be a unix username starting with a lowercase letter, containing only lowercase letters, digits, '_', or '-', be at most 32 characters, and not be one of the reserved system names root, nobody, daemon, bin, sys, man, or mail"
             ),
             RunnerError::InvalidBaseImage => write!(f, "base_image must not be empty"),
             RunnerError::InvalidRepoUrl { message } => write!(f, "repo_url {message}"),
-            RunnerError::InvalidAgentCommand => {
-                write!(f, "agent_command must contain at least one argument")
+            RunnerError::InvalidCommand => {
+                write!(f, "command must contain at least one argument")
             }
             RunnerError::InvalidEnvironmentName { name } => write!(
                 f,

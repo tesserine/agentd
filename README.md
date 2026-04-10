@@ -8,7 +8,7 @@ Early development. The current build supports:
 - foreground single-instance daemon startup
 - startup reconciliation of stale runner-managed Podman containers and secrets owned by the starting daemon instance before accepting new sessions
 - local Unix-socket operator control
-- manual `agentd run <agent> <repo> [--work-unit <wu>]` session triggers
+- manual `agentd run <profile> <repo> [--work-unit <wu>]` session triggers
 - clone-only repository auth through optional `repo_token_source`
 
 ## Architecture Overview
@@ -17,8 +17,8 @@ The system is organized as a Rust workspace with focused crates for composition,
 
 ## Quick Start
 
-1. Start from [examples/agentd.toml](examples/agentd.toml) and define at least one agent.
-2. Export any runtime credential env vars named by `[[agents.credentials]].source`.
+1. Start from [examples/agentd.toml](examples/agentd.toml) and define at least one profile.
+2. Export any runtime credential env vars named by `[[profiles.credentials]].source`.
 3. Optionally export the env var named by `repo_token_source` when private HTTPS clones need a bearer token for `git clone`.
 4. Start the daemon:
 
@@ -29,7 +29,7 @@ agentd daemon --config /etc/agentd/agentd.toml
 `agentd` with no subcommand is the same as `agentd daemon`.
 
 Before the daemon binds its Unix socket, it reconciles stale runner-managed
-session containers named `agentd-{daemon8}-{agent}-{session16}` and orphaned
+session containers named `agentd-{daemon8}-{profile}-{session16}` and orphaned
 runner-managed secrets named `agentd-{daemon8}-{session16}-{suffix}` left
 behind by prior runs of the same daemon instance. The daemon instance id is
 derived from the configured socket and PID paths, so different runtime-path
@@ -61,7 +61,7 @@ agentd run codex https://github.com/pentaxis93/agentd.git --work-unit issue-52
 ```
 
 `agentd run` reads the same config file for daemon runtime paths. It ignores
-the `agents` registry, but the top-level config shape must still be valid, so
+the `profiles` registry, but the top-level config shape must still be valid, so
 typos like `[deamon]` fail instead of silently falling back to default daemon
 paths.
 

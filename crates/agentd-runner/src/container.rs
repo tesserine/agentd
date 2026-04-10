@@ -3,8 +3,8 @@
 //! Manages the podman container lifecycle: building the entrypoint script,
 //! assembling `podman create` arguments, running the container in attached
 //! mode, and classifying the exit result. The container runs as root (UID 0)
-//! for privileged setup, then drops to an unprivileged agent user via `gosu`
-//! before executing the agent command. Exit code 125 from `podman start
+//! for privileged setup, then drops to an unprivileged profile user via `gosu`
+//! before executing the command. Exit code 125 from `podman start
 //! --attach` is ambiguous (podman infrastructure error vs. container process)
 //! and requires container state inspection to disambiguate.
 
@@ -133,14 +133,14 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 
 // Generates the shell script passed as the container entrypoint via
 // `/bin/sh -lc`. The script runs as root (UID 0) to perform privileged setup:
-// creating the agent's unix user, cloning the repository, initializing runa
-// with the methodology manifest, writing the agent command to runa config, and
+// creating the profile's unix user, cloning the repository, initializing runa
+// with the methodology manifest, writing the command to runa config, and
 // transferring home directory ownership. It then drops privileges permanently
-// via `gosu` and `exec`s `runa run` as the unprivileged agent user. `set -eu`
+// via `gosu` and `exec`s `runa run` as the unprivileged profile user. `set -eu`
 // at the top ensures any setup failure aborts immediately rather than
 // continuing with a broken workspace.
 fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
-    let username = &spec.agent_name;
+    let username = &spec.profile_name;
     let home_dir = format!("{HOME_ROOT_DIR}/{username}");
     let repo_dir = format!("{home_dir}/repo");
     let user_group = format!("{username}:{username}");
@@ -159,7 +159,7 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
         "{METHODOLOGY_MOUNT_PATH}/manifest.toml"
     )));
     script.push_str("\ncat >> .runa/config.toml <<'EOF'\n[agent]\ncommand = ");
-    script.push_str(&toml_array(&spec.agent_command));
+    script.push_str(&toml_array(&spec.command));
     script.push_str("\nEOF\nchown -R ");
     script.push_str(&shell_quote(&user_group));
     script.push(' ');

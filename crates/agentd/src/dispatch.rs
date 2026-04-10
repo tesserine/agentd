@@ -10,7 +10,7 @@ use crate::config::{Config, ConfigError};
 /// Parameters for a daemon run request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
-    pub agent: String,
+    pub profile: String,
     pub repo_url: String,
     pub work_unit: Option<String>,
 }
@@ -18,11 +18,11 @@ pub struct RunRequest {
 /// Errors produced while mapping a run request into a runner session.
 #[derive(Debug)]
 pub enum DispatchError {
-    UnknownAgent {
-        agent: String,
+    UnknownProfile {
+        profile: String,
     },
     MissingCredentialSource {
-        agent: String,
+        profile: String,
         credential: String,
         source: String,
     },
@@ -33,14 +33,14 @@ pub enum DispatchError {
 impl fmt::Display for DispatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownAgent { agent } => write!(f, "unknown agent '{agent}'"),
+            Self::UnknownProfile { profile } => write!(f, "unknown profile '{profile}'"),
             Self::MissingCredentialSource {
-                agent,
+                profile,
                 credential,
                 source,
             } => write!(
                 f,
-                "agent '{agent}' credential '{credential}' requires daemon environment variable '{source}'"
+                "profile '{profile}' credential '{credential}' requires daemon environment variable '{source}'"
             ),
             Self::Config(error) => write!(f, "{error}"),
             Self::Runner(error) => write!(f, "{error}"),
@@ -93,26 +93,26 @@ impl SessionExecutor for RunnerSessionExecutor {
     }
 }
 
-/// Resolve a named agent plus run request into a runner session and run it.
+/// Resolve a named profile plus run request into a runner session and run it.
 pub fn dispatch_run(
     config: &Config,
     request: &RunRequest,
     executor: &impl SessionExecutor,
 ) -> Result<SessionOutcome, DispatchError> {
-    let agent = config
-        .agent(&request.agent)
-        .ok_or_else(|| DispatchError::UnknownAgent {
-            agent: request.agent.clone(),
+    let profile = config
+        .profile(&request.profile)
+        .ok_or_else(|| DispatchError::UnknownProfile {
+            profile: request.profile.clone(),
         })?;
     let daemon_instance_id = config.daemon().daemon_instance_id()?;
 
-    let environment = agent
+    let environment = profile
         .credentials()
         .iter()
         .map(|credential| {
             let value = std::env::var(credential.source()).map_err(|_| {
                 DispatchError::MissingCredentialSource {
-                    agent: agent.name().to_string(),
+                    profile: profile.name().to_string(),
                     credential: credential.name().to_string(),
                     source: credential.source().to_string(),
                 }
@@ -125,7 +125,7 @@ pub fn dispatch_run(
         })
         .collect::<Result<Vec<_>, DispatchError>>()?;
 
-    let repo_token = agent
+    let repo_token = profile
         .repo_token_source()
         .and_then(|source| std::env::var(source).ok())
         .filter(|value| !value.is_empty());
@@ -134,10 +134,10 @@ pub fn dispatch_run(
         .run_session(
             SessionSpec {
                 daemon_instance_id,
-                agent_name: agent.name().to_string(),
-                base_image: agent.base_image().to_string(),
-                methodology_dir: agent.methodology_dir().to_path_buf(),
-                agent_command: agent.runa().command().to_vec(),
+                profile_name: profile.name().to_string(),
+                base_image: profile.base_image().to_string(),
+                methodology_dir: profile.methodology_dir().to_path_buf(),
+                command: profile.runa().command().to_vec(),
                 environment,
             },
             SessionInvocation {

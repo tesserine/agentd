@@ -25,10 +25,10 @@ pub(crate) mod test_support;
 
 pub use reconcile::reconcile_startup_resources;
 pub use types::{
-    AgentNameValidationError, EnvironmentNameValidationError, ResolvedEnvironmentVariable,
+    EnvironmentNameValidationError, ProfileNameValidationError, ResolvedEnvironmentVariable,
     RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
 };
-pub use validation::{validate_agent_name, validate_environment_name};
+pub use validation::{validate_environment_name, validate_profile_name};
 
 use container::{create_container, run_container_to_completion, run_container_with_timeout};
 use lifecycle::{
@@ -42,7 +42,7 @@ use resources::{
 };
 use validation::{validate_invocation, validate_spec};
 
-/// Executes a single agent session from validation through teardown.
+/// Executes a single session from validation through teardown.
 ///
 /// Validates `spec` and `invocation`, allocates session resources (methodology
 /// staging directory, podman secrets for non-empty environment values), creates
@@ -63,11 +63,11 @@ pub fn run_session(
     let session_id = unique_suffix()?;
 
     let container_name =
-        format_container_name(&spec.daemon_instance_id, &spec.agent_name, &session_id);
+        format_container_name(&spec.daemon_instance_id, &spec.profile_name, &session_id);
     log_session_started(
         &session_id,
         &container_name,
-        &spec.agent_name,
+        &spec.profile_name,
         invocation.work_unit.is_some(),
         invocation.timeout,
     );
