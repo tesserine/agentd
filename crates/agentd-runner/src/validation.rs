@@ -52,20 +52,9 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
 }
 
 pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), RunnerError> {
-    let repo_url = invocation.repo_url.as_str();
-    if repo_url.trim().is_empty() || repo_url != repo_url.trim() {
-        return Err(unsupported_repo_url_error());
-    }
+    validate_repo_url(&invocation.repo_url)?;
 
-    if has_repo_url_userinfo(repo_url) {
-        return Err(credential_bearing_repo_url_error());
-    }
-
-    if !is_supported_repo_url(repo_url) {
-        return Err(unsupported_repo_url_error());
-    }
-
-    if invocation.repo_token.is_some() && !repo_url.starts_with("https://") {
+    if invocation.repo_token.is_some() && !invocation.repo_url.starts_with("https://") {
         return Err(repo_token_requires_https_error());
     }
 
@@ -103,6 +92,27 @@ pub fn validate_profile_name(name: &str) -> Result<(), ProfileNameValidationErro
     }
     if is_reserved_profile_name(name) {
         return Err(ProfileNameValidationError::Reserved);
+    }
+
+    Ok(())
+}
+
+/// Validates a remote repository URL against the runner's supported forms.
+///
+/// Accepts only trimmed `https://`, `http://`, and `git://` remote URLs with a
+/// non-empty authority and path. Credential-bearing URLs and URLs with query or
+/// fragment components are rejected.
+pub fn validate_repo_url(repo_url: &str) -> Result<(), RunnerError> {
+    if repo_url.trim().is_empty() || repo_url != repo_url.trim() {
+        return Err(unsupported_repo_url_error());
+    }
+
+    if has_repo_url_userinfo(repo_url) {
+        return Err(credential_bearing_repo_url_error());
+    }
+
+    if !is_supported_repo_url(repo_url) {
+        return Err(unsupported_repo_url_error());
     }
 
     Ok(())

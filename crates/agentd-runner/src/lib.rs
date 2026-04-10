@@ -28,7 +28,7 @@ pub use types::{
     EnvironmentNameValidationError, ProfileNameValidationError, ResolvedEnvironmentVariable,
     RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
 };
-pub use validation::{validate_environment_name, validate_profile_name};
+pub use validation::{validate_environment_name, validate_profile_name, validate_repo_url};
 
 use container::{create_container, run_container_to_completion, run_container_with_timeout};
 use lifecycle::{

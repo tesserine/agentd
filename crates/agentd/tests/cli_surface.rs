@@ -1,14 +1,17 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use agentd::config::Config;
 use agentd::{SessionExecutor, run_daemon_until_shutdown};
 use agentd_runner::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
+
+type DaemonHandle = thread::JoinHandle<Result<(), agentd::DaemonError>>;
+type RecordedInvocations = Arc<Mutex<Vec<SessionInvocation>>>;
 
 #[derive(Clone)]
 struct FixedOutcomeExecutor {
@@ -21,6 +24,39 @@ impl SessionExecutor for FixedOutcomeExecutor {
         _spec: SessionSpec,
         _invocation: SessionInvocation,
     ) -> Result<SessionOutcome, RunnerError> {
+        Ok(self.outcome.clone())
+    }
+}
+
+#[derive(Clone)]
+struct RecordingInvocationExecutor {
+    outcome: SessionOutcome,
+    invocations: Arc<Mutex<Vec<SessionInvocation>>>,
+}
+
+impl RecordingInvocationExecutor {
+    fn new(outcome: SessionOutcome) -> (Self, Arc<Mutex<Vec<SessionInvocation>>>) {
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                outcome,
+                invocations: Arc::clone(&invocations),
+            },
+            invocations,
+        )
+    }
+}
+
+impl SessionExecutor for RecordingInvocationExecutor {
+    fn run_session(
+        &self,
+        _spec: SessionSpec,
+        invocation: SessionInvocation,
+    ) -> Result<SessionOutcome, RunnerError> {
+        self.invocations
+            .lock()
+            .expect("recorded invocations should lock")
+            .push(invocation);
         Ok(self.outcome.clone())
     }
 }
@@ -59,6 +95,27 @@ command = ["site-builder", "exec"]
 "#,
         socket_path = socket_path.display(),
         pid_file = pid_file.display()
+    )
+}
+
+fn daemon_test_config_with_default_repo(socket_path: &Path, pid_file: &Path, repo: &str) -> String {
+    format!(
+        r#"
+[daemon]
+socket_path = "{socket_path}"
+pid_file = "{pid_file}"
+
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+repo = "{repo}"
+
+command = ["site-builder", "exec"]
+"#,
+        socket_path = socket_path.display(),
+        pid_file = pid_file.display(),
+        repo = repo
     )
 }
 
@@ -109,21 +166,31 @@ fn terminate(child: &mut Child) -> io::Result<()> {
 fn start_test_daemon(
     config_path: &Path,
     outcome: SessionOutcome,
-) -> (
-    Arc<AtomicBool>,
-    thread::JoinHandle<Result<(), agentd::DaemonError>>,
-    Config,
-) {
+) -> (Arc<AtomicBool>, DaemonHandle, Config) {
     let config = Config::load(config_path).expect("test config should load");
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let executor = FixedOutcomeExecutor { outcome };
-    let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown.as_ref())
-    });
+    let handle =
+        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
     wait_for_path(config.daemon().socket_path());
     (shutdown, handle, config)
+}
+
+fn start_recording_test_daemon(
+    config_path: &Path,
+    outcome: SessionOutcome,
+) -> (Arc<AtomicBool>, DaemonHandle, Config, RecordedInvocations) {
+    let config = Config::load(config_path).expect("test config should load");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let (executor, invocations) = RecordingInvocationExecutor::new(outcome);
+    let handle =
+        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
+    wait_for_path(config.daemon().socket_path());
+    (shutdown, handle, config, invocations)
 }
 
 #[test]
@@ -213,6 +280,149 @@ fn binary_run_command_reports_clear_error_when_daemon_is_not_running() {
     assert!(
         stderr.contains("agentd is not running"),
         "expected daemon-not-running error, got: {stderr}"
+    );
+}
+
+#[test]
+fn binary_run_command_uses_profile_default_repo_when_repo_argument_is_omitted() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-default-repo-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let default_repo = "https://example.com/default.git";
+    let config_path = write_temp_config(
+        "client-command-default-repo",
+        &daemon_test_config_with_default_repo(&socket_path, &pid_file, default_repo),
+    );
+
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Succeeded);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "run command should succeed with a profile default repo: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        invocations.lock().expect("invocations should lock")[0].repo_url,
+        default_repo
+    );
+}
+
+#[test]
+fn binary_run_command_prefers_explicit_repo_over_profile_default_repo() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-explicit-repo-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-explicit-repo",
+        &daemon_test_config_with_default_repo(
+            &socket_path,
+            &pid_file,
+            "https://example.com/default.git",
+        ),
+    );
+    let explicit_repo = "https://example.com/override.git";
+
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Succeeded);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            explicit_repo,
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "run command should succeed with an explicit repo override: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        invocations.lock().expect("invocations should lock")[0].repo_url,
+        explicit_repo
+    );
+}
+
+#[test]
+fn binary_run_command_reports_clear_error_when_repo_is_missing_from_cli_and_profile() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-missing-repo-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-missing-repo",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        !output.status.success(),
+        "run command should fail when no repo is available"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert!(
+        stderr.contains("requires a repo argument or configured profile repo"),
+        "expected missing-repo error, got: {stderr}"
     );
 }
 

@@ -17,6 +17,7 @@ use agentd_runner::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, ConfigError, DaemonConfig};
+use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
 use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
@@ -168,7 +169,7 @@ impl From<OutcomeMessage> for SessionOutcome {
 pub fn run_daemon_until_shutdown(
     config: Config,
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
-    shutdown: &AtomicBool,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), DaemonError> {
     let daemon_instance_id = config.daemon().daemon_instance_id()?;
     run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
@@ -179,7 +180,7 @@ pub fn run_daemon_until_shutdown(
 fn run_daemon_until_shutdown_with_reconciler<F>(
     config: Config,
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
-    shutdown: &AtomicBool,
+    shutdown: Arc<AtomicBool>,
     reconcile_startup: F,
 ) -> Result<(), DaemonError>
 where
@@ -204,6 +205,7 @@ where
     runtime.bind_listener()?;
     let executor = Arc::new(executor);
     let mut handlers = Vec::new();
+    let scheduler_handle = spawn_scheduler_thread(&config, Arc::clone(&shutdown))?;
     tracing::info!(
         event = "agentd.daemon_started",
         socket_path = %config.daemon().socket_path().display(),
@@ -235,8 +237,9 @@ where
         }
     };
 
-    finish_daemon_loop(|| runtime.begin_shutdown(), handlers, loop_result)
-        .map_err(DaemonError::Io)?;
+    let finish_result = finish_daemon_loop(|| runtime.begin_shutdown(), handlers, loop_result);
+    join_scheduler_thread(scheduler_handle);
+    finish_result.map_err(DaemonError::Io)?;
     tracing::info!(event = "agentd.daemon_stopped", "agentd daemon stopped");
     Ok(())
 }
@@ -883,7 +886,7 @@ source = "AGENTD_GITHUB_TOKEN"
             run_daemon_until_shutdown_with_reconciler(
                 daemon_config,
                 FixedOutcomeExecutor,
-                daemon_shutdown.as_ref(),
+                daemon_shutdown,
                 move || {
                     daemon_id_tx
                         .send(expected_daemon_instance_id)
@@ -936,7 +939,7 @@ source = "AGENTD_GITHUB_TOKEN"
         let error = run_daemon_until_shutdown_with_reconciler(
             config.clone(),
             FixedOutcomeExecutor,
-            &AtomicBool::new(false),
+            Arc::new(AtomicBool::new(false)),
             || Err(RunnerError::InvalidBaseImage),
         )
         .expect_err("startup reconciliation failure should abort daemon startup");

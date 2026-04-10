@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Added a documented static profile configuration format in `examples/agentd.toml` plus strict TOML parsing in the `agentd` crate for profile identity, base image, methodology mounts, credentials, and static session-command settings.
+- Added optional profile-level `repo` defaults and cron `schedule` expressions, plus a real `agentd-scheduler` implementation that evaluates scheduled profiles in daemon-local time and dispatches them through the daemon's Unix socket instead of calling the runner directly.
 - Added a Podman-backed session lifecycle in `agentd-runner` that creates ephemeral containers, mounts methodology assets read-only, clones a fresh repository workspace, executes the configured session command, injects caller-resolved credentials, supports optional timeouts, and force-removes the container on teardown.
 - Added explicit `SessionInvocation.repo_token` support in `agentd-runner` so private HTTPS repository clones can authenticate with a clone-only bearer token without exposing the token in `podman create` arguments, git argv, or persistent git config.
 - Added extraction-ready tracing bootstrap in `agentd` plus structured runner lifecycle/session events, with timestamped JSON logs to stderr by default, an `info` default filter so normal session lifecycle records are visible without extra env setup, `runner.session_error` for pre-completion failures, stderr fallback for runner failure diagnostics when no tracing subscriber is installed, `AGENTD_LOG_FORMAT=json|pretty` for format selection, and `RUST_LOG`/`AGENTD_LOG` filter control.
@@ -22,6 +23,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Clarified the credential source contract so examples, config doc comments, and architecture docs now describe `source` as a daemon-process environment variable name resolved with `std::env::var`, not an opaque secret-store reference.
+- Changed `agentd run` so the repo argument is optional when the selected profile declares a default `repo`, while an explicit CLI repo still overrides the configured default.
 - Renamed the `agentd` crate's shared dispatch-layer request and helper APIs from manual/operator-specific names to source-agnostic run names, including the socket-interface integration test surface, so scheduler and operator callers share one clearly neutral dispatch path.
 - Removed the placeholder `mcp-transport` and `forgejo-mcp` crates so the workspace now contains only `agentd`, `agentd-runner`, and `agentd-scheduler`, and added coverage that enforces that three-crate contract.
 - Removed the vendored methodology skill distribution layer from the repository, including loadout configuration, manifests, sync and verify scripts, vendored skill copies, and related smoke tests.
