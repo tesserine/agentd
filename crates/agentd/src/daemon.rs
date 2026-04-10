@@ -237,28 +237,32 @@ where
         }
     };
 
-    let finish_result = finish_daemon_loop(|| runtime.begin_shutdown(), handlers, loop_result);
-    stop_scheduler_thread(shutdown.as_ref(), scheduler_handle);
+    let finish_result = shutdown_daemon(
+        shutdown.as_ref(),
+        || runtime.begin_shutdown(),
+        handlers,
+        scheduler_handle,
+        loop_result,
+    );
     finish_result.map_err(DaemonError::Io)?;
     tracing::info!(event = "agentd.daemon_stopped", "agentd daemon stopped");
     Ok(())
 }
 
-fn stop_scheduler_thread(shutdown: &AtomicBool, handle: Option<JoinHandle<()>>) {
-    shutdown.store(true, Ordering::Release);
-    join_scheduler_thread(handle);
-}
-
-fn finish_daemon_loop<F>(
+fn shutdown_daemon<F>(
+    shutdown: &AtomicBool,
     begin_shutdown: F,
     handlers: Vec<JoinHandle<()>>,
+    scheduler_handle: Option<JoinHandle<()>>,
     loop_result: Result<(), io::Error>,
 ) -> Result<(), io::Error>
 where
     F: FnOnce() -> Result<(), io::Error>,
 {
+    shutdown.store(true, Ordering::Release);
     let shutdown_result = begin_shutdown();
     join_connection_handlers(handlers);
+    join_scheduler_thread(scheduler_handle);
 
     match (loop_result, shutdown_result) {
         (Ok(()), Ok(())) => Ok(()),
@@ -721,7 +725,7 @@ fn read_pid(pid_file: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonError, ResponseMessage, finish_daemon_loop, reap_finished_handlers,
+        DaemonError, ResponseMessage, reap_finished_handlers,
         run_daemon_until_shutdown_with_reconciler, write_response,
     };
     use crate::config::Config;
@@ -882,9 +886,11 @@ source = "AGENTD_GITHUB_TOKEN"
         });
 
         let start = Instant::now();
-        let error = finish_daemon_loop(
+        let error = super::shutdown_daemon(
+            Arc::new(AtomicBool::new(false)).as_ref(),
             || Ok(()),
             vec![handler],
+            None,
             Err(io::Error::other("accept failed")),
         )
         .expect_err("accept error should be returned");
@@ -909,7 +915,8 @@ source = "AGENTD_GITHUB_TOKEN"
         });
 
         let start = Instant::now();
-        let error = finish_daemon_loop(
+        let error = super::shutdown_daemon(
+            Arc::new(AtomicBool::new(false)).as_ref(),
             || {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -917,6 +924,7 @@ source = "AGENTD_GITHUB_TOKEN"
                 ))
             },
             vec![handler],
+            None,
             Ok(()),
         )
         .expect_err("cleanup failure should be returned");
@@ -934,7 +942,8 @@ source = "AGENTD_GITHUB_TOKEN"
 
     #[test]
     fn finishing_after_accept_error_prefers_the_accept_error_over_cleanup_error() {
-        let error = finish_daemon_loop(
+        let error = super::shutdown_daemon(
+            Arc::new(AtomicBool::new(false)).as_ref(),
             || {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -942,6 +951,7 @@ source = "AGENTD_GITHUB_TOKEN"
                 ))
             },
             Vec::new(),
+            None,
             Err(io::Error::other("accept failed")),
         )
         .expect_err("accept error should win over cleanup error");
@@ -951,7 +961,33 @@ source = "AGENTD_GITHUB_TOKEN"
     }
 
     #[test]
-    fn stopping_scheduler_thread_sets_shutdown_before_joining() {
+    fn shutting_down_sets_the_shutdown_flag_before_runtime_cleanup() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let error = super::shutdown_daemon(
+            shutdown.as_ref(),
+            || {
+                assert!(
+                    shutdown.load(std::sync::atomic::Ordering::Acquire),
+                    "shutdown should be asserted before runtime cleanup begins"
+                );
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "cleanup failed",
+                ))
+            },
+            Vec::new(),
+            None,
+            Err(io::Error::other("accept failed")),
+        )
+        .expect_err("accept error should still be returned");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "accept failed");
+    }
+
+    #[test]
+    fn shutting_down_sets_shutdown_before_joining_the_scheduler() {
         let shutdown = Arc::new(AtomicBool::new(false));
         let scheduler_shutdown = Arc::clone(&shutdown);
         let scheduler = thread::spawn(move || {
@@ -962,27 +998,28 @@ source = "AGENTD_GITHUB_TOKEN"
         let (done_tx, done_rx) = mpsc::channel();
         let join_shutdown = Arc::clone(&shutdown);
         let joiner = thread::spawn(move || {
-            super::stop_scheduler_thread(join_shutdown.as_ref(), Some(scheduler));
+            let error = super::shutdown_daemon(
+                join_shutdown.as_ref(),
+                || Ok(()),
+                Vec::new(),
+                Some(scheduler),
+                Err(io::Error::other("accept failed")),
+            )
+            .expect_err("accept error should still be returned");
             done_tx
-                .send(())
-                .expect("scheduler stop should report completion");
+                .send(error.to_string())
+                .expect("unified shutdown should report completion");
         });
 
-        let finished_quickly = done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
-        if !finished_quickly {
-            shutdown.store(true, std::sync::atomic::Ordering::Release);
-        }
-        joiner
-            .join()
-            .expect("scheduler stopper should join cleanly");
+        let error = done_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("unified shutdown should assert shutdown before joining scheduler");
+        joiner.join().expect("unified shutdown should join cleanly");
 
-        assert!(
-            finished_quickly,
-            "stopping the scheduler should set shutdown before joining"
-        );
+        assert_eq!(error, "accept failed");
         assert!(
             shutdown.load(std::sync::atomic::Ordering::Acquire),
-            "stopping the scheduler should leave shutdown asserted"
+            "unified shutdown should leave shutdown asserted"
         );
     }
 
