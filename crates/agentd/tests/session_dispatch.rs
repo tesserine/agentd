@@ -57,12 +57,12 @@ fn config_with_repo_token_source(repo_token_source: &str) -> Config {
     Config::from_str(&format!(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "{repo_token_source}"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles.credentials]]
 name = "GITHUB_TOKEN"
@@ -79,11 +79,11 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
-        std::env::set_var("CODEX_REPO_TOKEN", "clone-only-secret");
+        std::env::set_var("SITE_BUILDER_REPO_TOKEN", "clone-only-secret");
     }
-    let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
+    let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "codex".to_string(),
+        profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: Some("task-42".to_string()),
     };
@@ -103,8 +103,8 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
         .as_ref()
         .expect("executor should receive invocation");
 
-    assert_eq!(spec.profile_name, "codex");
-    assert_eq!(spec.base_image, "ghcr.io/example/codex:latest");
+    assert_eq!(spec.profile_name, "site-builder");
+    assert_eq!(spec.base_image, "ghcr.io/example/site-builder:latest");
     assert_eq!(spec.methodology_dir, Path::new("../groundwork"));
     assert_eq!(
         spec.daemon_instance_id,
@@ -113,7 +113,10 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
             .daemon_instance_id()
             .expect("daemon instance id should resolve")
     );
-    assert_eq!(spec.command, vec!["codex".to_string(), "exec".to_string()]);
+    assert_eq!(
+        spec.command,
+        vec!["site-builder".to_string(), "exec".to_string()]
+    );
     assert_eq!(
         spec.environment,
         vec![ResolvedEnvironmentVariable {
@@ -128,7 +131,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
 
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
-        std::env::remove_var("CODEX_REPO_TOKEN");
+        std::env::remove_var("SITE_BUILDER_REPO_TOKEN");
     }
 }
 
@@ -139,11 +142,11 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_missing() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
-        std::env::remove_var("CODEX_REPO_TOKEN");
+        std::env::remove_var("SITE_BUILDER_REPO_TOKEN");
     }
-    let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
+    let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "codex".to_string(),
+        profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
@@ -171,11 +174,11 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_empty() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
-        std::env::set_var("CODEX_REPO_TOKEN", "");
+        std::env::set_var("SITE_BUILDER_REPO_TOKEN", "");
     }
-    let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
+    let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "codex".to_string(),
+        profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
@@ -193,7 +196,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_empty() {
 
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
-        std::env::remove_var("CODEX_REPO_TOKEN");
+        std::env::remove_var("SITE_BUILDER_REPO_TOKEN");
     }
 }
 
@@ -204,11 +207,11 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
-        std::env::set_var("CODEX_REPO_TOKEN", "clone-only-secret");
+        std::env::set_var("SITE_BUILDER_REPO_TOKEN", "clone-only-secret");
     }
-    let config = config_with_repo_token_source("CODEX_REPO_TOKEN");
+    let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "codex".to_string(),
+        profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
@@ -223,7 +226,7 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
             credential,
             source,
         } => {
-            assert_eq!(profile, "codex");
+            assert_eq!(profile, "site-builder");
             assert_eq!(credential, "GITHUB_TOKEN");
             assert_eq!(source, "AGENTD_GITHUB_TOKEN");
         }
@@ -231,7 +234,7 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
     }
 
     unsafe {
-        std::env::remove_var("CODEX_REPO_TOKEN");
+        std::env::remove_var("SITE_BUILDER_REPO_TOKEN");
     }
 }
 
@@ -244,16 +247,16 @@ socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
     let request = RunRequest {
-        profile: "codex".to_string(),
+        profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };

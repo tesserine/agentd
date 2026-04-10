@@ -712,11 +712,11 @@ socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles.credentials]]
 name = "GITHUB_TOKEN"

@@ -51,11 +51,11 @@ socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
         socket_path = socket_path.display(),
         pid_file = pid_file.display()
@@ -70,11 +70,11 @@ socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles.credentials]]
 name = "GITHUB_TOKEN"
@@ -198,7 +198,7 @@ fn binary_run_command_reports_clear_error_when_daemon_is_not_running() {
             "--config",
             config_path.to_str().expect("config path should be utf-8"),
             "run",
-            "codex",
+            "site-builder",
             "https://example.com/repo.git",
         ])
         .output()
@@ -245,7 +245,7 @@ fn binary_run_command_exits_non_zero_and_reports_failed_sessions_on_stderr() {
             "--config",
             config_path.to_str().expect("config path should be utf-8"),
             "run",
-            "codex",
+            "site-builder",
             "https://example.com/repo.git",
         ])
         .output()
@@ -303,7 +303,7 @@ fn binary_run_command_exits_non_zero_and_reports_timed_out_sessions_on_stderr() 
             "--config",
             config_path.to_str().expect("config path should be utf-8"),
             "run",
-            "codex",
+            "site-builder",
             "https://example.com/repo.git",
         ])
         .output()
@@ -361,11 +361,11 @@ socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
 [[profiles]]
-name = "Codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "Site-Builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
             socket_path = socket_path.display(),
             pid_file = pid_file.display()
@@ -378,7 +378,7 @@ command = ["codex", "exec"]
             "--config",
             config_path.to_str().expect("config path should be utf-8"),
             "run",
-            "codex",
+            "site-builder",
             "https://example.com/repo.git",
         ])
         .output()

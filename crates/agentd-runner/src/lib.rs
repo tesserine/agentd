@@ -338,7 +338,7 @@ mod tests {
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[
                         (
-                            &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
+                            &["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(
             report.removed_container_names,
             vec![
-                "agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string(),
+                "agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa".to_string(),
                 "agentd-1a2b3c4d-review-bbbbbbbbbbbbbbbb".to_string(),
                 "agentd-1a2b3c4d-build-cccccccccccccccc".to_string(),
                 "agentd-1a2b3c4d-prepare-dddddddddddddddd".to_string(),
@@ -427,7 +427,7 @@ mod tests {
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa agentd-1a2b3c4d-review-bbbbbbbbbbbbbbbb agentd-1a2b3c4d-build-cccccccccccccccc agentd-1a2b3c4d-prepare-dddddddddddddddd agentd-1a2b3c4d-init-1212121212121212\n"
+            "rm --force --ignore agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa agentd-1a2b3c4d-review-bbbbbbbbbbbbbbbb agentd-1a2b3c4d-build-cccccccccccccccc agentd-1a2b3c4d-prepare-dddddddddddddddd agentd-1a2b3c4d-init-1212121212121212\n"
         );
         assert_eq!(
             fixture.secret_commands(),
@@ -445,7 +445,7 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[(
-                        &["agentd-1a2b3c4d-codex-dddddddddddddddd"],
+                        &["agentd-1a2b3c4d-site-builder-dddddddddddddddd"],
                         "running",
                         "Up 2 minutes",
                     )]),
@@ -475,7 +475,7 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[(
-                        &["agentd-1a2b3c4d-codex-dddddddddddddddd"],
+                        &["agentd-1a2b3c4d-site-builder-dddddddddddddddd"],
                         "mystery-state",
                         "Something odd just happened",
                     )]),
@@ -507,7 +507,7 @@ mod tests {
                     &fake_podman_ps_json(&[
                         (&["agentd-proxy"], "exited", "Exited (0) 10s ago"),
                         (
-                            &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
+                            &["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
@@ -530,7 +530,7 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string(),]
+            vec!["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa".to_string(),]
         );
         assert_eq!(
             report.removed_secret_names,
@@ -538,7 +538,7 @@ mod tests {
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
+            "rm --force --ignore agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa\n"
         );
         assert_eq!(
             fixture.secret_commands(),
@@ -557,12 +557,12 @@ mod tests {
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[
                         (
-                            &["agentd-1a2b3c4d-codex-AAAAAAAAAAAAAAAA"],
+                            &["agentd-1a2b3c4d-site-builder-AAAAAAAAAAAAAAAA"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
                         (
-                            &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
+                            &["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
@@ -586,7 +586,7 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string()]
+            vec!["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa".to_string()]
         );
         assert_eq!(
             report.removed_secret_names,
@@ -594,7 +594,7 @@ mod tests {
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
+            "rm --force --ignore agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa\n"
         );
         assert_eq!(
             fixture.secret_commands(),
@@ -612,7 +612,7 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[(
-                        &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
+                        &["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa"],
                         "exited",
                         "Exited (0) 10s ago",
                     )]),
@@ -635,7 +635,7 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string()]
+            vec!["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa".to_string()]
         );
         assert_eq!(
             report.removed_secret_names,
@@ -643,7 +643,7 @@ mod tests {
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
+            "rm --force --ignore agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa\n"
         );
         assert_eq!(
             fixture.secret_commands(),
@@ -725,7 +725,7 @@ mod tests {
             &FakePodmanScenario::new()
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[(
-                        &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
+                        &["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa"],
                         "exited",
                         "Exited (0) 10s ago",
                     )]),
@@ -754,7 +754,7 @@ mod tests {
                         "rm",
                         "--force",
                         "--ignore",
-                        "agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa",
+                        "agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa",
                     ]
                 );
                 assert_eq!(status.code(), Some(51));
@@ -764,7 +764,7 @@ mod tests {
         }
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "--force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
+            "--force --ignore agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa\n"
         );
     }
 
@@ -779,12 +779,12 @@ mod tests {
                 .with_ps(CommandBehavior::from_outcome(CommandOutcome::new().stdout(
                     &fake_podman_ps_json(&[
                         (
-                            &["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa"],
+                            &["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
                         (
-                            &["agentd-deadbeef-codex-bbbbbbbbbbbbbbbb"],
+                            &["agentd-deadbeef-site-builder-bbbbbbbbbbbbbbbb"],
                             "exited",
                             "Exited (0) 10s ago",
                         ),
@@ -808,7 +808,7 @@ mod tests {
 
         assert_eq!(
             report.removed_container_names,
-            vec!["agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa".to_string()]
+            vec!["agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa".to_string()]
         );
         assert_eq!(
             report.removed_secret_names,
@@ -816,7 +816,7 @@ mod tests {
         );
         assert_eq!(
             fixture.read_log("rm-commands.log"),
-            "rm --force --ignore agentd-1a2b3c4d-codex-aaaaaaaaaaaaaaaa\n"
+            "rm --force --ignore agentd-1a2b3c4d-site-builder-aaaaaaaaaaaaaaaa\n"
         );
         assert_eq!(
             fixture.secret_commands(),

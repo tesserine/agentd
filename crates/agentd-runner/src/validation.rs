@@ -299,10 +299,10 @@ mod tests {
     #[test]
     fn validate_spec_accepts_valid_unix_profile_names() {
         for profile_name in [
-            "codex",
-            "codex-01",
-            "codex_01",
-            "codex-name_01",
+            "site-builder",
+            "site-builder-01",
+            "site-builder_01",
+            "site-builder-name_01",
             &"a".repeat(32),
         ] {
             validate_spec(&SessionSpec {
@@ -318,10 +318,10 @@ mod tests {
     #[test]
     fn validate_profile_name_accepts_valid_unix_profile_names() {
         for profile_name in [
-            "codex",
-            "codex-01",
-            "codex_01",
-            "codex-name_01",
+            "site-builder",
+            "site-builder-01",
+            "site-builder_01",
+            "site-builder-name_01",
             &"a".repeat(32),
         ] {
             validate_profile_name(profile_name).unwrap_or_else(|error| {
@@ -335,11 +335,11 @@ mod tests {
         for profile_name in [
             "",
             "   ",
-            "Codex 01",
-            "123codex",
+            "Site-Builder 01",
+            "123site-builder",
             "---",
-            "_codex",
-            "codex__name!",
+            "_site-builder",
+            "site-builder__name!",
             &format!("a{}", "b".repeat(32)),
         ] {
             let error = validate_profile_name(profile_name)
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn validate_spec_maps_invalid_or_reserved_profile_names_to_runner_error() {
-        for profile_name in ["123codex", "root"] {
+        for profile_name in ["123site-builder", "root"] {
             let error = validate_spec(&SessionSpec {
                 profile_name: profile_name.to_string(),
                 ..test_session_spec()

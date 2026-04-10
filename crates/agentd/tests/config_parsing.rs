@@ -21,10 +21,10 @@ fn assert_invalid_profile_name_parse_error(name: &str) {
         r#"
 [[profiles]]
 name = "{name}"
-base_image = "ghcr.io/example/codex:latest"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#
     ))
     .expect_err("invalid profile names should be rejected at parse time");
@@ -74,11 +74,14 @@ fn write_temp_config_under(base_dir: &Path, name: &str, contents: &str) -> PathB
 #[test]
 fn parses_example_config_into_static_profile_settings() {
     let config = Config::from_str(&example_config()).expect("example config should parse");
-    let profile = config
-        .profile("codex")
-        .expect("example profile should exist");
+    let site_builder = config
+        .profile("site-builder")
+        .expect("site-builder profile should exist");
+    let code_reviewer = config
+        .profile("code-reviewer")
+        .expect("code-reviewer profile should exist");
 
-    assert_eq!(config.profiles().len(), 1);
+    assert_eq!(config.profiles().len(), 2);
     assert_eq!(
         config.daemon().socket_path(),
         Path::new("/run/agentd/agentd.sock")
@@ -87,19 +90,51 @@ fn parses_example_config_into_static_profile_settings() {
         config.daemon().pid_file(),
         Path::new("/run/agentd/agentd.pid")
     );
-    assert_eq!(profile.name(), "codex");
-    assert_eq!(profile.base_image(), "ghcr.io/example/codex:latest");
-    assert_eq!(profile.methodology_dir(), Path::new("../groundwork"));
-    assert_eq!(profile.repo_token_source(), Some("CODEX_REPO_TOKEN"));
-    assert_eq!(profile.command()[0], "/bin/sh");
-    assert_eq!(profile.command()[1], "-lc");
-    assert!(profile.command()[2].contains("runa init --methodology"));
-    assert!(profile.command()[2].contains("/agentd/methodology/manifest.toml"));
-    assert!(profile.command()[2].contains("command = [\"codex\", \"exec\"]"));
-    assert!(profile.command()[2].contains("AGENTD_WORK_UNIT"));
-    assert_eq!(profile.credentials().len(), 1);
-    assert_eq!(profile.credentials()[0].name(), "GITHUB_TOKEN");
-    assert_eq!(profile.credentials()[0].source(), "AGENTD_GITHUB_TOKEN");
+    assert_eq!(site_builder.name(), "site-builder");
+    assert_eq!(
+        site_builder.base_image(),
+        "ghcr.io/example/site-builder:latest"
+    );
+    assert_eq!(site_builder.methodology_dir(), Path::new("../groundwork"));
+    assert_eq!(
+        site_builder.repo_token_source(),
+        Some("SITE_BUILDER_REPO_TOKEN")
+    );
+    assert_eq!(site_builder.command()[0], "/bin/sh");
+    assert_eq!(site_builder.command()[1], "-lc");
+    assert!(site_builder.command()[2].contains("runa init --methodology"));
+    assert!(site_builder.command()[2].contains("/agentd/methodology/manifest.toml"));
+    assert!(site_builder.command()[2].contains("command = [\"site-builder\", \"exec\"]"));
+    assert!(site_builder.command()[2].contains("AGENTD_WORK_UNIT"));
+    assert_eq!(site_builder.credentials().len(), 1);
+    assert_eq!(site_builder.credentials()[0].name(), "GITHUB_TOKEN");
+    assert_eq!(
+        site_builder.credentials()[0].source(),
+        "AGENTD_GITHUB_TOKEN"
+    );
+
+    assert_eq!(code_reviewer.name(), "code-reviewer");
+    assert_eq!(
+        code_reviewer.base_image(),
+        "ghcr.io/example/code-reviewer:latest"
+    );
+    assert_eq!(code_reviewer.methodology_dir(), Path::new("../groundwork"));
+    assert_eq!(
+        code_reviewer.repo_token_source(),
+        Some("CODE_REVIEWER_REPO_TOKEN")
+    );
+    assert_eq!(code_reviewer.command()[0], "/bin/sh");
+    assert_eq!(code_reviewer.command()[1], "-lc");
+    assert!(code_reviewer.command()[2].contains("runa init --methodology"));
+    assert!(code_reviewer.command()[2].contains("/agentd/methodology/manifest.toml"));
+    assert!(code_reviewer.command()[2].contains("command = [\"code-reviewer\", \"exec\"]"));
+    assert!(code_reviewer.command()[2].contains("AGENTD_WORK_UNIT"));
+    assert_eq!(code_reviewer.credentials().len(), 1);
+    assert_eq!(code_reviewer.credentials()[0].name(), "GITHUB_TOKEN");
+    assert_eq!(
+        code_reviewer.credentials()[0].source(),
+        "AGENTD_GITHUB_TOKEN"
+    );
 }
 
 #[test]
@@ -108,16 +143,18 @@ fn loading_config_resolves_relative_methodology_path_from_file_location() {
         "relative-path",
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     );
 
     let config = Config::load(&path).expect("config file should parse");
-    let profile = config.profile("codex").expect("profile should exist");
+    let profile = config
+        .profile("site-builder")
+        .expect("profile should exist");
 
     assert_eq!(
         profile.methodology_dir(),
@@ -135,11 +172,11 @@ fn loading_config_from_a_relative_path_resolves_methodology_dir_from_an_absolute
         "relative-load-path",
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     );
     let relative_path = path
@@ -147,7 +184,9 @@ command = ["codex", "exec"]
         .expect("fixture path should be under the current directory");
 
     let config = Config::load(relative_path).expect("config file should parse");
-    let profile = config.profile("codex").expect("profile should exist");
+    let profile = config
+        .profile("site-builder")
+        .expect("profile should exist");
 
     assert_eq!(
         profile.methodology_dir(),
@@ -171,11 +210,11 @@ socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     );
 
@@ -206,11 +245,11 @@ socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     );
     let relative_path = path
@@ -249,11 +288,11 @@ socket_path = "/run/agentd/a.sock"
 pid_file = "/run/agentd/a.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -286,11 +325,11 @@ socket_path = "/run/agentd/a.sock"
 pid_file = "/run/agentd/a.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("first config should parse");
@@ -301,11 +340,11 @@ socket_path = "/run/agentd/b.sock"
 pid_file = "/run/agentd/a.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("second config should parse");
@@ -331,11 +370,11 @@ socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -359,11 +398,11 @@ fn parses_default_daemon_paths_when_daemon_section_is_omitted() {
     let config = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse with daemon defaults");
@@ -387,11 +426,11 @@ socket_path = "/run/agentd/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -419,11 +458,11 @@ socket_path = "/tmp/agentd-test.sock"
 pid_file = "/tmp/agentd-test.pid"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse explicit daemon paths");
@@ -443,19 +482,21 @@ fn parses_repo_token_source_as_optional_clone_auth_lookup_key() {
     let config = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
-repo_token_source = "CODEX_REPO_TOKEN"
+repo_token_source = "SITE_BUILDER_REPO_TOKEN"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse repo token source");
 
-    let profile = config.profile("codex").expect("profile should exist");
+    let profile = config
+        .profile("site-builder")
+        .expect("profile should exist");
 
-    assert_eq!(profile.repo_token_source(), Some("CODEX_REPO_TOKEN"));
+    assert_eq!(profile.repo_token_source(), Some("SITE_BUILDER_REPO_TOKEN"));
 }
 
 #[test]
@@ -463,33 +504,35 @@ fn normalizes_empty_repo_token_source_to_none() {
     let config = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo_token_source = ""
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect("empty repo token source should disable clone auth");
 
-    let profile = config.profile("codex").expect("profile should exist");
+    let profile = config
+        .profile("site-builder")
+        .expect("profile should exist");
 
     assert_eq!(profile.repo_token_source(), None);
 }
 
 #[test]
 fn rejects_repo_token_source_with_outer_whitespace() {
-    for repo_token_source in [" CODEX_REPO_TOKEN", "CODEX_REPO_TOKEN "] {
+    for repo_token_source in [" SITE_BUILDER_REPO_TOKEN", "SITE_BUILDER_REPO_TOKEN "] {
         let error = Config::from_str(&format!(
             r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "{repo_token_source}"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#
         ))
         .expect_err("whitespace-padded repo token sources should be rejected");
@@ -501,7 +544,7 @@ command = ["codex", "exec"]
                 credential,
             } => {
                 assert_eq!(field, "repo_token_source");
-                assert_eq!(profile.as_deref(), Some("codex"));
+                assert_eq!(profile.as_deref(), Some("site-builder"));
                 assert_eq!(credential, None);
             }
             other => panic!("expected whitespace validation error, got {other}"),
@@ -514,12 +557,12 @@ fn rejects_unknown_fields_in_profile_config() {
     let error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 extra = "nope"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect_err("unknown fields should be rejected");
@@ -537,11 +580,11 @@ socket_path = "/tmp/agentd.sock"
 extra = "nope"
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect_err("unknown daemon fields should be rejected");
@@ -555,24 +598,24 @@ fn rejects_duplicate_profile_names() {
     let error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:stable"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:stable"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect_err("duplicate profile names should be rejected");
 
     match error {
-        ConfigError::DuplicateProfileName { name } => assert_eq!(name, "codex"),
+        ConfigError::DuplicateProfileName { name } => assert_eq!(name, "site-builder"),
         other => panic!("expected duplicate profile name error, got {other}"),
     }
 }
@@ -589,11 +632,11 @@ fn rejects_duplicate_credential_names_within_a_profile() {
     let error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles.credentials]]
 name = "GITHUB_TOKEN"
@@ -608,7 +651,7 @@ source = "AGENTD_GITHUB_OTHER_TOKEN"
 
     match error {
         ConfigError::DuplicateCredentialName { profile, name } => {
-            assert_eq!(profile, "codex");
+            assert_eq!(profile, "site-builder");
             assert_eq!(name, "GITHUB_TOKEN");
         }
         other => panic!("expected duplicate credential name error, got {other}"),
@@ -621,10 +664,10 @@ fn rejects_empty_required_string_fields() {
         r#"
 [[profiles]]
 name = ""
-base_image = "ghcr.io/example/codex:latest"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect_err("empty names should be rejected");
@@ -634,15 +677,15 @@ command = ["codex", "exec"]
 
 #[test]
 fn rejects_profile_names_with_leading_or_trailing_whitespace() {
-    for name in [" codex", "codex "] {
+    for name in [" site-builder", "site-builder "] {
         let error = Config::from_str(&format!(
             r#"
 [[profiles]]
 name = "{name}"
-base_image = "ghcr.io/example/codex:latest"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#
         ))
         .expect_err("whitespace-padded profile names should be rejected");
@@ -664,12 +707,12 @@ command = ["codex", "exec"]
 
 #[test]
 fn rejects_uppercase_profile_names_at_parse_time() {
-    assert_invalid_profile_name_parse_error("Codex");
+    assert_invalid_profile_name_parse_error("Site-Builder");
 }
 
 #[test]
 fn rejects_digit_prefixed_profile_names_at_parse_time() {
-    assert_invalid_profile_name_parse_error("123codex");
+    assert_invalid_profile_name_parse_error("123site-builder");
 }
 
 #[test]
@@ -688,11 +731,11 @@ fn rejects_credential_names_with_leading_or_trailing_whitespace() {
         let error = Config::from_str(&format!(
             r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles.credentials]]
 name = "{name}"
@@ -708,7 +751,7 @@ source = "AGENTD_GITHUB_TOKEN"
                 credential,
             } => {
                 assert_eq!(field, "credentials.name");
-                assert_eq!(profile.as_deref(), Some("codex"));
+                assert_eq!(profile.as_deref(), Some("site-builder"));
                 assert_eq!(credential, None);
             }
             other => panic!("expected whitespace validation error, got {other}"),
@@ -721,11 +764,11 @@ fn rejects_credential_names_containing_commas() {
     let error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles.credentials]]
 name = "TOKEN,EXTRA"
@@ -736,7 +779,7 @@ source = "AGENTD_GITHUB_TOKEN"
 
     match error {
         ConfigError::InvalidCredentialName { profile, name } => {
-            assert_eq!(profile, "codex");
+            assert_eq!(profile, "site-builder");
             assert_eq!(name, "TOKEN,EXTRA");
         }
         other => panic!("expected invalid credential name error, got {other}"),
@@ -748,11 +791,11 @@ fn rejects_credential_names_containing_equals_signs() {
     let error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles.credentials]]
 name = "FOO=BAR"
@@ -763,7 +806,7 @@ source = "AGENTD_GITHUB_TOKEN"
 
     match error {
         ConfigError::InvalidCredentialName { profile, name } => {
-            assert_eq!(profile, "codex");
+            assert_eq!(profile, "site-builder");
             assert_eq!(name, "FOO=BAR");
         }
         other => panic!("expected invalid credential name error, got {other}"),
@@ -775,11 +818,11 @@ fn rejects_reserved_credential_names() {
     let error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 
 [[profiles.credentials]]
 name = "PROFILE_NAME"
@@ -790,7 +833,7 @@ source = "AGENTD_GITHUB_TOKEN"
 
     match error {
         ConfigError::InvalidCredentialName { profile, name } => {
-            assert_eq!(profile, "codex");
+            assert_eq!(profile, "site-builder");
             assert_eq!(name, "PROFILE_NAME");
         }
         other => panic!("expected invalid credential name error, got {other}"),
@@ -802,8 +845,8 @@ fn rejects_empty_command_arrays_and_empty_command_elements() {
     let empty_command_error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
 command = []
@@ -814,11 +857,11 @@ command = []
     let empty_element_error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", ""]
+command = ["site-builder", ""]
 "#,
     )
     .expect_err("empty command elements should be rejected");
@@ -832,8 +875,8 @@ fn rejects_missing_command_field() {
     let error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 "#,
     )
@@ -847,12 +890,12 @@ fn rejects_legacy_runa_table() {
     let error = Config::from_str(
         r#"
 [[profiles]]
-name = "codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
 [profiles.runa]
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     )
     .expect_err("legacy runa table should be rejected");
@@ -889,11 +932,11 @@ socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
 [[profiles]]
-name = "Codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "Site-Builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     );
 
@@ -912,11 +955,11 @@ fn loading_daemon_config_uses_defaults_when_daemon_section_is_omitted() {
         "daemon-only-defaults",
         r#"
 [[profiles]]
-name = "Codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "Site-Builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     );
 
@@ -936,11 +979,11 @@ socket_path = "/tmp/agentd.sock"
 extra = "nope"
 
 [[profiles]]
-name = "Codex"
-base_image = "ghcr.io/example/codex:latest"
+name = "Site-Builder"
+base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["codex", "exec"]
+command = ["site-builder", "exec"]
 "#,
     );
 

@@ -34,7 +34,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             command: vec![
-                "codex".to_string(),
+                "site-builder".to_string(),
                 "exec".to_string(),
                 "--sandbox".to_string(),
                 "workspace-write".to_string(),
@@ -82,7 +82,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
             profile_name: "mixed-env-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -130,7 +130,7 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
             profile_name: "unset-work-unit-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "success-without-work-unit".to_string(),
@@ -170,7 +170,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
             profile_name: "failure-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -216,7 +216,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
             profile_name: "failure-run-125".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -263,7 +263,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             profile_name: "comma-methodology-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -307,7 +307,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
             profile_name: "timeout-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
-            command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -354,7 +354,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                 profile_name: "running-secret-run".to_string(),
                 base_image: image,
                 methodology_dir,
-                command: vec!["codex".to_string(), "exec".to_string()],
+                command: vec!["site-builder".to_string(), "exec".to_string()],
                 environment: vec![
                     ResolvedEnvironmentVariable {
                         name: "GITHUB_TOKEN".to_string(),
@@ -451,7 +451,8 @@ impl SessionFixture {
         let context_dir = self.root.join("image-context");
         fs::create_dir_all(&context_dir).expect("image context should be created");
 
-        fs::write(context_dir.join("codex"), CODEX_STUB).expect("codex stub should be written");
+        fs::write(context_dir.join("site-builder"), SITE_BUILDER_STUB)
+            .expect("site-builder stub should be written");
         fs::write(context_dir.join("entrypoint.sh"), ENTRYPOINT_SH)
             .expect("entrypoint script should be written");
         let containerfile = work_unit
@@ -709,9 +710,9 @@ FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git gosu passwd \
     && rm -rf /var/lib/apt/lists/*
-COPY codex /usr/local/bin/codex
+COPY site-builder /usr/local/bin/site-builder
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /usr/local/bin/codex /entrypoint.sh
+RUN chmod +x /usr/local/bin/site-builder /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 "#;
 
@@ -842,7 +843,7 @@ fn write_http_response(stream: &mut TcpStream, status: &str, body: &[u8], head_o
     }
 }
 
-const CODEX_STUB: &str = r#"#!/bin/sh
+const SITE_BUILDER_STUB: &str = r#"#!/bin/sh
 set -eu
 
 command_name="$1"
@@ -903,7 +904,7 @@ case "$command_name" in
         exit 99
         ;;
     *)
-        echo "unexpected codex subcommand: $command_name" >&2
+        echo "unexpected site-builder subcommand: $command_name" >&2
         exit 98
         ;;
 esac
