@@ -120,6 +120,8 @@ impl Scheduler {
     /// Each due profile dispatches at most once per tick. After dispatch, the
     /// next fire time advances to the first occurrence strictly after `now`,
     /// which intentionally skips missed occurrences instead of backfilling.
+    /// Startup seeding is inclusive, but post-dispatch advancement is
+    /// intentionally exclusive so one instant cannot dispatch twice.
     pub fn dispatch_due<D: Dispatcher>(
         &mut self,
         now: DateTime<Local>,
@@ -182,7 +184,7 @@ struct ScheduledEntry {
 
 impl ScheduledEntry {
     fn new(profile: ScheduledProfile, now: DateTime<Local>) -> Result<Self, CronError> {
-        let next_fire = profile.cron.find_next_occurrence(&now, false)?;
+        let next_fire = profile.cron.find_next_occurrence(&now, true)?;
         Ok(Self { profile, next_fire })
     }
 }
@@ -324,8 +326,51 @@ mod tests {
     }
 
     #[test]
+    fn startup_on_a_schedule_boundary_dispatches_immediately_once() {
+        let start = local_datetime(2026, 4, 10, 10, 15, 0);
+        let mut scheduler = Scheduler::new(
+            vec![
+                ScheduledProfile::new(
+                    "site-builder".to_string(),
+                    "https://example.com/site.git".to_string(),
+                    "*/15 * * * *",
+                )
+                .expect("schedule should parse"),
+            ],
+            start,
+        )
+        .expect("scheduler should build");
+        let dispatcher = RecordingDispatcher::new();
+
+        let first_tick = scheduler.dispatch_due(start, &dispatcher);
+        assert_eq!(
+            first_tick.len(),
+            1,
+            "startup on the exact boundary should fire immediately"
+        );
+        assert_eq!(
+            dispatcher.requests(),
+            vec![ScheduledRunRequest {
+                profile: "site-builder".to_string(),
+                repo_url: "https://example.com/site.git".to_string(),
+            }]
+        );
+        assert_eq!(
+            scheduler.next_wake_at(),
+            Some(local_datetime(2026, 4, 10, 10, 30, 0)),
+            "after firing at startup the next wake should advance past the current instant"
+        );
+
+        let second_tick = scheduler.dispatch_due(start, &dispatcher);
+        assert!(
+            second_tick.is_empty(),
+            "the same boundary instant should not dispatch twice"
+        );
+    }
+
+    #[test]
     fn next_wake_at_tracks_the_earliest_scheduled_profile() {
-        let start = local_datetime(2026, 4, 10, 10, 0, 0);
+        let start = local_datetime(2026, 4, 10, 10, 0, 30);
         let scheduler = Scheduler::new(
             vec![
                 ScheduledProfile::new(

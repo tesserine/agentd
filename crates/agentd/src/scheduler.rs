@@ -9,7 +9,7 @@ use agentd_scheduler::{
 
 use crate::RunRequest;
 use crate::config::{Config, DaemonConfig};
-use crate::daemon::request_run;
+use crate::daemon::request_run_without_waiting;
 
 pub(crate) fn spawn_scheduler_thread(
     config: &Config,
@@ -74,7 +74,7 @@ impl Dispatcher for SocketDispatcher {
         thread::Builder::new()
             .name(format!("agentd-scheduled-dispatch-{}", request.profile))
             .spawn(move || {
-                if let Err(error) = request_run(
+                if let Err(error) = request_run_without_waiting(
                     &daemon_config,
                     &RunRequest {
                         profile: request.profile.clone(),
@@ -98,6 +98,8 @@ impl Dispatcher for SocketDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, ErrorKind};
+    use std::os::unix::net::UnixListener;
     use std::str::FromStr;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
@@ -149,6 +151,19 @@ mod tests {
         panic!("timed out waiting for {}", path.display());
     }
 
+    fn unique_runtime_dir(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "agentd-scheduler-test-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).expect("runtime dir should be created");
+        path
+    }
+
     #[test]
     fn scheduled_profiles_ignore_profiles_without_schedule() {
         let config = Config::from_str(
@@ -184,15 +199,7 @@ command = ["code-reviewer", "exec"]
 
     #[test]
     fn socket_dispatcher_sends_runs_through_the_daemon_socket() {
-        let runtime_dir = std::env::temp_dir().join(format!(
-            "agentd-scheduler-dispatch-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time should be after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+        let runtime_dir = unique_runtime_dir("dispatch");
         let config = Config::from_str(&format!(
             r#"
 [daemon]
@@ -251,5 +258,71 @@ command = ["site-builder", "exec"]
             .join()
             .expect("daemon thread should join")
             .expect("daemon should exit cleanly");
+    }
+
+    #[test]
+    fn socket_dispatcher_closes_the_socket_after_writing_the_run_request() {
+        let runtime_dir = unique_runtime_dir("fire-and-forget");
+        let socket_path = runtime_dir.join("agentd.sock");
+        let listener = UnixListener::bind(&socket_path).expect("listener should bind");
+        let config = Config::from_str(&format!(
+            r#"
+[daemon]
+socket_path = "{socket_path}"
+pid_file = "{pid_file}"
+
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+repo = "https://example.com/site.git"
+
+command = ["site-builder", "exec"]
+"#,
+            socket_path = socket_path.display(),
+            pid_file = runtime_dir.join("agentd.pid").display(),
+        ))
+        .expect("config should parse");
+        let dispatcher = SocketDispatcher {
+            daemon_config: config.daemon().clone(),
+        };
+
+        dispatcher
+            .dispatch(ScheduledRunRequest {
+                profile: "site-builder".to_string(),
+                repo_url: "https://example.com/site.git".to_string(),
+            })
+            .expect("dispatch should spawn a socket client");
+
+        let (stream, _) = listener.accept().expect("dispatcher should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("stream timeout should be configured");
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .expect("dispatcher should write one json line");
+        assert!(bytes_read > 0, "expected a run request payload");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).expect("request should be valid json"),
+            serde_json::json!({
+                "type": "run",
+                "profile": "site-builder",
+                "repo_url": "https://example.com/site.git",
+                "work_unit": null,
+            })
+        );
+
+        line.clear();
+        let eof = reader.read_line(&mut line);
+        match eof {
+            Ok(0) => {}
+            Ok(bytes_read) => panic!("expected EOF after the request line, got {bytes_read} bytes"),
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                panic!("dispatcher kept the socket open instead of closing after the write")
+            }
+            Err(error) => panic!("expected EOF after the request line, got {error}"),
+        }
     }
 }
