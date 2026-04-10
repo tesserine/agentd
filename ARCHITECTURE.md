@@ -76,7 +76,7 @@ The workspace contains three crates because there are three distinct rates of ch
 
 ## 4. Session Lifecycle
 
-A session is one execution of one profile from trigger to teardown.
+A session is one execution created from a profile, spanning trigger to teardown.
 
 Before the daemon accepts any session trigger, it first reconciles stale
 runner-managed Podman resources from prior runs of the same daemon instance.
