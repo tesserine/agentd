@@ -1,72 +1,116 @@
 # agentd
 
-`agentd` is an autonomous AI agent runtime daemon. Run autonomous AI agents on infrastructure you control.
+Autonomous AI agent runtime daemon. agentd runs agent sessions in ephemeral
+Podman containers on infrastructure you control. Each session gets an isolated
+execution environment — its own identity, credentials, a fresh repository
+clone, and read-only methodology context — supervised from setup through
+teardown. agentd prepares and supervises these environments; model inference and
+MCP transport belong to the agent runtime inside the container.
+
+## Why
+
+Running autonomous agents requires infrastructure: isolated environments,
+credential injection, workspace setup, identity management. Operators building
+this ad-hoc re-solve the same problems for each agent and each deployment.
+
+agentd is the self-hosted runtime layer. The operator declares *what* through
+profile configuration — which image, which credentials, which methodology.
+agentd owns *how* — container lifecycle, privilege management, resource cleanup.
+The agent gets an isolated, ephemeral workspace with exactly what it needs and
+nothing more.
 
 ## Status
 
-Early development. The current build supports:
-- foreground single-instance daemon startup
-- startup reconciliation of stale runner-managed Podman containers and secrets owned by the starting daemon instance before accepting new sessions
-- local Unix-socket operator control
-- manual `agentd run <profile> <repo> [--work-unit <wu>]` session triggers
-- clone-only repository auth through optional `repo_token_source`
+v0.1.0 — early development.
 
-## Architecture Overview
+The session lifecycle works end-to-end: profile configuration, foreground daemon
+startup, operator-triggered sessions, ephemeral Podman containers, credential
+injection, execution, and teardown. Startup reconciliation cleans stale
+resources from prior runs. Structured JSON tracing provides operational
+visibility.
 
-The system is organized as a Rust workspace with focused crates for composition, session lifecycle, and scheduling. Agent runtimes handle MCP directly when they need it; `agentd` is responsible for preparing and supervising the execution environment. See [ARCHITECTURE.md](ARCHITECTURE.md) for the architecture document.
+Scheduling policy (the `agentd-scheduler` crate) does not exist yet — sessions
+are triggered manually through the daemon's Unix socket.
 
-## Quick Start
+## Configuration
 
-1. Start from [examples/agentd.toml](examples/agentd.toml) and define at least one profile.
-2. Export any runtime credential env vars named by `[[profiles.credentials]].source`.
-3. Optionally export the env var named by `repo_token_source` when private HTTPS clones need a bearer token for `git clone`.
-4. Start the daemon:
+A profile is a named environment specification: base image, methodology
+directory, credentials, and runtime command. Define profiles in a TOML config
+file — start from [`examples/agentd.toml`](examples/agentd.toml):
+
+```toml
+# Static profile registry for agentd.
+# Session-specific inputs such as repo and work unit come from the CLI at run time.
+
+[[profiles]]
+# Stable operator-facing profile name used for lookup and container identity.
+name = "codex"
+# Prebuilt image containing the agent runtime and runa.
+base_image = "ghcr.io/example/codex:latest"
+# Methodology directory to mount read-only into the session environment.
+methodology_dir = "../groundwork"
+# Optional environment variable name resolved by the daemon for clone-only
+# repository authentication. This value does not flow into the agent runtime.
+repo_token_source = "CODEX_REPO_TOKEN"
+
+[profiles.runa]
+# Static agent-runtime command executed by runa inside the container.
+command = ["codex", "exec"]
+
+[[profiles.credentials]]
+# Secret name exposed inside the session environment.
+name = "GITHUB_TOKEN"
+# Environment variable name read from the daemon's own process environment.
+source = "AGENTD_GITHUB_TOKEN"
+```
+
+Credential `source` fields name environment variables in the daemon's process
+environment — export them before starting the daemon. The base image must
+provide `/bin/sh`, `git`, `useradd`, and `gosu` in `PATH`.
+
+## Running a Session
+
+Build from source with `cargo build --release`. Requires rootless Podman for
+container execution.
+
+Start the daemon:
 
 ```bash
 agentd daemon --config /etc/agentd/agentd.toml
 ```
 
-`agentd` with no subcommand is the same as `agentd daemon`.
+The daemon runs in the foreground, reconciles stale resources from prior runs,
+and binds a Unix socket for operator control. Default paths:
+`/run/agentd/agentd.sock` and `/run/agentd/agentd.pid`.
 
-Before the daemon binds its Unix socket, it reconciles stale runner-managed
-session containers named `agentd-{daemon8}-{profile}-{session16}` and orphaned
-runner-managed secrets named `agentd-{daemon8}-{session16}-{suffix}` left
-behind by prior runs of the same daemon instance. The daemon instance id is
-derived from the configured socket and PID paths, so different runtime-path
-pairs on the same host do not clean up each other's resources. Startup aborts
-if that cleanup cannot complete.
-
-The daemon is a foreground process. By default it uses:
-- socket: `/run/agentd/agentd.sock`
-- pid file: `/run/agentd/agentd.pid`
-
-Override those paths in the config file:
-
-```toml
-[daemon]
-socket_path = "/run/agentd/agentd.sock"
-pid_file = "/run/agentd/agentd.pid"
-```
-
-Relative `socket_path` and `pid_file` values are resolved from the directory
-that contains the config file.
-
-On `SIGINT` or `SIGTERM`, the first signal stops accepting new operator
-connections and drains in-flight sessions. A second signal exits immediately.
-
-Trigger a manual session through the running daemon:
+Trigger a session through the running daemon:
 
 ```bash
-agentd run codex https://github.com/pentaxis93/agentd.git --work-unit issue-52
+agentd run codex https://github.com/pentaxis93/agentd.git --work-unit issue-42
 ```
 
-`agentd run` reads the same config file for daemon runtime paths. It ignores
-the `profiles` registry, but the top-level config shape must still be valid, so
-typos like `[deamon]` fail instead of silently falling back to default daemon
-paths.
+This connects to the daemon's socket and dispatches a session using the `codex`
+profile. Inside the container, the agent sees:
 
-`repo_token_source` is not a runtime credential. It is resolved by the daemon at dispatch time, mapped to `SessionInvocation.repo_token`, and used only for the runner-managed `git clone`.
+- An unprivileged user with `$HOME` at `/home/codex`
+- A fresh clone of the repository at `/home/codex/repo`
+- Read-only methodology mount at `/agentd/methodology`
+- Credentials injected as environment variables
+- `runa run` executing the configured command from the repo directory
+
+The container is force-removed on completion. No session state persists on the
+host.
+
+## Going Deeper
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — session lifecycle phases, container
+  isolation model, credential flow, and workspace crate boundaries. How the
+  system is built and why.
+- **[AGENTS.md](AGENTS.md)** — development discipline, BDD workflow, commit and
+  branch conventions. Read this before contributing.
+- **[examples/agentd.toml](examples/agentd.toml)** — annotated profile
+  configuration. Starting point for writing your own.
 
 ## License
 
-Licensed under the terms in [LICENSE](LICENSE).
+[MIT](LICENSE)
