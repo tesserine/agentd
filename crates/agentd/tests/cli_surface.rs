@@ -590,6 +590,67 @@ fn binary_run_command_exits_non_zero_and_reports_timed_out_sessions_on_stderr() 
 }
 
 #[test]
+fn binary_run_command_exits_non_zero_and_reports_signal_terminated_sessions_on_stderr() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-signaled-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-signaled",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let (shutdown, handle, _config) = start_test_daemon(
+        &config_path,
+        SessionOutcome::TerminatedBySignal {
+            exit_code: 130,
+            signal: 2,
+        },
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            "https://example.com/repo.git",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        !output.status.success(),
+        "run command should fail when the daemon reports a signal-terminated session"
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .expect("stdout should be valid UTF-8")
+            .is_empty(),
+        "signal-terminated run should not print a success-style stdout message"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert!(
+        stderr.contains("session terminated_by_signal (exit code 130, signal 2)"),
+        "expected signal-terminated session error on stderr, got: {stderr}"
+    );
+}
+
+#[test]
 fn binary_run_command_exits_zero_and_reports_blocked_sessions_on_stdout() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-blocked-{}-{}",

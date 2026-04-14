@@ -92,7 +92,9 @@ The daemon's Unix socket is the single intake for all session triggers. Manual
 CLI invocation connects to that socket as a client. Scheduling policy also
 connects to that socket as a client when it decides work should start. The
 daemon accepts those run requests uniformly and dispatches them into session
-execution.
+execution. In `v0.1.x` this socket protocol is internal and unversioned:
+daemon and CLI must be the same build, and replacing the binary requires a
+daemon restart before new CLI invocations are supported.
 
 Operational visibility for that lifecycle uses structured tracing events written
 to stderr. The production default is timestamped JSON lines at `info` so

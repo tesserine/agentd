@@ -121,7 +121,7 @@ impl SessionOutcome {
             6 => Self::InfrastructureFailure { exit_code },
             126 => Self::CommandNotExecutable { exit_code },
             127 => Self::CommandNotFound { exit_code },
-            128.. => Self::TerminatedBySignal {
+            129.. => Self::TerminatedBySignal {
                 exit_code,
                 signal: exit_code - 128,
             },
@@ -177,6 +177,30 @@ impl SessionOutcome {
             self,
             Self::Success { .. } | Self::Blocked { .. } | Self::NothingReady { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionOutcome;
+
+    #[test]
+    fn exit_code_128_is_generic_failure() {
+        assert_eq!(
+            SessionOutcome::from_exit_code(128),
+            SessionOutcome::GenericFailure { exit_code: 128 }
+        );
+    }
+
+    #[test]
+    fn signal_derived_exit_codes_above_128_remain_signal_terminations() {
+        assert_eq!(
+            SessionOutcome::from_exit_code(130),
+            SessionOutcome::TerminatedBySignal {
+                exit_code: 130,
+                signal: 2,
+            }
+        );
     }
 }
 

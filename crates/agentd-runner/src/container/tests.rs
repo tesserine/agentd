@@ -456,6 +456,32 @@ fn attached_start_classifies_signal_exit_as_signal_termination() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn attached_start_classifies_real_process_signals_as_signal_termination() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let outcome = classify_attached_start_result(
+        vec![
+            "start".to_string(),
+            "--attach".to_string(),
+            "container".to_string(),
+        ],
+        "container",
+        ExitStatusExt::from_raw(2),
+        String::new(),
+    )
+    .expect("real signal terminations should be preserved as semantic outcomes");
+
+    assert_eq!(
+        outcome,
+        SessionOutcome::TerminatedBySignal {
+            exit_code: 130,
+            signal: 2,
+        }
+    );
+}
+
 #[test]
 fn attached_start_classifies_zero_exit_as_success() {
     let outcome = classify_attached_start_result(
