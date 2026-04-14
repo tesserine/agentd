@@ -303,7 +303,7 @@ fn binary_run_command_uses_profile_default_repo_when_repo_argument_is_omitted() 
     );
 
     let (shutdown, handle, _config, invocations) =
-        start_recording_test_daemon(&config_path, SessionOutcome::Succeeded);
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
@@ -356,7 +356,7 @@ fn binary_run_command_prefers_explicit_repo_over_profile_default_repo() {
     let explicit_repo = "https://example.com/override.git";
 
     let (shutdown, handle, _config, invocations) =
-        start_recording_test_daemon(&config_path, SessionOutcome::Succeeded);
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
@@ -491,8 +491,10 @@ fn binary_run_command_exits_non_zero_and_reports_failed_sessions_on_stderr() {
     unsafe {
         std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
     }
-    let (shutdown, handle, _config) =
-        start_test_daemon(&config_path, SessionOutcome::Failed { exit_code: 23 });
+    let (shutdown, handle, _config) = start_test_daemon(
+        &config_path,
+        SessionOutcome::GenericFailure { exit_code: 23 },
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
@@ -527,7 +529,7 @@ fn binary_run_command_exits_non_zero_and_reports_failed_sessions_on_stderr() {
 
     let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
     assert!(
-        stderr.contains("session failed (exit code 23)"),
+        stderr.contains("session generic_failure (exit code 23)"),
         "expected failed-session error on stderr, got: {stderr}"
     );
 }
@@ -588,6 +590,116 @@ fn binary_run_command_exits_non_zero_and_reports_timed_out_sessions_on_stderr() 
 }
 
 #[test]
+fn binary_run_command_exits_zero_and_reports_blocked_sessions_on_stdout() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-blocked-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-blocked",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let (shutdown, handle, _config) =
+        start_test_daemon(&config_path, SessionOutcome::Blocked { exit_code: 3 });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            "https://example.com/repo.git",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "run command should treat blocked as a normal terminal state: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "session blocked\n"
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("stderr should be valid UTF-8")
+            .is_empty(),
+        "blocked run should not print an error-style stderr message"
+    );
+}
+
+#[test]
+fn binary_run_command_exits_zero_and_reports_nothing_ready_sessions_on_stdout() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-nothing-ready-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-nothing-ready",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let (shutdown, handle, _config) =
+        start_test_daemon(&config_path, SessionOutcome::NothingReady { exit_code: 4 });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            "https://example.com/repo.git",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "run command should treat nothing_ready as a normal terminal state: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "session nothing_ready\n"
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("stderr should be valid UTF-8")
+            .is_empty(),
+        "nothing_ready run should not print an error-style stderr message"
+    );
+}
+
+#[test]
 fn binary_run_command_succeeds_when_profile_registry_becomes_invalid_after_daemon_start() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-invalid-registry-{}-{}",
@@ -605,7 +717,8 @@ fn binary_run_command_succeeds_when_profile_registry_becomes_invalid_after_daemo
         &daemon_test_config(&socket_path, &pid_file),
     );
 
-    let (shutdown, handle, _config) = start_test_daemon(&config_path, SessionOutcome::Succeeded);
+    let (shutdown, handle, _config) =
+        start_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
     std::fs::write(
         &config_path,
         format!(
@@ -651,6 +764,6 @@ command = ["site-builder", "exec"]
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
-        "session succeeded\n"
+        "session success\n"
     );
 }

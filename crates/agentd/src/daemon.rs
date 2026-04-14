@@ -139,16 +139,38 @@ enum ResponseMessage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum OutcomeMessage {
-    Succeeded,
-    Failed { exit_code: i32 },
+    Success { exit_code: i32 },
+    GenericFailure { exit_code: i32 },
+    UsageError { exit_code: i32 },
+    Blocked { exit_code: i32 },
+    NothingReady { exit_code: i32 },
+    WorkFailed { exit_code: i32 },
+    InfrastructureFailure { exit_code: i32 },
+    CommandNotExecutable { exit_code: i32 },
+    CommandNotFound { exit_code: i32 },
+    TerminatedBySignal { exit_code: i32, signal: i32 },
     TimedOut,
 }
 
 impl From<SessionOutcome> for OutcomeMessage {
     fn from(outcome: SessionOutcome) -> Self {
         match outcome {
-            SessionOutcome::Succeeded => Self::Succeeded,
-            SessionOutcome::Failed { exit_code } => Self::Failed { exit_code },
+            SessionOutcome::Success { exit_code } => Self::Success { exit_code },
+            SessionOutcome::GenericFailure { exit_code } => Self::GenericFailure { exit_code },
+            SessionOutcome::UsageError { exit_code } => Self::UsageError { exit_code },
+            SessionOutcome::Blocked { exit_code } => Self::Blocked { exit_code },
+            SessionOutcome::NothingReady { exit_code } => Self::NothingReady { exit_code },
+            SessionOutcome::WorkFailed { exit_code } => Self::WorkFailed { exit_code },
+            SessionOutcome::InfrastructureFailure { exit_code } => {
+                Self::InfrastructureFailure { exit_code }
+            }
+            SessionOutcome::CommandNotExecutable { exit_code } => {
+                Self::CommandNotExecutable { exit_code }
+            }
+            SessionOutcome::CommandNotFound { exit_code } => Self::CommandNotFound { exit_code },
+            SessionOutcome::TerminatedBySignal { exit_code, signal } => {
+                Self::TerminatedBySignal { exit_code, signal }
+            }
             SessionOutcome::TimedOut => Self::TimedOut,
         }
     }
@@ -157,10 +179,59 @@ impl From<SessionOutcome> for OutcomeMessage {
 impl From<OutcomeMessage> for SessionOutcome {
     fn from(outcome: OutcomeMessage) -> Self {
         match outcome {
-            OutcomeMessage::Succeeded => Self::Succeeded,
-            OutcomeMessage::Failed { exit_code } => Self::Failed { exit_code },
+            OutcomeMessage::Success { exit_code } => Self::Success { exit_code },
+            OutcomeMessage::GenericFailure { exit_code } => Self::GenericFailure { exit_code },
+            OutcomeMessage::UsageError { exit_code } => Self::UsageError { exit_code },
+            OutcomeMessage::Blocked { exit_code } => Self::Blocked { exit_code },
+            OutcomeMessage::NothingReady { exit_code } => Self::NothingReady { exit_code },
+            OutcomeMessage::WorkFailed { exit_code } => Self::WorkFailed { exit_code },
+            OutcomeMessage::InfrastructureFailure { exit_code } => {
+                Self::InfrastructureFailure { exit_code }
+            }
+            OutcomeMessage::CommandNotExecutable { exit_code } => {
+                Self::CommandNotExecutable { exit_code }
+            }
+            OutcomeMessage::CommandNotFound { exit_code } => Self::CommandNotFound { exit_code },
+            OutcomeMessage::TerminatedBySignal { exit_code, signal } => {
+                Self::TerminatedBySignal { exit_code, signal }
+            }
             OutcomeMessage::TimedOut => Self::TimedOut,
         }
+    }
+}
+
+fn log_manual_run_completed(profile: &str, work_unit: Option<&str>, outcome: &SessionOutcome) {
+    match outcome {
+        SessionOutcome::TimedOut => tracing::warn!(
+            event = "agentd.manual_run_completed",
+            profile = profile,
+            work_unit = work_unit.unwrap_or(""),
+            work_unit_present = work_unit.is_some(),
+            outcome = outcome.label(),
+            "manual run completed"
+        ),
+        SessionOutcome::Success { .. }
+        | SessionOutcome::Blocked { .. }
+        | SessionOutcome::NothingReady { .. } => tracing::info!(
+            event = "agentd.manual_run_completed",
+            profile = profile,
+            work_unit = work_unit.unwrap_or(""),
+            work_unit_present = work_unit.is_some(),
+            outcome = outcome.label(),
+            exit_code = outcome.exit_code(),
+            signal = outcome.signal(),
+            "manual run completed"
+        ),
+        _ => tracing::warn!(
+            event = "agentd.manual_run_completed",
+            profile = profile,
+            work_unit = work_unit.unwrap_or(""),
+            work_unit_present = work_unit.is_some(),
+            outcome = outcome.label(),
+            exit_code = outcome.exit_code(),
+            signal = outcome.signal(),
+            "manual run completed"
+        ),
     }
 }
 
@@ -482,15 +553,18 @@ fn handle_connection_inner(
         } => match dispatch_run(
             config,
             &RunRequest {
-                profile,
+                profile: profile.clone(),
                 repo_url,
-                work_unit,
+                work_unit: work_unit.clone(),
             },
             executor,
         ) {
-            Ok(outcome) => ResponseMessage::SessionOutcome {
-                outcome: outcome.into(),
-            },
+            Ok(outcome) => {
+                log_manual_run_completed(&profile, work_unit.as_deref(), &outcome);
+                ResponseMessage::SessionOutcome {
+                    outcome: outcome.into(),
+                }
+            }
             Err(error) => {
                 tracing::warn!(
                     event = "agentd.manual_run_rejected",
@@ -751,6 +825,24 @@ mod tests {
         os::unix::net::{UnixListener, UnixStream},
     };
 
+    #[test]
+    fn response_message_deserializes_blocked_outcome_payloads() {
+        let response: ResponseMessage = serde_json::from_str(
+            r#"{"type":"session_outcome","outcome":{"status":"blocked","exit_code":3}}"#,
+        )
+        .expect("blocked outcome payload should deserialize");
+
+        match response {
+            ResponseMessage::SessionOutcome { outcome } => {
+                assert_eq!(
+                    SessionOutcome::from(outcome),
+                    SessionOutcome::Blocked { exit_code: 3 }
+                );
+            }
+            other => panic!("expected session outcome response, got {other:?}"),
+        }
+    }
+
     #[derive(Clone)]
     struct FixedOutcomeExecutor;
 
@@ -760,7 +852,7 @@ mod tests {
             _spec: SessionSpec,
             _invocation: SessionInvocation,
         ) -> Result<SessionOutcome, RunnerError> {
-            Ok(SessionOutcome::Succeeded)
+            Ok(SessionOutcome::Success { exit_code: 0 })
         }
     }
 

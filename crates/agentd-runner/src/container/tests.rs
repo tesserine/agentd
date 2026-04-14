@@ -392,11 +392,11 @@ fn attached_start_preserves_exit_code_125_when_inspection_reports_terminal_exit(
         ],
         exit_status(125),
         String::new(),
-        || Some(SessionOutcome::Failed { exit_code: 125 }),
+        || Some(SessionOutcome::GenericFailure { exit_code: 125 }),
     )
     .expect("inspected terminal exit code should win over podman attach status");
 
-    assert_eq!(outcome, SessionOutcome::Failed { exit_code: 125 });
+    assert_eq!(outcome, SessionOutcome::GenericFailure { exit_code: 125 });
 }
 
 #[test]
@@ -413,7 +413,47 @@ fn attached_start_classifies_nonzero_exit_as_session_failure() {
     )
     .expect("nonzero exit codes should remain session outcomes");
 
-    assert_eq!(outcome, SessionOutcome::Failed { exit_code: 23 });
+    assert_eq!(outcome, SessionOutcome::GenericFailure { exit_code: 23 });
+}
+
+#[test]
+fn attached_start_classifies_blocked_exit_as_blocked() {
+    let outcome = classify_attached_start_result(
+        vec![
+            "start".to_string(),
+            "--attach".to_string(),
+            "container".to_string(),
+        ],
+        "container",
+        exit_status(3),
+        String::new(),
+    )
+    .expect("blocked exits should be preserved as semantic outcomes");
+
+    assert_eq!(outcome, SessionOutcome::Blocked { exit_code: 3 });
+}
+
+#[test]
+fn attached_start_classifies_signal_exit_as_signal_termination() {
+    let outcome = classify_attached_start_result(
+        vec![
+            "start".to_string(),
+            "--attach".to_string(),
+            "container".to_string(),
+        ],
+        "container",
+        exit_status(130),
+        String::new(),
+    )
+    .expect("signal-derived exits should be preserved as semantic outcomes");
+
+    assert_eq!(
+        outcome,
+        SessionOutcome::TerminatedBySignal {
+            exit_code: 130,
+            signal: 2,
+        }
+    );
 }
 
 #[test]
@@ -430,7 +470,7 @@ fn attached_start_classifies_zero_exit_as_success() {
     )
     .expect("successful attached starts should remain successful session outcomes");
 
-    assert_eq!(outcome, SessionOutcome::Succeeded);
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
 }
 
 #[test]
@@ -537,7 +577,7 @@ fn fake_podman_scenario_records_create_arguments_for_a_successful_session() {
 
     assert_eq!(
         outcome.expect("session should succeed with fake podman"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
     assert!(fixture.create_args().contains("--name"));
 }
@@ -562,7 +602,7 @@ fn run_session_does_not_pass_resolved_environment_values_via_podman_create_argum
 
     assert_eq!(
         outcome.expect("session should succeed with fake podman"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
 
     let create_args = fixture.create_args();
@@ -600,7 +640,7 @@ fn run_session_does_not_pass_repo_token_via_podman_create_arguments() {
 
     assert_eq!(
         outcome.expect("session should succeed with repo token"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
 
     let create_args = fixture.create_args();
@@ -646,7 +686,7 @@ fn run_session_injects_empty_environment_values_via_direct_env_args() {
 
     assert_eq!(
         outcome.expect("session should succeed with mixed empty and non-empty environment"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
 
     let create_args = fixture.create_args();
@@ -686,7 +726,7 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
 
     assert_eq!(
         outcome.expect("session should succeed with fake podman"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
 
     let create_args = fixture.create_args();
@@ -761,7 +801,7 @@ fn run_session_releases_session_secrets_after_container_reaches_running_state() 
 
     assert_eq!(
         outcome.expect("session should succeed with fake podman"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
     assert!(fixture.secret_commands().contains("create"));
     assert!(fixture.secret_commands().contains("rm"));
@@ -809,7 +849,7 @@ fn run_session_continues_when_secret_release_fails_after_container_reaches_runni
 
     assert_eq!(
         outcome.expect("session should still succeed when secret release fails"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
     assert_eq!(
         fixture
@@ -1124,7 +1164,7 @@ fn fake_podman_scenario_allows_create_stdout_without_breaking_success() {
 
     assert_eq!(
         outcome.expect("session should still succeed"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
 }
 

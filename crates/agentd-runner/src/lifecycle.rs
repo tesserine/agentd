@@ -79,27 +79,32 @@ pub(crate) fn log_session_outcome(
     outcome: &SessionOutcome,
 ) {
     match outcome {
-        SessionOutcome::Succeeded => tracing::info!(
-            event = "runner.session_outcome",
-            session_id = session_id,
-            container_name = container_name,
-            outcome = "succeeded",
-            "runner session completed"
-        ),
-        SessionOutcome::Failed { exit_code } => tracing::info!(
-            event = "runner.session_outcome",
-            session_id = session_id,
-            container_name = container_name,
-            outcome = "failed",
-            exit_code = *exit_code,
-            "runner session completed"
-        ),
         SessionOutcome::TimedOut => tracing::warn!(
             event = "runner.session_outcome",
             session_id = session_id,
             container_name = container_name,
-            outcome = "timed_out",
+            outcome = outcome.label(),
             "runner session timed out"
+        ),
+        SessionOutcome::Success { .. }
+        | SessionOutcome::Blocked { .. }
+        | SessionOutcome::NothingReady { .. } => tracing::info!(
+            event = "runner.session_outcome",
+            session_id = session_id,
+            container_name = container_name,
+            outcome = outcome.label(),
+            exit_code = outcome.exit_code(),
+            signal = outcome.signal(),
+            "runner session completed"
+        ),
+        _ => tracing::warn!(
+            event = "runner.session_outcome",
+            session_id = session_id,
+            container_name = container_name,
+            outcome = outcome.label(),
+            exit_code = outcome.exit_code(),
+            signal = outcome.signal(),
+            "runner session completed"
         ),
     }
 }

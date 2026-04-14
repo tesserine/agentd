@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+
+- Session outcomes now follow the shared `commons` exit-code convention across `agentd` and `agentd-runner`: outcomes carry semantic labels plus raw exit codes, daemon and CLI surfaces report labels such as `blocked` and `generic_failure`, `agentd run` exits successfully for normal terminal states (`success`, `blocked`, `nothing_ready`), and timeout remains an agentd-layer outcome outside the shared exit-code vocabulary.
 
 ## [0.1.0] — 2026-04-10
 

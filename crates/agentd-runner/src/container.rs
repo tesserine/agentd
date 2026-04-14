@@ -437,10 +437,7 @@ where
 }
 
 fn container_status_to_outcome(status: ExitStatus) -> SessionOutcome {
-    match status.code().unwrap_or(1) {
-        0 => SessionOutcome::Succeeded,
-        exit_code => SessionOutcome::Failed { exit_code },
-    }
+    SessionOutcome::from_exit_code(status.code().unwrap_or(1))
 }
 
 fn inspect_terminal_container_outcome(container_name: &str) -> Option<SessionOutcome> {
@@ -470,10 +467,7 @@ fn parse_container_state(output: &str) -> Option<(&str, i32)> {
 }
 
 fn exit_code_to_outcome(exit_code: i32) -> SessionOutcome {
-    match exit_code {
-        0 => SessionOutcome::Succeeded,
-        exit_code => SessionOutcome::Failed { exit_code },
-    }
+    SessionOutcome::from_exit_code(exit_code)
 }
 
 fn inspect_container_status(container_name: &str) -> Result<String, RunnerError> {

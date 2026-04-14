@@ -135,7 +135,7 @@ mod tests {
                 .lock()
                 .expect("invocations should lock")
                 .push(invocation);
-            Ok(SessionOutcome::Succeeded)
+            Ok(SessionOutcome::Success { exit_code: 0 })
         }
     }
 
