@@ -85,11 +85,123 @@ pub struct SessionInvocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionOutcome {
     /// The container process exited with code 0.
-    Succeeded,
-    /// The container process exited with a non-zero code.
-    Failed { exit_code: i32 },
+    Success { exit_code: i32 },
+    /// The session failed without a more specific semantic classification.
+    GenericFailure { exit_code: i32 },
+    /// The caller invoked the runtime incorrectly.
+    UsageError { exit_code: i32 },
+    /// Actionable work exists, but execution is blocked on prerequisites.
+    Blocked { exit_code: i32 },
+    /// No actionable work is currently available.
+    NothingReady { exit_code: i32 },
+    /// Work was attempted but required completion checks failed.
+    WorkFailed { exit_code: i32 },
+    /// The runtime or environment failed independently of the work item.
+    InfrastructureFailure { exit_code: i32 },
+    /// The configured command was found but could not be executed.
+    CommandNotExecutable { exit_code: i32 },
+    /// The configured command was not found.
+    CommandNotFound { exit_code: i32 },
+    /// The process terminated from signal `signal`, preserving `128 + signal`.
+    TerminatedBySignal { exit_code: i32, signal: i32 },
     /// The session exceeded its timeout and was force-removed.
     TimedOut,
+}
+
+impl SessionOutcome {
+    /// Interpret a process exit code according to the shared commons contract.
+    pub fn from_exit_code(exit_code: i32) -> Self {
+        match exit_code {
+            0 => Self::Success { exit_code },
+            1 => Self::GenericFailure { exit_code },
+            2 => Self::UsageError { exit_code },
+            3 => Self::Blocked { exit_code },
+            4 => Self::NothingReady { exit_code },
+            5 => Self::WorkFailed { exit_code },
+            6 => Self::InfrastructureFailure { exit_code },
+            126 => Self::CommandNotExecutable { exit_code },
+            127 => Self::CommandNotFound { exit_code },
+            129.. => Self::TerminatedBySignal {
+                exit_code,
+                signal: exit_code - 128,
+            },
+            _ => Self::GenericFailure { exit_code },
+        }
+    }
+
+    /// Canonical snake_case semantic label for this outcome.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Success { .. } => "success",
+            Self::GenericFailure { .. } => "generic_failure",
+            Self::UsageError { .. } => "usage_error",
+            Self::Blocked { .. } => "blocked",
+            Self::NothingReady { .. } => "nothing_ready",
+            Self::WorkFailed { .. } => "work_failed",
+            Self::InfrastructureFailure { .. } => "infrastructure_failure",
+            Self::CommandNotExecutable { .. } => "command_not_executable",
+            Self::CommandNotFound { .. } => "command_not_found",
+            Self::TerminatedBySignal { .. } => "terminated_by_signal",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    /// Raw process exit code when this outcome came from process termination.
+    pub fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::Success { exit_code }
+            | Self::GenericFailure { exit_code }
+            | Self::UsageError { exit_code }
+            | Self::Blocked { exit_code }
+            | Self::NothingReady { exit_code }
+            | Self::WorkFailed { exit_code }
+            | Self::InfrastructureFailure { exit_code }
+            | Self::CommandNotExecutable { exit_code }
+            | Self::CommandNotFound { exit_code } => Some(*exit_code),
+            Self::TerminatedBySignal { exit_code, .. } => Some(*exit_code),
+            Self::TimedOut => None,
+        }
+    }
+
+    /// Signal number when this outcome represents signal-derived termination.
+    pub fn signal(&self) -> Option<i32> {
+        match self {
+            Self::TerminatedBySignal { signal, .. } => Some(*signal),
+            _ => None,
+        }
+    }
+
+    /// Whether the CLI should treat this terminal outcome as process success.
+    pub fn is_cli_success(&self) -> bool {
+        matches!(
+            self,
+            Self::Success { .. } | Self::Blocked { .. } | Self::NothingReady { .. }
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionOutcome;
+
+    #[test]
+    fn exit_code_128_is_generic_failure() {
+        assert_eq!(
+            SessionOutcome::from_exit_code(128),
+            SessionOutcome::GenericFailure { exit_code: 128 }
+        );
+    }
+
+    #[test]
+    fn signal_derived_exit_codes_above_128_remain_signal_terminations() {
+        assert_eq!(
+            SessionOutcome::from_exit_code(130),
+            SessionOutcome::TerminatedBySignal {
+                exit_code: 130,
+                signal: 2,
+            }
+        );
+    }
 }
 
 /// Summary of what startup reconciliation removed before the daemon accepted

@@ -182,7 +182,7 @@ fn daemon_reports_run_outcome_back_through_client_request() {
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let executor = FixedOutcomeExecutor {
-        outcome: SessionOutcome::Failed { exit_code: 23 },
+        outcome: SessionOutcome::GenericFailure { exit_code: 23 },
     };
     let handle =
         thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
@@ -198,7 +198,7 @@ fn daemon_reports_run_outcome_back_through_client_request() {
     )
     .expect("client request should succeed");
 
-    assert_eq!(outcome, SessionOutcome::Failed { exit_code: 23 });
+    assert_eq!(outcome, SessionOutcome::GenericFailure { exit_code: 23 });
 
     shutdown.store(true, Ordering::Release);
     handle
@@ -247,7 +247,7 @@ fn starting_second_daemon_instance_fails_with_existing_pid() {
     let first_config = config.clone();
     let first_shutdown = shutdown.clone();
     let executor = FixedOutcomeExecutor {
-        outcome: SessionOutcome::Succeeded,
+        outcome: SessionOutcome::Success { exit_code: 0 },
     };
     let first_handle =
         thread::spawn(move || run_daemon_until_shutdown(first_config, executor, first_shutdown));
@@ -256,7 +256,7 @@ fn starting_second_daemon_instance_fails_with_existing_pid() {
     let second_result = run_daemon_until_shutdown(
         config.clone(),
         FixedOutcomeExecutor {
-            outcome: SessionOutcome::Succeeded,
+            outcome: SessionOutcome::Success { exit_code: 0 },
         },
         Arc::new(AtomicBool::new(false)),
     );
@@ -292,7 +292,7 @@ fn daemon_shutdown_removes_pid_file_and_socket() {
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let executor = FixedOutcomeExecutor {
-        outcome: SessionOutcome::Succeeded,
+        outcome: SessionOutcome::Success { exit_code: 0 },
     };
     let handle =
         thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
@@ -332,8 +332,8 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let executor = BlockingFirstRunExecutor::new(
-        SessionOutcome::Succeeded,
-        SessionOutcome::Failed { exit_code: 23 },
+        SessionOutcome::Success { exit_code: 0 },
+        SessionOutcome::GenericFailure { exit_code: 23 },
     );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
@@ -374,7 +374,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
         Ok(result) => {
             assert_eq!(
                 result.expect("second client request should succeed"),
-                SessionOutcome::Failed { exit_code: 23 }
+                SessionOutcome::GenericFailure { exit_code: 23 }
             );
             true
         }
@@ -390,7 +390,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
             .join()
             .expect("first request thread should join")
             .expect("first client request should succeed"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
     second_request
         .join()
@@ -424,8 +424,10 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
-    let executor =
-        BlockingFirstRunExecutor::new(SessionOutcome::Succeeded, SessionOutcome::Succeeded);
+    let executor = BlockingFirstRunExecutor::new(
+        SessionOutcome::Success { exit_code: 0 },
+        SessionOutcome::Success { exit_code: 0 },
+    );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
         run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown)
@@ -465,7 +467,7 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
             .join()
             .expect("client request thread should join")
             .expect("client request should eventually succeed"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
@@ -485,8 +487,10 @@ fn daemon_shutdown_stops_accepting_new_runs() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
-    let executor =
-        BlockingFirstRunExecutor::new(SessionOutcome::Succeeded, SessionOutcome::Succeeded);
+    let executor = BlockingFirstRunExecutor::new(
+        SessionOutcome::Success { exit_code: 0 },
+        SessionOutcome::Success { exit_code: 0 },
+    );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
         run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown)
@@ -529,7 +533,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
             .join()
             .expect("first request thread should join")
             .expect("first client request should succeed"),
-        SessionOutcome::Succeeded
+        SessionOutcome::Success { exit_code: 0 }
     );
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
@@ -581,7 +585,7 @@ source = "AGENTD_GITHUB_TOKEN"
         run_daemon_until_shutdown(
             daemon_config,
             FixedOutcomeExecutor {
-                outcome: SessionOutcome::Succeeded,
+                outcome: SessionOutcome::Success { exit_code: 0 },
             },
             daemon_shutdown,
         )
@@ -626,7 +630,7 @@ fn daemon_startup_refuses_to_delete_a_non_socket_socket_path() {
     let error = run_daemon_until_shutdown(
         config.clone(),
         FixedOutcomeExecutor {
-            outcome: SessionOutcome::Succeeded,
+            outcome: SessionOutcome::Success { exit_code: 0 },
         },
         Arc::new(AtomicBool::new(false)),
     )
@@ -667,7 +671,7 @@ command = ["site-builder", "exec"]
     let error = run_daemon_until_shutdown(
         config,
         FixedOutcomeExecutor {
-            outcome: SessionOutcome::Succeeded,
+            outcome: SessionOutcome::Success { exit_code: 0 },
         },
         Arc::new(AtomicBool::new(false)),
     )

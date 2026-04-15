@@ -87,11 +87,11 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: Some("task-42".to_string()),
     };
-    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
     let outcome = dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
 
-    assert_eq!(outcome, SessionOutcome::Succeeded);
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
 
     let state = state.lock().expect("recording state should lock");
     let spec = state
@@ -150,7 +150,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_missing() {
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
-    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
     dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
 
@@ -182,7 +182,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_empty() {
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
-    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
     dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
 
@@ -215,7 +215,8 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
-    let (executor, _state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
+    let (executor, _state) =
+        RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
     let error = dispatch_run(&config, &request, &executor)
         .expect_err("missing runtime credential sources should fail dispatch");
@@ -260,7 +261,8 @@ command = ["site-builder", "exec"]
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
     };
-    let (executor, _state) = RecordingExecutor::succeeding(SessionOutcome::Succeeded);
+    let (executor, _state) =
+        RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
     let error =
         dispatch_run(&config, &request, &executor).expect_err("relative daemon paths should fail");

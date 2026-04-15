@@ -136,6 +136,7 @@ and binds a Unix socket for operator control. Default paths:
 `/run/agentd/agentd.sock` and `/run/agentd/agentd.pid`. On SIGINT or SIGTERM,
 the daemon stops accepting connections and drains in-flight sessions; a second
 signal exits immediately.
+The Unix socket protocol is internal to `agentd` in `v0.1.x`: daemon and CLI must be the same build, and operators must restart the daemon after replacing the binary before using `agentd run` again.
 
 Trigger a session through the running daemon:
 

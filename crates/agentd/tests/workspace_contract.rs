@@ -97,3 +97,26 @@ fn architecture_describes_uniform_socket_intake_for_session_triggers() {
         "architecture should not describe the scheduler as handing work directly to the runner"
     );
 }
+
+#[test]
+fn workspace_docs_declare_same_build_socket_policy() {
+    let readme = read_workspace_file("README.md");
+    let architecture = read_workspace_file("ARCHITECTURE.md");
+
+    assert!(
+        readme.contains("must restart the daemon after replacing the binary"),
+        "README should declare the restart requirement after replacing the binary"
+    );
+    assert!(
+        readme.contains("daemon and CLI must be the same build"),
+        "README should declare the same-build daemon/CLI requirement"
+    );
+    assert!(
+        architecture.contains("internal and unversioned"),
+        "architecture should describe the socket protocol as internal and unversioned"
+    );
+    assert!(
+        architecture.contains("daemon and CLI must be the same build"),
+        "architecture should declare the same-build daemon/CLI requirement"
+    );
+}

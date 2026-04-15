@@ -49,11 +49,11 @@ use validation::{validate_invocation, validate_spec};
 /// and runs an ephemeral podman container, then cleans up all resources
 /// regardless of outcome.
 ///
-/// Returns [`SessionOutcome::Succeeded`] when the container exits 0,
-/// [`SessionOutcome::Failed`] for non-zero exits, or
+/// Returns a semantic [`SessionOutcome`] interpreted from the container exit
+/// code according to the shared commons contract, or
 /// [`SessionOutcome::TimedOut`] when the optional timeout fires. Returns
 /// [`RunnerError`] for validation failures, I/O errors, or podman command
-/// failures.
+/// failures before a terminal session outcome can be established.
 pub fn run_session(
     spec: SessionSpec,
     invocation: SessionInvocation,
@@ -208,14 +208,15 @@ mod tests {
             });
             assert_eq!(
                 outcome.expect("session should succeed"),
-                SessionOutcome::Succeeded
+                SessionOutcome::Success { exit_code: 0 }
             );
         });
 
         assert_eq!(events.len(), 3);
         assert_eq!(events[0]["fields"]["event"], "runner.session_started");
         assert_eq!(events[1]["fields"]["event"], "runner.session_outcome");
-        assert_eq!(events[1]["fields"]["outcome"], "succeeded");
+        assert_eq!(events[1]["fields"]["outcome"], "success");
+        assert_eq!(events[1]["fields"]["exit_code"], 0);
         assert_eq!(events[2]["fields"]["event"], "runner.session_teardown");
         assert_eq!(events[2]["fields"]["result"], "ok");
     }

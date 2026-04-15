@@ -59,7 +59,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
     )
     .expect("session should run");
 
-    assert_eq!(outcome, SessionOutcome::Succeeded);
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -107,7 +107,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
     )
     .expect("session should run");
 
-    assert_eq!(outcome, SessionOutcome::Succeeded);
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -145,7 +145,7 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
     )
     .expect("session should run");
 
-    assert_eq!(outcome, SessionOutcome::Succeeded);
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -191,7 +191,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
     )
     .expect("session should run");
 
-    assert_eq!(outcome, SessionOutcome::Failed { exit_code: 23 });
+    assert_eq!(outcome, SessionOutcome::GenericFailure { exit_code: 23 });
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -237,7 +237,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
     )
     .expect("session should run");
 
-    assert_eq!(outcome, SessionOutcome::Failed { exit_code: 125 });
+    assert_eq!(outcome, SessionOutcome::GenericFailure { exit_code: 125 });
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -284,7 +284,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
     )
     .expect("session should run");
 
-    assert_eq!(outcome, SessionOutcome::Succeeded);
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -383,7 +383,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
         .expect("session thread should complete")
         .expect("session should run");
 
-    assert_eq!(outcome, SessionOutcome::Succeeded);
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }

@@ -15,8 +15,7 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
 
 #[derive(Debug)]
 enum RunCommandError {
-    Failed { exit_code: i32 },
-    TimedOut,
+    Outcome(agentd_runner::SessionOutcome),
     UnknownProfile { profile: String },
     MissingRepo { profile: String },
 }
@@ -24,8 +23,21 @@ enum RunCommandError {
 impl fmt::Display for RunCommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Failed { exit_code } => write!(f, "session failed (exit code {exit_code})"),
-            Self::TimedOut => write!(f, "session timed out"),
+            Self::Outcome(outcome) => match outcome {
+                agentd_runner::SessionOutcome::TimedOut => write!(f, "session timed out"),
+                agentd_runner::SessionOutcome::TerminatedBySignal { exit_code, signal } => write!(
+                    f,
+                    "session {} (exit code {exit_code}, signal {signal})",
+                    outcome.label()
+                ),
+                _ => {
+                    if let Some(exit_code) = outcome.exit_code() {
+                        write!(f, "session {} (exit code {exit_code})", outcome.label())
+                    } else {
+                        write!(f, "session {}", outcome.label())
+                    }
+                }
+            },
             Self::UnknownProfile { profile } => write!(f, "unknown profile '{profile}'"),
             Self::MissingRepo { profile } => write!(
                 f,
@@ -122,15 +134,11 @@ fn run_client(
         },
     )?;
 
-    match outcome {
-        agentd_runner::SessionOutcome::Succeeded => {
-            println!("session succeeded");
-            Ok(())
-        }
-        agentd_runner::SessionOutcome::Failed { exit_code } => {
-            Err(Box::new(RunCommandError::Failed { exit_code }))
-        }
-        agentd_runner::SessionOutcome::TimedOut => Err(Box::new(RunCommandError::TimedOut)),
+    if outcome.is_cli_success() {
+        println!("session {}", outcome.label());
+        Ok(())
+    } else {
+        Err(Box::new(RunCommandError::Outcome(outcome)))
     }
 }
 

@@ -15,6 +15,8 @@ use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -437,10 +439,15 @@ where
 }
 
 fn container_status_to_outcome(status: ExitStatus) -> SessionOutcome {
-    match status.code().unwrap_or(1) {
-        0 => SessionOutcome::Succeeded,
-        exit_code => SessionOutcome::Failed { exit_code },
+    #[cfg(unix)]
+    if let Some(signal) = status.signal() {
+        return SessionOutcome::TerminatedBySignal {
+            exit_code: 128 + signal,
+            signal,
+        };
     }
+
+    SessionOutcome::from_exit_code(status.code().unwrap_or(1))
 }
 
 fn inspect_terminal_container_outcome(container_name: &str) -> Option<SessionOutcome> {
@@ -470,10 +477,7 @@ fn parse_container_state(output: &str) -> Option<(&str, i32)> {
 }
 
 fn exit_code_to_outcome(exit_code: i32) -> SessionOutcome {
-    match exit_code {
-        0 => SessionOutcome::Succeeded,
-        exit_code => SessionOutcome::Failed { exit_code },
-    }
+    SessionOutcome::from_exit_code(exit_code)
 }
 
 fn inspect_container_status(container_name: &str) -> Result<String, RunnerError> {
