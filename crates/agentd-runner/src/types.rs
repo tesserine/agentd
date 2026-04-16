@@ -6,7 +6,7 @@
 //! for the standalone validators are also defined here.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
@@ -50,8 +50,8 @@ pub struct SessionSpec {
 pub struct BindMount {
     /// Host-side source path to bind into the container.
     pub source: PathBuf,
-    /// Absolute in-container target path for the bind mount. Must not contain
-    /// `.` or `..` components or `,`.
+    /// Absolute in-container target path for the bind mount. Must satisfy
+    /// [`validate_mount_target`](crate::validate_mount_target).
     pub target: PathBuf,
     /// Whether the mount is read-only inside the container.
     pub read_only: bool,
@@ -254,6 +254,16 @@ pub enum ProfileNameValidationError {
     Reserved,
 }
 
+/// Error returned by [`validate_mount_target`](crate::validate_mount_target)
+/// when a bind-mount target violates runner rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountTargetValidationError {
+    /// The target is not absolute, contains `.` or `..`, or contains `,`.
+    Invalid { path: PathBuf },
+    /// The target collides with a runner-managed path.
+    Reserved { target: PathBuf },
+}
+
 /// Errors produced during session execution.
 ///
 /// Validation errors ([`InvalidProfileName`](Self::InvalidProfileName),
@@ -355,23 +365,11 @@ impl fmt::Display for RunnerError {
                     path.display()
                 )
             }
-            RunnerError::InvalidMountTarget { path } => {
-                write!(
-                    f,
-                    "mount target must be an absolute path without '.' or '..' components or ',': {}",
-                    path.display()
-                )
-            }
+            RunnerError::InvalidMountTarget { path } => mount_target_invalid_message(f, path),
             RunnerError::DuplicateMountTarget { target } => {
                 write!(f, "mount targets must be unique: {}", target.display())
             }
-            RunnerError::ReservedMountTarget { target } => {
-                write!(
-                    f,
-                    "mount target is reserved by the runner: {}",
-                    target.display()
-                )
-            }
+            RunnerError::ReservedMountTarget { target } => mount_target_reserved_message(f, target),
             RunnerError::Io(error) => write!(f, "{error}"),
             RunnerError::MissingMountSource { path } => {
                 write!(f, "mount source path does not exist: {}", path.display())
@@ -391,6 +389,17 @@ impl fmt::Display for RunnerError {
     }
 }
 
+impl fmt::Display for MountTargetValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MountTargetValidationError::Invalid { path } => mount_target_invalid_message(f, path),
+            MountTargetValidationError::Reserved { target } => {
+                mount_target_reserved_message(f, target)
+            }
+        }
+    }
+}
+
 impl std::error::Error for RunnerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -400,10 +409,28 @@ impl std::error::Error for RunnerError {
     }
 }
 
+impl std::error::Error for MountTargetValidationError {}
+
 impl From<std::io::Error> for RunnerError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
     }
+}
+
+fn mount_target_invalid_message(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "mount target must be an absolute path without '.' or '..' components or ',': {}",
+        path.display()
+    )
+}
+
+fn mount_target_reserved_message(f: &mut fmt::Formatter<'_>, target: &Path) -> fmt::Result {
+    write!(
+        f,
+        "mount target is reserved by the runner: {}",
+        target.display()
+    )
 }
 
 fn exit_status_label(status: &ExitStatus) -> String {

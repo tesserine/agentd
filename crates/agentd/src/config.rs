@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use agentd_runner::{
-    BindMount, RunnerError, validate_environment_name, validate_profile_name, validate_repo_url,
+    BindMount, MountTargetValidationError, RunnerError, validate_environment_name,
+    validate_mount_target, validate_profile_name, validate_repo_url,
 };
 use croner::parser::{CronParser, Seconds, Year};
 use serde::Deserialize;
@@ -173,10 +174,10 @@ impl Config {
                 }
 
                 let target = PathBuf::from(&raw_mount.target);
-                if !target.is_absolute() {
-                    return Err(ConfigError::MountTargetMustBeAbsolute {
+                if let Err(error) = validate_mount_target(&target, &raw_profile.name) {
+                    return Err(ConfigError::InvalidMountTarget {
                         profile: raw_profile.name.clone(),
-                        target,
+                        error,
                     });
                 }
 
@@ -505,8 +506,11 @@ pub enum ConfigError {
     ScheduleRequiresRepo { profile: String },
     /// A configured mount source is not an absolute path.
     MountSourceMustBeAbsolute { profile: String, source: PathBuf },
-    /// A configured mount target is not an absolute path.
-    MountTargetMustBeAbsolute { profile: String, target: PathBuf },
+    /// A configured mount target violates the runner's target rules.
+    InvalidMountTarget {
+        profile: String,
+        error: MountTargetValidationError,
+    },
     /// Two configured mounts in one profile share the same target path.
     DuplicateMountTarget { profile: String, target: PathBuf },
 }
@@ -606,11 +610,10 @@ impl fmt::Display for ConfigError {
                     source.display()
                 )
             }
-            ConfigError::MountTargetMustBeAbsolute { profile, target } => {
+            ConfigError::InvalidMountTarget { profile, error } => {
                 write!(
                     f,
-                    "profile '{profile}' defines mount target that must be absolute: {}",
-                    target.display()
+                    "profile '{profile}' defines invalid mount target: {error}"
                 )
             }
             ConfigError::DuplicateMountTarget { profile, target } => {

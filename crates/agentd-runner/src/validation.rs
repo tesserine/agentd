@@ -1,15 +1,16 @@
 //! Input validation for session specs and invocations.
 //!
 //! All validation runs before any filesystem or podman interaction, so invalid
-//! inputs are rejected without side effects. The two public validators
-//! ([`validate_profile_name`] and [`validate_environment_name`]) are also used
-//! by the configuration layer in the `agentd` crate.
+//! inputs are rejected without side effects. The public validators
+//! ([`validate_profile_name`], [`validate_environment_name`], and
+//! [`validate_mount_target`]) are also used by the configuration layer in the
+//! `agentd` crate.
 
 use crate::naming::is_daemon_instance_id;
 use crate::session_paths::{session_home_dir, session_repo_dir};
 use crate::types::{
-    EnvironmentNameValidationError, ProfileNameValidationError, RunnerError, SessionInvocation,
-    SessionSpec,
+    EnvironmentNameValidationError, MountTargetValidationError, ProfileNameValidationError,
+    RunnerError, SessionInvocation, SessionSpec,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -43,22 +44,14 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
                 path: mount.source.clone(),
             });
         }
-        if !mount.target.is_absolute() {
-            return Err(RunnerError::InvalidMountTarget {
-                path: mount.target.clone(),
-            });
-        }
-        if has_relative_mount_target_component(&mount.target)
-            || mount_target_contains_comma(&mount.target)
-        {
-            return Err(RunnerError::InvalidMountTarget {
-                path: mount.target.clone(),
-            });
-        }
-        if is_reserved_mount_target(&mount.target, &spec.profile_name) {
-            return Err(RunnerError::ReservedMountTarget {
-                target: mount.target.clone(),
-            });
+        match validate_mount_target(&mount.target, &spec.profile_name) {
+            Ok(()) => {}
+            Err(MountTargetValidationError::Invalid { path }) => {
+                return Err(RunnerError::InvalidMountTarget { path });
+            }
+            Err(MountTargetValidationError::Reserved { target }) => {
+                return Err(RunnerError::ReservedMountTarget { target });
+            }
         }
         if !seen_mount_targets.insert(mount.target.clone()) {
             return Err(RunnerError::DuplicateMountTarget {
@@ -81,6 +74,32 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
                 });
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Validates an in-container bind-mount target against the runner contract.
+///
+/// Rejects targets that are not absolute, contain `.` or `..` components,
+/// contain `,`, or collide with runner-managed paths such as
+/// `/agentd/methodology`, `/home/{profile}`, or `/home/{profile}/repo`.
+pub fn validate_mount_target(
+    target: &Path,
+    profile_name: &str,
+) -> Result<(), MountTargetValidationError> {
+    if !target.is_absolute()
+        || has_relative_mount_target_component(target)
+        || mount_target_contains_comma(target)
+    {
+        return Err(MountTargetValidationError::Invalid {
+            path: target.to_path_buf(),
+        });
+    }
+    if is_reserved_mount_target(target, profile_name) {
+        return Err(MountTargetValidationError::Reserved {
+            target: target.to_path_buf(),
+        });
     }
 
     Ok(())

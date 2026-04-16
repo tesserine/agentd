@@ -449,6 +449,63 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
 }
 
 #[test]
+fn preserves_writable_home_for_nested_additional_mount_parents() {
+    if skip_if_podman_unavailable("preserves_writable_home_for_nested_additional_mount_parents") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("nested-home-mount-run");
+    let image = fixture.build_image();
+    let host_mount = fixture.root.join("host-nested-claude");
+    fs::create_dir_all(&host_mount).expect("nested host mount should be created");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
+            .expect("nested host mount should permit container writes");
+    }
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "nested-home-mount-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: vec![BindMount {
+                source: host_mount.clone(),
+                target: PathBuf::from("/home/nested-home-mount-run/.config/claude"),
+                read_only: false,
+            }],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-nested-home-mount".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    assert_eq!(
+        fs::read_to_string(host_mount.join("nested-artifact.txt"))
+            .expect("nested home mount should persist host-visible writes"),
+        "persisted from nested mount\n"
+    );
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
 fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
     if skip_if_podman_unavailable("times_out_when_a_timeout_is_provided_and_cleans_up_container") {
         return;
@@ -1052,6 +1109,16 @@ case "$command_name" in
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-read-write-mount" ]; then
             printf 'persisted from container\n' > "${HOME}/.runa/session-artifact.txt"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-nested-home-mount" ]; then
+            # The mkdir/write below is the regression probe: if setup leaves
+            # $HOME/.config owned by root, creating the sibling git config
+            # fails and we never reach the mounted-target sentinel write.
+            mkdir -p "${HOME}/.config/git"
+            printf 'sibling write succeeded\n' > "${HOME}/.config/git/config"
+            printf 'persisted from nested mount\n' > "${HOME}/.config/claude/nested-artifact.txt"
             exit 0
         fi
 

@@ -14,10 +14,11 @@ use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
 use crate::session_paths::{session_home_dir, session_repo_dir};
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -143,7 +144,8 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 // aborts immediately rather than continuing with a broken workspace.
 fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
     let username = &spec.profile_name;
-    let home_dir = session_home_dir(username).display().to_string();
+    let home_dir_path = session_home_dir(username);
+    let home_dir = home_dir_path.display().to_string();
     let repo_dir = session_repo_dir(username).display().to_string();
     let user_group = format!("{username}:{username}");
     let mut script = String::from("set -eu\nuseradd --create-home --home-dir ");
@@ -154,6 +156,18 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script.push_str(&shell_quote(&user_group));
     script.push(' ');
     script.push_str(&shell_quote(&home_dir));
+    let mut seen_home_mount_parents = HashSet::new();
+    for mount in &spec.mounts {
+        for intermediate_parent in intermediate_home_mount_parents(&home_dir_path, &mount.target) {
+            if !seen_home_mount_parents.insert(intermediate_parent.clone()) {
+                continue;
+            }
+            script.push_str("\nchown ");
+            script.push_str(&shell_quote(&user_group));
+            script.push(' ');
+            script.push_str(&shell_quote(&intermediate_parent.display().to_string()));
+        }
+    }
     script.push_str("\nrm -rf ");
     script.push_str(&shell_quote(&repo_dir));
     script.push('\n');
@@ -178,6 +192,24 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script.push_str(&shell_join(&spec.command));
 
     script
+}
+
+fn intermediate_home_mount_parents(home_dir: &Path, mount_target: &Path) -> Vec<PathBuf> {
+    let Ok(relative_target) = mount_target.strip_prefix(home_dir) else {
+        return Vec::new();
+    };
+    if relative_target.as_os_str().is_empty() {
+        return Vec::new();
+    }
+
+    let mut parents = relative_target
+        .ancestors()
+        .skip(1)
+        .take_while(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| home_dir.join(parent))
+        .collect::<Vec<_>>();
+    parents.reverse();
+    parents
 }
 
 fn build_clone_command(invocation: &SessionInvocation, repo_dir: &str) -> String {

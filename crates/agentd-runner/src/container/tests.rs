@@ -223,6 +223,67 @@ fn build_container_script_creates_home_workspace_and_execs_profile_command_from_
 }
 
 #[test]
+fn build_container_script_chowns_intermediate_home_mount_parents_without_touching_targets() {
+    let script = build_container_script(
+        &crate::SessionSpec {
+            profile_name: "myprofile".to_string(),
+            mounts: vec![
+                crate::BindMount {
+                    source: PathBuf::from("/srv/claude"),
+                    target: PathBuf::from("/home/myprofile/.claude"),
+                    read_only: true,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/claude-config"),
+                    target: PathBuf::from("/home/myprofile/.config/claude"),
+                    read_only: false,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/git-config"),
+                    target: PathBuf::from("/home/myprofile/.config/git"),
+                    read_only: false,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/deep-tree"),
+                    target: PathBuf::from("/home/myprofile/a/b/c"),
+                    read_only: false,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/outside-home"),
+                    target: PathBuf::from("/var/lib/shared"),
+                    read_only: false,
+                },
+            ],
+            ..test_session_spec()
+        },
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    );
+
+    let config_parent_chown = "\nchown 'myprofile:myprofile' '/home/myprofile/.config'\n";
+    assert!(
+        script.contains(config_parent_chown),
+        "nested home mounts should chown their intermediate parent: {script}"
+    );
+    assert_eq!(
+        script.matches(config_parent_chown).count(),
+        1,
+        "shared intermediate parents should be emitted once"
+    );
+    assert!(script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/a'\n"));
+    assert!(script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/a/b'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.claude'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.config/claude'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.config/git'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/a/b/c'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/var/lib/shared'\n"));
+}
+
+#[test]
 fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
     let script = build_container_script(
         &crate::SessionSpec {
