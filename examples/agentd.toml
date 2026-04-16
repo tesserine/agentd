@@ -37,7 +37,8 @@ repo_token_source = "SITE_BUILDER_REPO_TOKEN"
 #[[profiles.mounts]]
 # Additional bind mounts are operator-chosen host paths.
 # `source` must be an absolute existing host path.
-# `target` must be an absolute container path.
+# `target` must be an absolute container path and must not duplicate or
+# overlap another mount target in the same profile.
 #source = "/home/core/.claude"
 #target = "/home/site-builder/.claude"
 #read_only = true

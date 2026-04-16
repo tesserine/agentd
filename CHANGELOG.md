@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Session outcomes now follow the shared `commons` exit-code convention across `agentd` and `agentd-runner`: outcomes carry semantic labels plus raw exit codes, daemon and CLI surfaces report labels such as `blocked` and `generic_failure`, `agentd run` exits successfully for normal terminal states (`success`, `blocked`, `nothing_ready`), and timeout remains an agentd-layer outcome outside the shared exit-code vocabulary.
 - Additional bind mounts now reserve only runner-owned targets (`/agentd/methodology`, `/home/{profile}`, and `/home/{profile}/repo` plus descendants), allowing supported read-only and read-write mounts elsewhere under `$HOME` without runner setup mutating host-backed data.
+- Profile-declared bind mounts now reject overlapping container targets within the same profile, so nested targets fail validation before startup instead of reaching the container setup script.
 
 ## [0.1.0] — 2026-04-10
 

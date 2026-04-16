@@ -154,11 +154,13 @@ From inside the environment, an agent should see:
 - the tools and runtime configuration needed for its assigned work
 
 Additional bind mounts are declared in profile configuration as `source`,
-`target`, and `read_only`. agentd validates absolute container targets and
-unique target paths, then stages canonical host sources through runner-managed
-symlinks before calling Podman so host paths containing commas remain mountable.
-Subscription auth is the first read-only consumer of this mechanism; persistent
-audit storage in `#76` builds on the same path with read-write mounts.
+`target`, and `read_only`. agentd validates absolute container targets plus a
+per-profile disjointness invariant: target paths must be unique and no target
+may be a path-component prefix of another. It then stages canonical host
+sources through runner-managed symlinks before calling Podman so host paths
+containing commas remain mountable. Subscription auth is the first read-only
+consumer of this mechanism; persistent audit storage in `#76` builds on the
+same path with read-write mounts.
 
 ## 6. Credential Flow
 

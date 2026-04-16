@@ -26,12 +26,13 @@ pub(crate) mod test_support;
 
 pub use reconcile::reconcile_startup_resources;
 pub use types::{
-    BindMount, EnvironmentNameValidationError, MountTargetValidationError,
+    BindMount, EnvironmentNameValidationError, MountOverlapError, MountTargetValidationError,
     ProfileNameValidationError, ResolvedEnvironmentVariable, RunnerError, SessionInvocation,
     SessionOutcome, SessionSpec, StartupReconciliationReport,
 };
 pub use validation::{
-    validate_environment_name, validate_mount_target, validate_profile_name, validate_repo_url,
+    validate_environment_name, validate_mount_overlap, validate_mount_target,
+    validate_profile_name, validate_repo_url,
 };
 
 use container::{create_container, run_container_to_completion, run_container_with_timeout};

@@ -82,7 +82,8 @@ repo_token_source = "SITE_BUILDER_REPO_TOKEN"
 #[[profiles.mounts]]
 # Additional host bind mounts are declared explicitly per profile.
 # `source` must be an absolute host path and must already exist.
-# `target` must be an absolute path inside the container.
+# `target` must be an absolute path inside the container and must not
+# duplicate or overlap another mount target in the same profile.
 # `read_only = true` is appropriate for host-managed auth directories.
 #source = "/home/core/.claude"
 #target = "/home/site-builder/.claude"

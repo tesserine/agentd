@@ -708,6 +708,46 @@ read_only = false
 }
 
 #[test]
+fn load_rejects_overlapping_profile_mount_targets() {
+    let path = write_temp_config(
+        "overlapping-mount-targets",
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.config"
+target = "/home/site-builder/.config"
+read_only = true
+
+[[profiles.mounts]]
+source = "/home/core/.config/claude"
+target = "/home/site-builder/.config/claude"
+read_only = true
+"#,
+    );
+
+    let error = Config::load(&path).expect_err("overlapping mount targets should be rejected");
+
+    match error {
+        ConfigError::OverlappingMountTargets {
+            profile,
+            first,
+            second,
+        } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(first, Path::new("/home/site-builder/.config"));
+            assert_eq!(second, Path::new("/home/site-builder/.config/claude"));
+        }
+        other => panic!("expected overlapping mount target error, got {other}"),
+    }
+}
+
+#[test]
 fn rejects_profile_mount_targets_with_parent_dir_components() {
     assert_invalid_mount_target_parse_error(
         "/home/site-builder/x/../repo/.git",

@@ -3,14 +3,14 @@
 //! All validation runs before any filesystem or podman interaction, so invalid
 //! inputs are rejected without side effects. The public validators
 //! ([`validate_profile_name`], [`validate_environment_name`], and
-//! [`validate_mount_target`]) are also used by the configuration layer in the
-//! `agentd` crate.
+//! [`validate_mount_target`], [`validate_mount_overlap`]) are also used by the
+//! configuration layer in the `agentd` crate.
 
 use crate::naming::is_daemon_instance_id;
 use crate::session_paths::{session_home_dir, session_repo_dir};
 use crate::types::{
-    EnvironmentNameValidationError, MountTargetValidationError, ProfileNameValidationError,
-    RunnerError, SessionInvocation, SessionSpec,
+    BindMount, EnvironmentNameValidationError, MountOverlapError, MountTargetValidationError,
+    ProfileNameValidationError, RunnerError, SessionInvocation, SessionSpec,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -59,6 +59,9 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
             });
         }
     }
+    if let Err(MountOverlapError { first, second }) = validate_mount_overlap(&spec.mounts) {
+        return Err(RunnerError::OverlappingMountTargets { first, second });
+    }
 
     for variable in &spec.environment {
         match validate_environment_name(&variable.name) {
@@ -100,6 +103,32 @@ pub fn validate_mount_target(
         return Err(MountTargetValidationError::Reserved {
             target: target.to_path_buf(),
         });
+    }
+
+    Ok(())
+}
+
+/// Validates that declared bind-mount targets are pairwise non-overlapping.
+///
+/// Rejects distinct targets when one is a component-aware prefix of the other,
+/// such as `/home/{profile}/.config` and `/home/{profile}/.config/claude`.
+pub fn validate_mount_overlap(mounts: &[BindMount]) -> Result<(), MountOverlapError> {
+    for (index, mount) in mounts.iter().enumerate() {
+        for other in mounts.iter().skip(index + 1) {
+            // Exact-equal targets are ignored here because this public validator
+            // must remain a standalone overlap check; duplicate detection lives
+            // elsewhere and preserves a more precise error message.
+            if mount.target == other.target {
+                continue;
+            }
+
+            if mount.target.starts_with(&other.target) || other.target.starts_with(&mount.target) {
+                return Err(MountOverlapError {
+                    first: mount.target.clone(),
+                    second: other.target.clone(),
+                });
+            }
+        }
     }
 
     Ok(())
@@ -726,6 +755,118 @@ mod tests {
             ..test_session_spec()
         })
         .expect("mount targets outside the methodology path components should be accepted");
+    }
+
+    #[test]
+    fn validate_mount_overlap_rejects_nested_mount_targets() {
+        let error = validate_mount_overlap(&[
+            BindMount {
+                source: PathBuf::from("/home/core/.config"),
+                target: PathBuf::from("/home/site-builder/.config"),
+                read_only: true,
+            },
+            BindMount {
+                source: PathBuf::from("/home/core/.config/claude"),
+                target: PathBuf::from("/home/site-builder/.config/claude"),
+                read_only: true,
+            },
+        ])
+        .expect_err("nested mount targets should be rejected");
+
+        assert_eq!(
+            error,
+            MountOverlapError {
+                first: PathBuf::from("/home/site-builder/.config"),
+                second: PathBuf::from("/home/site-builder/.config/claude"),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_mount_overlap_rejects_nested_mount_targets_in_reverse_order() {
+        let error = validate_mount_overlap(&[
+            BindMount {
+                source: PathBuf::from("/home/core/.config/claude"),
+                target: PathBuf::from("/home/site-builder/.config/claude"),
+                read_only: true,
+            },
+            BindMount {
+                source: PathBuf::from("/home/core/.config"),
+                target: PathBuf::from("/home/site-builder/.config"),
+                read_only: true,
+            },
+        ])
+        .expect_err("nested mount targets should be rejected regardless of order");
+
+        assert_eq!(
+            error,
+            MountOverlapError {
+                first: PathBuf::from("/home/site-builder/.config/claude"),
+                second: PathBuf::from("/home/site-builder/.config"),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_mount_overlap_accepts_disjoint_sibling_targets() {
+        validate_mount_overlap(&[
+            BindMount {
+                source: PathBuf::from("/home/core/.config"),
+                target: PathBuf::from("/home/site-builder/.config"),
+                read_only: true,
+            },
+            BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/.claude"),
+                read_only: true,
+            },
+        ])
+        .expect("disjoint sibling targets should be accepted");
+    }
+
+    #[test]
+    fn validate_mount_overlap_accepts_component_distinct_targets() {
+        validate_mount_overlap(&[
+            BindMount {
+                source: PathBuf::from("/home/core/.config-alt"),
+                target: PathBuf::from("/home/site-builder/.config-alt"),
+                read_only: true,
+            },
+            BindMount {
+                source: PathBuf::from("/home/core/.config"),
+                target: PathBuf::from("/home/site-builder/.config"),
+                read_only: true,
+            },
+        ])
+        .expect("component-distinct targets should be accepted");
+    }
+
+    #[test]
+    fn validate_spec_rejects_overlapping_mount_targets() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![
+                BindMount {
+                    source: PathBuf::from("/home/core/.config"),
+                    target: PathBuf::from("/home/site-builder/.config"),
+                    read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/home/core/.config/claude"),
+                    target: PathBuf::from("/home/site-builder/.config/claude"),
+                    read_only: true,
+                },
+            ],
+            ..test_session_spec()
+        })
+        .expect_err("overlapping mount targets should be rejected");
+
+        match error {
+            RunnerError::OverlappingMountTargets { first, second } => {
+                assert_eq!(first, PathBuf::from("/home/site-builder/.config"));
+                assert_eq!(second, PathBuf::from("/home/site-builder/.config/claude"));
+            }
+            other => panic!("expected OverlappingMountTargets, got {other:?}"),
+        }
     }
 
     #[test]

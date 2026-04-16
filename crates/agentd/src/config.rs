@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use agentd_runner::{
     BindMount, MountTargetValidationError, RunnerError, validate_environment_name,
-    validate_mount_target, validate_profile_name, validate_repo_url,
+    validate_mount_overlap, validate_mount_target, validate_profile_name, validate_repo_url,
 };
 use croner::parser::{CronParser, Seconds, Year};
 use serde::Deserialize;
@@ -192,6 +192,17 @@ impl Config {
                     source,
                     target,
                     read_only: raw_mount.read_only,
+                });
+            }
+            let runner_mounts = mounts
+                .iter()
+                .map(ProfileMountConfig::to_runner_mount)
+                .collect::<Vec<_>>();
+            if let Err(error) = validate_mount_overlap(&runner_mounts) {
+                return Err(ConfigError::OverlappingMountTargets {
+                    profile: raw_profile.name.clone(),
+                    first: error.first,
+                    second: error.second,
                 });
             }
 
@@ -513,6 +524,12 @@ pub enum ConfigError {
     },
     /// Two configured mounts in one profile share the same target path.
     DuplicateMountTarget { profile: String, target: PathBuf },
+    /// Two configured mounts in one profile overlap by path components.
+    OverlappingMountTargets {
+        profile: String,
+        first: PathBuf,
+        second: PathBuf,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -621,6 +638,18 @@ impl fmt::Display for ConfigError {
                     f,
                     "profile '{profile}' defines duplicate mount target: {}",
                     target.display()
+                )
+            }
+            ConfigError::OverlappingMountTargets {
+                profile,
+                first,
+                second,
+            } => {
+                write!(
+                    f,
+                    "profile '{profile}' defines overlapping mount targets: {} and {}",
+                    first.display(),
+                    second.display()
                 )
             }
         }

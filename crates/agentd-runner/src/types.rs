@@ -51,7 +51,9 @@ pub struct BindMount {
     /// Host-side source path to bind into the container.
     pub source: PathBuf,
     /// Absolute in-container target path for the bind mount. Must satisfy
-    /// [`validate_mount_target`](crate::validate_mount_target).
+    /// [`validate_mount_target`](crate::validate_mount_target). When
+    /// validated as part of a mount list, targets must also be pairwise
+    /// non-overlapping via [`validate_mount_overlap`](crate::validate_mount_overlap).
     pub target: PathBuf,
     /// Whether the mount is read-only inside the container.
     pub read_only: bool,
@@ -264,6 +266,16 @@ pub enum MountTargetValidationError {
     Reserved { target: PathBuf },
 }
 
+/// Error returned by [`validate_mount_overlap`](crate::validate_mount_overlap)
+/// when two distinct bind-mount targets overlap by path components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountOverlapError {
+    /// The first offending in-container mount target path.
+    pub first: PathBuf,
+    /// The second offending in-container mount target path.
+    pub second: PathBuf,
+}
+
 /// Errors produced during session execution.
 ///
 /// Validation errors ([`InvalidProfileName`](Self::InvalidProfileName),
@@ -307,6 +319,8 @@ pub enum RunnerError {
     InvalidMountTarget { path: PathBuf },
     /// Two configured bind mounts share the same target path.
     DuplicateMountTarget { target: PathBuf },
+    /// Two configured bind mounts target overlapping container paths.
+    OverlappingMountTargets { first: PathBuf, second: PathBuf },
     /// A configured bind mount target collides with a runner-managed mount.
     ReservedMountTarget { target: PathBuf },
     /// Filesystem failure, process I/O failure, or invalid external command
@@ -369,6 +383,9 @@ impl fmt::Display for RunnerError {
             RunnerError::DuplicateMountTarget { target } => {
                 write!(f, "mount targets must be unique: {}", target.display())
             }
+            RunnerError::OverlappingMountTargets { first, second } => {
+                mount_target_overlap_message(f, first, second)
+            }
             RunnerError::ReservedMountTarget { target } => mount_target_reserved_message(f, target),
             RunnerError::Io(error) => write!(f, "{error}"),
             RunnerError::MissingMountSource { path } => {
@@ -400,6 +417,12 @@ impl fmt::Display for MountTargetValidationError {
     }
 }
 
+impl fmt::Display for MountOverlapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        mount_target_overlap_message(f, &self.first, &self.second)
+    }
+}
+
 impl std::error::Error for RunnerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -410,6 +433,8 @@ impl std::error::Error for RunnerError {
 }
 
 impl std::error::Error for MountTargetValidationError {}
+
+impl std::error::Error for MountOverlapError {}
 
 impl From<std::io::Error> for RunnerError {
     fn from(error: std::io::Error) -> Self {
@@ -430,6 +455,19 @@ fn mount_target_reserved_message(f: &mut fmt::Formatter<'_>, target: &Path) -> f
         f,
         "mount target is reserved by the runner: {}",
         target.display()
+    )
+}
+
+fn mount_target_overlap_message(
+    f: &mut fmt::Formatter<'_>,
+    first: &Path,
+    second: &Path,
+) -> fmt::Result {
+    write!(
+        f,
+        "mount targets must not overlap: {} and {}",
+        first.display(),
+        second.display()
     )
 }
 
