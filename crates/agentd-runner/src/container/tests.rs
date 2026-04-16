@@ -207,11 +207,13 @@ fn build_container_script_creates_home_workspace_and_execs_profile_command_from_
     );
 
     assert!(script.contains("useradd --create-home --home-dir '/home/myprofile' --shell /bin/sh --user-group 'myprofile'"));
+    assert!(script.contains("\nchown 'myprofile:myprofile' '/home/myprofile'\n"));
     assert!(script.contains(
         "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/myprofile/repo'"
     ));
     assert!(script.contains("\ncd '/home/myprofile/repo'\n"));
-    assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
+    assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile/repo'\n"));
+    assert!(!script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
     assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
     assert!(script.contains("\nexport AGENTD_WORK_UNIT='task-42'\n"));
     assert!(script.contains("exec gosu 'myprofile:myprofile' 'site-builder' 'exec'"));

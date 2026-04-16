@@ -11,6 +11,7 @@
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::podman::{run_podman_command, run_podman_command_until};
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
+use crate::session_paths::{session_home_dir, session_repo_dir};
 use crate::types::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
 use std::collections::VecDeque;
@@ -23,7 +24,6 @@ use std::time::{Duration, Instant};
 
 const ATTACHED_STDERR_TAIL_LIMIT: usize = 64 * 1024;
 const ATTACHED_STDERR_TRUNCATION_NOTICE: &str = "[stderr truncated to last 65536 bytes]\n";
-const HOME_ROOT_DIR: &str = "/home";
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
 
@@ -135,20 +135,25 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 
 // Generates the shell script passed as the container entrypoint via
 // `/bin/sh -lc`. The script runs as root (UID 0) to perform privileged setup:
-// creating the profile's unix user, cloning the repository, and transferring
-// home directory ownership. It then drops privileges permanently via `gosu`
+// creating the profile's unix user, ensuring the home directory itself is
+// owned by that user, cloning the repository, and transferring repository
+// ownership. It then drops privileges permanently via `gosu`
 // and `exec`s the configured session command as the unprivileged profile user
 // from the cloned repository. `set -eu` at the top ensures any setup failure
 // aborts immediately rather than continuing with a broken workspace.
 fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
     let username = &spec.profile_name;
-    let home_dir = format!("{HOME_ROOT_DIR}/{username}");
-    let repo_dir = format!("{home_dir}/repo");
+    let home_dir = session_home_dir(username).display().to_string();
+    let repo_dir = session_repo_dir(username).display().to_string();
     let user_group = format!("{username}:{username}");
     let mut script = String::from("set -eu\nuseradd --create-home --home-dir ");
     script.push_str(&shell_quote(&home_dir));
     script.push_str(" --shell /bin/sh --user-group ");
     script.push_str(&shell_quote(username));
+    script.push_str("\nchown ");
+    script.push_str(&shell_quote(&user_group));
+    script.push(' ');
+    script.push_str(&shell_quote(&home_dir));
     script.push_str("\nrm -rf ");
     script.push_str(&shell_quote(&repo_dir));
     script.push('\n');
@@ -158,7 +163,7 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script.push_str("\nchown -R ");
     script.push_str(&shell_quote(&user_group));
     script.push(' ');
-    script.push_str(&shell_quote(&home_dir));
+    script.push_str(&shell_quote(&repo_dir));
     script.push_str("\nexport HOME=");
     script.push_str(&shell_quote(&home_dir));
     if let Some(work_unit) = &invocation.work_unit {

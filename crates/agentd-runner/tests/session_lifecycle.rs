@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -313,6 +315,11 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
     fs::create_dir_all(&host_mount).expect("read-only host mount should be created");
     fs::write(host_mount.join("auth.json"), "{\"token\":\"test\"}\n")
         .expect("read-only host fixture file should be written");
+    fs::write(
+        host_mount.join("sentinel.txt"),
+        "host data should remain untouched\n",
+    )
+    .expect("read-only host sentinel file should be written");
 
     let outcome = run_session(
         SessionSpec {
@@ -322,7 +329,7 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
             methodology_dir: fixture.methodology_dir(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
-                target: PathBuf::from("/mnt/readonly"),
+                target: PathBuf::from("/home/readonly-mount-run/.claude"),
                 read_only: true,
             }],
             command: vec!["site-builder".to_string(), "exec".to_string()],
@@ -345,6 +352,16 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
         !host_mount.join("write-should-fail").exists(),
         "read-only mount should not permit in-container writes"
     );
+    assert_eq!(
+        fs::read_to_string(host_mount.join("auth.json"))
+            .expect("read-only host auth fixture should remain readable"),
+        "{\"token\":\"test\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(host_mount.join("sentinel.txt"))
+            .expect("read-only host sentinel should remain readable"),
+        "host data should remain untouched\n"
+    );
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -362,6 +379,11 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
     let image = fixture.build_image();
     let host_mount = fixture.root.join("host-readwrite");
     fs::create_dir_all(&host_mount).expect("read-write host mount should be created");
+    fs::write(host_mount.join("sentinel.txt"), "host sentinel\n")
+        .expect("read-write host sentinel should be written");
+    #[cfg(unix)]
+    let sentinel_metadata_before =
+        fs::metadata(host_mount.join("sentinel.txt")).expect("sentinel metadata should exist");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -378,7 +400,7 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
             methodology_dir: fixture.methodology_dir(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
-                target: PathBuf::from("/mnt/readwrite"),
+                target: PathBuf::from("/home/readwrite-mount-run/.runa"),
                 read_only: false,
             }],
             command: vec!["site-builder".to_string(), "exec".to_string()],
@@ -402,6 +424,26 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
             .expect("read-write mount should persist host-visible writes"),
         "persisted from container\n"
     );
+    assert_eq!(
+        fs::read_to_string(host_mount.join("sentinel.txt"))
+            .expect("read-write host sentinel should remain readable"),
+        "host sentinel\n"
+    );
+    #[cfg(unix)]
+    {
+        let sentinel_metadata_after =
+            fs::metadata(host_mount.join("sentinel.txt")).expect("sentinel metadata should exist");
+        assert_eq!(
+            sentinel_metadata_after.uid(),
+            sentinel_metadata_before.uid(),
+            "runner setup must not re-own host-backed files under home mounts"
+        );
+        assert_eq!(
+            sentinel_metadata_after.gid(),
+            sentinel_metadata_before.gid(),
+            "runner setup must not re-own host-backed files under home mounts"
+        );
+    }
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -1000,8 +1042,8 @@ case "$command_name" in
         fi
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "verify-read-only-mount" ]; then
-            [ -f /mnt/readonly/auth.json ]
-            if touch /mnt/readonly/write-should-fail 2>/dev/null; then
+            [ -f "${HOME}/.claude/auth.json" ]
+            if touch "${HOME}/.claude/write-should-fail" 2>/dev/null; then
                 echo "read-only mount unexpectedly allowed writes" >&2
                 exit 91
             fi
@@ -1009,7 +1051,7 @@ case "$command_name" in
         fi
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-read-write-mount" ]; then
-            printf 'persisted from container\n' > /mnt/readwrite/session-artifact.txt
+            printf 'persisted from container\n' > "${HOME}/.runa/session-artifact.txt"
             exit 0
         fi
 

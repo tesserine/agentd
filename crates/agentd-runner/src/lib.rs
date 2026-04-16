@@ -17,6 +17,7 @@ mod naming;
 mod podman;
 mod reconcile;
 mod resources;
+mod session_paths;
 mod types;
 mod validation;
 

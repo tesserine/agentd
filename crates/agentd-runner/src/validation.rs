@@ -6,12 +6,13 @@
 //! by the configuration layer in the `agentd` crate.
 
 use crate::naming::is_daemon_instance_id;
+use crate::session_paths::{session_home_dir, session_repo_dir};
 use crate::types::{
     EnvironmentNameValidationError, ProfileNameValidationError, RunnerError, SessionInvocation,
     SessionSpec,
 };
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 
 const PROFILE_NAME_ENV: &str = "PROFILE_NAME";
 const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
@@ -47,7 +48,7 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
                 path: mount.target.clone(),
             });
         }
-        if mount.target == PathBuf::from(METHODOLOGY_MOUNT_PATH) {
+        if is_reserved_mount_target(&mount.target, &spec.profile_name) {
             return Err(RunnerError::ReservedMountTarget {
                 target: mount.target.clone(),
             });
@@ -216,6 +217,19 @@ fn is_reserved_environment_name(name: &str) -> bool {
 
 fn is_reserved_profile_name(name: &str) -> bool {
     RESERVED_PROFILE_NAMES.contains(&name)
+}
+
+fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
+    let home_dir = session_home_dir(profile_name);
+    let repo_dir = session_repo_dir(profile_name);
+
+    if target == Path::new(METHODOLOGY_MOUNT_PATH) || target == home_dir {
+        return true;
+    }
+
+    // Compare by path components, not string prefix, so `/home/{profile}/repo-cache`
+    // remains valid while `/home/{profile}/repo/.git` is correctly reserved.
+    target.starts_with(&repo_dir)
 }
 
 fn is_valid_unix_username(name: &str) -> bool {
@@ -418,6 +432,86 @@ mod tests {
             }
             other => panic!("expected ReservedMountTarget, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_home_directory() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the runner-managed home directory");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_repo_directory() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/var/lib/tesserine/repo-cache"),
+                target: PathBuf::from("/home/site-builder/repo"),
+                read_only: false,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the runner-managed repo directory");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder/repo"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_under_repo_directory() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/var/lib/tesserine/git"),
+                target: PathBuf::from("/home/site-builder/repo/.git"),
+                read_only: false,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets under the repo directory should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder/repo/.git"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_accepts_mount_targets_under_home_outside_runner_managed_paths() {
+        validate_spec(&SessionSpec {
+            mounts: vec![
+                BindMount {
+                    source: PathBuf::from("/home/core/.claude"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/var/lib/tesserine/repo-cache"),
+                    target: PathBuf::from("/home/site-builder/repo-cache"),
+                    read_only: false,
+                },
+            ],
+            ..test_session_spec()
+        })
+        .expect("mount targets under home outside runner-managed paths should be accepted");
     }
 
     #[test]

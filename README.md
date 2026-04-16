@@ -127,11 +127,14 @@ Credential `source` fields name environment variables in the daemon's process
 environment — export them before starting the daemon. Additional `mounts`
 entries are bind mounts: `source` must be an absolute existing host path,
 `target` must be an absolute container path, targets must be unique within the
-profile, and the methodology mount remains reserved at `/agentd/methodology`.
-The base image must provide `/bin/sh`, `git`, `useradd`, `gosu`, and whatever
-binaries the configured session command uses. When a profile declares
-`schedule`, it must also declare `repo`. Schedules are evaluated in
-daemon-local time and missed fires are not backfilled after downtime.
+profile, and runner-managed targets are reserved: `/agentd/methodology`,
+`/home/{profile}`, and `/home/{profile}/repo` plus its descendants. Other
+targets under `/home/{profile}` remain supported, including read-only auth
+mounts such as `/home/site-builder/.claude`. The base image must provide
+`/bin/sh`, `git`, `useradd`, `gosu`, and whatever binaries the configured
+session command uses. When a profile declares `schedule`, it must also declare
+`repo`. Schedules are evaluated in daemon-local time and missed fires are not
+backfilled after downtime.
 
 ## Running a Session
 
