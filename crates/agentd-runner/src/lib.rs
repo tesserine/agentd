@@ -1,8 +1,8 @@
 //! Session lifecycle management for agentd.
 //!
 //! Owns the four phases of a session: input validation, resource allocation
-//! (methodology staging, podman secrets), container execution (create, start
-//! in attached mode, supervise), and teardown (force-remove container, release
+//! (mount staging, podman secrets), container execution (create, start in
+//! attached mode, supervise), and teardown (force-remove container, release
 //! secrets, remove staging directory). The public entry point is
 //! [`run_session`], which accepts a [`SessionSpec`] and
 //! [`SessionInvocation`] and returns a [`SessionOutcome`] or
@@ -25,8 +25,9 @@ pub(crate) mod test_support;
 
 pub use reconcile::reconcile_startup_resources;
 pub use types::{
-    EnvironmentNameValidationError, ProfileNameValidationError, ResolvedEnvironmentVariable,
-    RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+    BindMount, EnvironmentNameValidationError, ProfileNameValidationError,
+    ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
+    StartupReconciliationReport,
 };
 pub use validation::{validate_environment_name, validate_profile_name, validate_repo_url};
 
@@ -44,7 +45,7 @@ use validation::{validate_invocation, validate_spec};
 
 /// Executes a single session from validation through teardown.
 ///
-/// Validates `spec` and `invocation`, allocates session resources (methodology
+/// Validates `spec` and `invocation`, allocates session resources (mount
 /// staging directory, podman secrets for non-empty environment values), creates
 /// and runs an ephemeral podman container, then cleans up all resources
 /// regardless of outcome.

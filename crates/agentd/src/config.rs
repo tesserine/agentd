@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use agentd_runner::{
-    RunnerError, validate_environment_name, validate_profile_name, validate_repo_url,
+    BindMount, RunnerError, validate_environment_name, validate_profile_name, validate_repo_url,
 };
 use croner::parser::{CronParser, Seconds, Year};
 use serde::Deserialize;
@@ -148,6 +148,52 @@ impl Config {
                 command.push(element);
             }
 
+            let mut seen_mount_targets = HashSet::new();
+            let mut mounts = Vec::with_capacity(raw_profile.mounts.len());
+            for raw_mount in raw_profile.mounts {
+                validate_lookup_key(
+                    "mounts.source",
+                    &raw_mount.source,
+                    Some(raw_profile.name.as_str()),
+                    None,
+                )?;
+                validate_lookup_key(
+                    "mounts.target",
+                    &raw_mount.target,
+                    Some(raw_profile.name.as_str()),
+                    None,
+                )?;
+
+                let source = PathBuf::from(&raw_mount.source);
+                if !source.is_absolute() {
+                    return Err(ConfigError::MountSourceMustBeAbsolute {
+                        profile: raw_profile.name.clone(),
+                        source,
+                    });
+                }
+
+                let target = PathBuf::from(&raw_mount.target);
+                if !target.is_absolute() {
+                    return Err(ConfigError::MountTargetMustBeAbsolute {
+                        profile: raw_profile.name.clone(),
+                        target,
+                    });
+                }
+
+                if !seen_mount_targets.insert(target.clone()) {
+                    return Err(ConfigError::DuplicateMountTarget {
+                        profile: raw_profile.name.clone(),
+                        target,
+                    });
+                }
+
+                mounts.push(ProfileMountConfig {
+                    source,
+                    target,
+                    read_only: raw_mount.read_only,
+                });
+            }
+
             let mut seen_credentials = HashSet::new();
             let mut credentials = Vec::with_capacity(raw_profile.credentials.len());
             for raw_credential in raw_profile.credentials {
@@ -194,6 +240,7 @@ impl Config {
                 name: raw_profile.name,
                 base_image: raw_profile.base_image,
                 methodology_dir,
+                mounts,
                 repo,
                 schedule,
                 repo_token_source,
@@ -228,6 +275,7 @@ pub struct ProfileConfig {
     name: String,
     base_image: String,
     methodology_dir: PathBuf,
+    mounts: Vec<ProfileMountConfig>,
     repo: Option<String>,
     schedule: Option<String>,
     repo_token_source: Option<String>,
@@ -251,6 +299,11 @@ impl ProfileConfig {
     /// constructed via the [`FromStr`] impl.
     pub fn methodology_dir(&self) -> &Path {
         &self.methodology_dir
+    }
+
+    /// Additional bind mounts declared for this profile.
+    pub fn mounts(&self) -> &[ProfileMountConfig] {
+        &self.mounts
     }
 
     /// Optional default repository URL for sessions launched from this profile.
@@ -279,6 +332,39 @@ impl ProfileConfig {
     /// Static session command executed from the cloned repository.
     pub fn command(&self) -> &[String] {
         &self.command
+    }
+}
+
+/// A validated profile-declared bind mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileMountConfig {
+    source: PathBuf,
+    target: PathBuf,
+    read_only: bool,
+}
+
+impl ProfileMountConfig {
+    /// Host-side source path for this mount.
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
+    /// Absolute in-container target path for this mount.
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+
+    /// Whether the mount is read-only inside the container.
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub(crate) fn to_runner_mount(&self) -> BindMount {
+        BindMount {
+            source: self.source.clone(),
+            target: self.target.clone(),
+            read_only: self.read_only,
+        }
     }
 }
 
@@ -417,6 +503,12 @@ pub enum ConfigError {
     InvalidSchedule { profile: String, schedule: String },
     /// A scheduled profile must declare a default repo for autonomous runs.
     ScheduleRequiresRepo { profile: String },
+    /// A configured mount source is not an absolute path.
+    MountSourceMustBeAbsolute { profile: String, source: PathBuf },
+    /// A configured mount target is not an absolute path.
+    MountTargetMustBeAbsolute { profile: String, target: PathBuf },
+    /// Two configured mounts in one profile share the same target path.
+    DuplicateMountTarget { profile: String, target: PathBuf },
 }
 
 impl fmt::Display for ConfigError {
@@ -507,6 +599,27 @@ impl fmt::Display for ConfigError {
                     "profile '{profile}' defines schedule but no repo; scheduled profiles must define a repo"
                 )
             }
+            ConfigError::MountSourceMustBeAbsolute { profile, source } => {
+                write!(
+                    f,
+                    "profile '{profile}' defines mount source that must be absolute: {}",
+                    source.display()
+                )
+            }
+            ConfigError::MountTargetMustBeAbsolute { profile, target } => {
+                write!(
+                    f,
+                    "profile '{profile}' defines mount target that must be absolute: {}",
+                    target.display()
+                )
+            }
+            ConfigError::DuplicateMountTarget { profile, target } => {
+                write!(
+                    f,
+                    "profile '{profile}' defines duplicate mount target: {}",
+                    target.display()
+                )
+            }
         }
     }
 }
@@ -576,11 +689,21 @@ struct RawProfileConfig {
     base_image: String,
     methodology_dir: String,
     command: Vec<String>,
+    #[serde(default)]
+    mounts: Vec<RawMountConfig>,
     repo: Option<String>,
     schedule: Option<String>,
     repo_token_source: Option<String>,
     #[serde(default)]
     credentials: Vec<RawCredentialConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMountConfig {
+    source: String,
+    target: String,
+    read_only: bool,
 }
 
 #[derive(Debug, Deserialize)]

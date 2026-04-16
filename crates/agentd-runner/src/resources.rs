@@ -1,9 +1,9 @@
 //! Session resource allocation and cleanup.
 //!
-//! Resources (methodology staging directory, podman secrets) are allocated as
-//! a unit by [`prepare_session_resources`] and cleaned up as a unit after the
-//! session completes. Partial-failure cleanup during allocation ensures no
-//! leaked secrets or stale directories when resource creation fails midway.
+//! Resources (staged mount sources, podman secrets) are allocated as a unit by
+//! [`prepare_session_resources`] and cleaned up as a unit after the session
+//! completes. Partial-failure cleanup during allocation ensures no leaked
+//! secrets or stale staging directories when resource creation fails midway.
 
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::naming::{SESSION_ID_LEN, format_secret_name};
@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
+const ADDITIONAL_MOUNT_STAGE_PREFIX: &str = "mount-";
 const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,10 +25,18 @@ pub(crate) struct SecretBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedBindMount {
+    pub(crate) source: PathBuf,
+    pub(crate) target: PathBuf,
+    pub(crate) read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionResources {
     pub(crate) container_name: String,
     pub(crate) methodology_staging_dir: PathBuf,
     pub(crate) methodology_mount_source: PathBuf,
+    pub(crate) additional_mounts: Vec<PreparedBindMount>,
     pub(crate) environment_secret_bindings: Vec<SecretBinding>,
     pub(crate) repo_token_secret_binding: Option<SecretBinding>,
 }
@@ -62,10 +71,18 @@ pub(crate) fn prepare_session_resources(
     let methodology_staging_dir =
         create_methodology_staging_dir(&spec.methodology_dir, session_id)?;
     let methodology_mount_source = methodology_staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
+    let additional_mounts = match create_additional_mounts(&spec.mounts, &methodology_staging_dir) {
+        Ok(mounts) => mounts,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&methodology_staging_dir);
+            return Err(error);
+        }
+    };
     let mut resources = SessionResources {
         container_name: container_name.to_string(),
         methodology_staging_dir,
         methodology_mount_source,
+        additional_mounts,
         environment_secret_bindings: Vec::new(),
         repo_token_secret_binding: None,
     };
@@ -175,12 +192,40 @@ fn create_methodology_staging_dir(
     fs::create_dir_all(&staging_dir)?;
     let staged_link = staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
 
-    if let Err(error) = create_directory_symlink(&canonical_methodology_dir, &staged_link) {
+    if let Err(error) = create_path_symlink(&canonical_methodology_dir, &staged_link) {
         let _ = fs::remove_dir_all(&staging_dir);
         return Err(error);
     }
 
     Ok(staging_dir)
+}
+
+fn create_additional_mounts(
+    mounts: &[crate::BindMount],
+    staging_dir: &Path,
+) -> Result<Vec<PreparedBindMount>, RunnerError> {
+    let mut prepared_mounts = Vec::with_capacity(mounts.len());
+
+    for (index, mount) in mounts.iter().enumerate() {
+        let canonical_source = mount
+            .source
+            .canonicalize()
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => RunnerError::MissingMountSource {
+                    path: mount.source.clone(),
+                },
+                _ => RunnerError::Io(error),
+            })?;
+        let staged_source = staging_dir.join(format!("{ADDITIONAL_MOUNT_STAGE_PREFIX}{index}"));
+        create_path_symlink(&canonical_source, &staged_source)?;
+        prepared_mounts.push(PreparedBindMount {
+            source: staged_source,
+            target: mount.target.clone(),
+            read_only: mount.read_only,
+        });
+    }
+
+    Ok(prepared_mounts)
 }
 
 // Returns a base directory for session staging that is safe for podman
@@ -223,13 +268,18 @@ fn create_podman_secret(secret_name: &str, value: &str) -> Result<(), RunnerErro
 }
 
 #[cfg(unix)]
-fn create_directory_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
+fn create_path_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
     std::os::unix::fs::symlink(source, destination).map_err(RunnerError::Io)
 }
 
 #[cfg(windows)]
-fn create_directory_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
-    std::os::windows::fs::symlink_dir(source, destination).map_err(RunnerError::Io)
+fn create_path_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
+    let metadata = source.metadata().map_err(RunnerError::Io)?;
+    if metadata.is_dir() {
+        std::os::windows::fs::symlink_dir(source, destination).map_err(RunnerError::Io)
+    } else {
+        std::os::windows::fs::symlink_file(source, destination).map_err(RunnerError::Io)
+    }
 }
 
 // Generates a 16-character hex string from 8 bytes of cryptographic randomness.
@@ -263,7 +313,8 @@ mod tests {
         CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
         capture_tracing_events, fake_podman_lock, test_session_spec,
     };
-    use crate::{ResolvedEnvironmentVariable, RunnerError, SessionInvocation};
+    use crate::{BindMount, ResolvedEnvironmentVariable, RunnerError, SessionInvocation};
+    use std::path::PathBuf;
 
     #[test]
     fn unique_suffix_with_encodes_eight_random_bytes_as_sixteen_lower_hex_characters() {
@@ -464,6 +515,51 @@ mod tests {
                 assert_eq!(stderr.trim(), "repo token secret create failed");
             }
             other => panic!("expected PodmanCommandFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_session_resources_rejects_missing_additional_mount_sources() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let missing_mount_source = std::env::temp_dir().join(format!(
+            "agentd-runner-missing-mount-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after the unix epoch")
+                .as_nanos()
+        ));
+        let session_id = format!("session-missing-mount-{}", std::process::id());
+
+        let result = prepare_session_resources(
+            "agentd-agent-session",
+            &crate::SessionSpec {
+                methodology_dir,
+                mounts: vec![BindMount {
+                    source: missing_mount_source.clone(),
+                    target: PathBuf::from("/mnt/readonly"),
+                    read_only: true,
+                }],
+                ..test_session_spec()
+            },
+            &SessionInvocation {
+                repo_url: "https://example.com/repo.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                timeout: None,
+            },
+            &session_id,
+        );
+
+        match result.expect_err("missing mount sources should be rejected") {
+            RunnerError::MissingMountSource { path } => {
+                assert_eq!(path, missing_mount_source);
+            }
+            other => panic!("expected MissingMountSource, got {other:?}"),
         }
     }
 }

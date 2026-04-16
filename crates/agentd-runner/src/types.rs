@@ -33,6 +33,8 @@ pub struct SessionSpec {
     /// Host-side path to the methodology directory. Mounted read-only into
     /// the container at `/agentd/methodology`. Must contain `manifest.toml`.
     pub methodology_dir: PathBuf,
+    /// Additional host bind mounts declared by the selected profile.
+    pub mounts: Vec<BindMount>,
     /// Command array executed directly from the cloned repository after
     /// workspace setup. Not a shell command unless the profile explicitly
     /// configures one (for example, `["/bin/sh", "-lc", "..."]`).
@@ -41,6 +43,17 @@ pub struct SessionSpec {
     /// Non-empty values are passed via ephemeral podman secrets; empty values
     /// are passed as direct `--env` assignments.
     pub environment: Vec<ResolvedEnvironmentVariable>,
+}
+
+/// A host bind mount declared by a session profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindMount {
+    /// Host-side source path to bind into the container.
+    pub source: PathBuf,
+    /// Absolute in-container target path for the bind mount.
+    pub target: PathBuf,
+    /// Whether the mount is read-only inside the container.
+    pub read_only: bool,
 }
 
 /// A name-value pair representing an environment variable whose value has
@@ -276,9 +289,19 @@ pub enum RunnerError {
     /// An environment variable name collides with a runner-managed name.
     /// Produced during spec validation.
     ReservedEnvironmentName { name: String },
+    /// A configured bind mount source path is not absolute.
+    InvalidMountSource { path: PathBuf },
+    /// A configured bind mount target path is not absolute.
+    InvalidMountTarget { path: PathBuf },
+    /// Two configured bind mounts share the same target path.
+    DuplicateMountTarget { target: PathBuf },
+    /// A configured bind mount target collides with a runner-managed mount.
+    ReservedMountTarget { target: PathBuf },
     /// Filesystem failure, process I/O failure, or invalid external command
     /// output received after a successful process exit.
     Io(std::io::Error),
+    /// A configured bind mount source path does not exist.
+    MissingMountSource { path: PathBuf },
     /// A podman CLI invocation returned a non-zero exit status. Captures the
     /// argument list, exit status, and stderr for diagnostics.
     PodmanCommandFailed {
@@ -323,7 +346,34 @@ impl fmt::Display for RunnerError {
                     "environment variable name is reserved by the runner: {name}"
                 )
             }
+            RunnerError::InvalidMountSource { path } => {
+                write!(
+                    f,
+                    "mount source must be an absolute path: {}",
+                    path.display()
+                )
+            }
+            RunnerError::InvalidMountTarget { path } => {
+                write!(
+                    f,
+                    "mount target must be an absolute path: {}",
+                    path.display()
+                )
+            }
+            RunnerError::DuplicateMountTarget { target } => {
+                write!(f, "mount targets must be unique: {}", target.display())
+            }
+            RunnerError::ReservedMountTarget { target } => {
+                write!(
+                    f,
+                    "mount target is reserved by the runner: {}",
+                    target.display()
+                )
+            }
             RunnerError::Io(error) => write!(f, "{error}"),
+            RunnerError::MissingMountSource { path } => {
+                write!(f, "mount source path does not exist: {}", path.display())
+            }
             RunnerError::PodmanCommandFailed {
                 args,
                 status,

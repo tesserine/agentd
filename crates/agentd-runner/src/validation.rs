@@ -10,6 +10,8 @@ use crate::types::{
     EnvironmentNameValidationError, ProfileNameValidationError, RunnerError, SessionInvocation,
     SessionSpec,
 };
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 const PROFILE_NAME_ENV: &str = "PROFILE_NAME";
 const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
@@ -17,6 +19,7 @@ pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
 const RESERVED_PROFILE_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
+const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 
 pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if !is_daemon_instance_id(&spec.daemon_instance_id) {
@@ -30,6 +33,30 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     }
     if spec.command.is_empty() || spec.command.iter().any(|arg| arg.is_empty()) {
         return Err(RunnerError::InvalidCommand);
+    }
+
+    let mut seen_mount_targets = HashSet::new();
+    for mount in &spec.mounts {
+        if !mount.source.is_absolute() {
+            return Err(RunnerError::InvalidMountSource {
+                path: mount.source.clone(),
+            });
+        }
+        if !mount.target.is_absolute() {
+            return Err(RunnerError::InvalidMountTarget {
+                path: mount.target.clone(),
+            });
+        }
+        if mount.target == PathBuf::from(METHODOLOGY_MOUNT_PATH) {
+            return Err(RunnerError::ReservedMountTarget {
+                target: mount.target.clone(),
+            });
+        }
+        if !seen_mount_targets.insert(mount.target.clone()) {
+            return Err(RunnerError::DuplicateMountTarget {
+                target: mount.target.clone(),
+            });
+        }
     }
 
     for variable in &spec.environment {
@@ -212,7 +239,7 @@ fn is_valid_unix_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ResolvedEnvironmentVariable, test_support::test_session_spec};
+    use crate::{BindMount, ResolvedEnvironmentVariable, test_support::test_session_spec};
     use std::path::PathBuf;
 
     #[test]
@@ -303,6 +330,93 @@ mod tests {
                 matches!(error, RunnerError::InvalidBaseImage),
                 "expected InvalidBaseImage for {base_image:?}, got {error:?}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_sources_that_are_not_absolute() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("relative/source"),
+                target: PathBuf::from("/home/site-builder/.claude"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("relative mount sources should be rejected");
+
+        match error {
+            RunnerError::InvalidMountSource { path } => {
+                assert_eq!(path, PathBuf::from("relative/source"));
+            }
+            other => panic!("expected InvalidMountSource, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_are_not_absolute() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from(".claude"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("relative mount targets should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from(".claude"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_duplicate_mount_targets() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![
+                BindMount {
+                    source: PathBuf::from("/home/core/.claude"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/var/lib/tesserine/audit"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: false,
+                },
+            ],
+            ..test_session_spec()
+        })
+        .expect_err("duplicate mount targets should be rejected");
+
+        match error {
+            RunnerError::DuplicateMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder/.claude"));
+            }
+            other => panic!("expected DuplicateMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_methodology_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/methodology"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the methodology mount");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd/methodology"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
         }
     }
 

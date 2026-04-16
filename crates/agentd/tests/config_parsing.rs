@@ -117,6 +117,7 @@ fn parses_example_config_into_static_profile_settings() {
         site_builder.credentials()[0].source(),
         "AGENTD_GITHUB_TOKEN"
     );
+    assert!(site_builder.mounts().is_empty());
 
     assert_eq!(code_reviewer.name(), "code-reviewer");
     assert_eq!(
@@ -145,6 +146,7 @@ fn parses_example_config_into_static_profile_settings() {
         code_reviewer.credentials()[0].source(),
         "AGENTD_GITHUB_TOKEN"
     );
+    assert!(code_reviewer.mounts().is_empty());
 }
 
 #[test]
@@ -552,6 +554,144 @@ command = ["site-builder", "exec"]
         .expect("profile should exist");
 
     assert_eq!(profile.schedule(), Some("*/15 * * * *"));
+}
+
+#[test]
+fn parses_profile_mounts_as_operator_declared_bind_mounts() {
+    let config = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = "/home/site-builder/.claude"
+read_only = true
+
+[[profiles.mounts]]
+source = "/var/lib/tesserine/audit"
+target = "/home/site-builder/.runa"
+read_only = false
+"#,
+    )
+    .expect("config should parse declared mounts");
+
+    let profile = config
+        .profile("site-builder")
+        .expect("profile should exist");
+
+    assert_eq!(profile.mounts().len(), 2);
+    assert_eq!(
+        profile.mounts()[0].source(),
+        Path::new("/home/core/.claude")
+    );
+    assert_eq!(
+        profile.mounts()[0].target(),
+        Path::new("/home/site-builder/.claude")
+    );
+    assert!(profile.mounts()[0].read_only());
+    assert_eq!(
+        profile.mounts()[1].source(),
+        Path::new("/var/lib/tesserine/audit")
+    );
+    assert_eq!(
+        profile.mounts()[1].target(),
+        Path::new("/home/site-builder/.runa")
+    );
+    assert!(!profile.mounts()[1].read_only());
+}
+
+#[test]
+fn rejects_profile_mount_sources_that_are_not_absolute() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "../claude"
+target = "/home/site-builder/.claude"
+read_only = true
+"#,
+    )
+    .expect_err("relative mount sources should be rejected");
+
+    match error {
+        ConfigError::MountSourceMustBeAbsolute { profile, source } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(source, Path::new("../claude"));
+        }
+        other => panic!("expected absolute mount source error, got {other}"),
+    }
+}
+
+#[test]
+fn rejects_profile_mount_targets_that_are_not_absolute() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = ".claude"
+read_only = true
+"#,
+    )
+    .expect_err("relative mount targets should be rejected");
+
+    match error {
+        ConfigError::MountTargetMustBeAbsolute { profile, target } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(target, Path::new(".claude"));
+        }
+        other => panic!("expected absolute mount target error, got {other}"),
+    }
+}
+
+#[test]
+fn rejects_duplicate_profile_mount_targets() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = "/home/site-builder/.claude"
+read_only = true
+
+[[profiles.mounts]]
+source = "/var/lib/tesserine/audit"
+target = "/home/site-builder/.claude"
+read_only = false
+"#,
+    )
+    .expect_err("duplicate mount targets should be rejected");
+
+    match error {
+        ConfigError::DuplicateMountTarget { profile, target } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(target, Path::new("/home/site-builder/.claude"));
+        }
+        other => panic!("expected duplicate mount target error, got {other}"),
+    }
 }
 
 #[test]

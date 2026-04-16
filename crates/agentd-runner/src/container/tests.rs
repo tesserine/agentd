@@ -1,6 +1,6 @@
 use super::*;
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
-use crate::resources::SessionResources;
+use crate::resources::{PreparedBindMount, SessionResources};
 use crate::test_support::{
     CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario, InspectBehavior,
     capture_tracing_events, exit_status, fake_podman_lock, test_session_spec,
@@ -21,6 +21,7 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
         },
@@ -49,6 +50,7 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
         },
@@ -96,6 +98,7 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
         },
@@ -113,6 +116,48 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
         args.get(image_index + 2).map(String::as_str),
         Some(expected_script.as_str())
     );
+}
+
+#[test]
+fn create_container_args_include_configured_additional_mounts_after_methodology_mount() {
+    let args = build_create_container_args(
+        &SessionResources {
+            container_name: "agentd-agent-session".to_string(),
+            methodology_staging_dir: PathBuf::from("/tmp/staging"),
+            methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            additional_mounts: vec![
+                PreparedBindMount {
+                    source: PathBuf::from("/tmp/staging/mount-0"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: true,
+                },
+                PreparedBindMount {
+                    source: PathBuf::from("/tmp/staging/mount-1"),
+                    target: PathBuf::from("/home/site-builder/.runa"),
+                    read_only: false,
+                },
+            ],
+            environment_secret_bindings: Vec::new(),
+            repo_token_secret_binding: None,
+        },
+        &test_session_spec(),
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    );
+
+    let mount_values = argument_values(&args, "--mount");
+    assert_eq!(mount_values.len(), 3);
+    assert!(mount_values[0].contains("src=/tmp/staging/methodology"));
+    assert!(mount_values[1].contains("src=/tmp/staging/mount-0"));
+    assert!(mount_values[1].contains("target=/home/site-builder/.claude"));
+    assert!(mount_values[1].contains("ro=true"));
+    assert!(mount_values[2].contains("src=/tmp/staging/mount-1"));
+    assert!(mount_values[2].contains("target=/home/site-builder/.runa"));
+    assert!(mount_values[2].contains("ro=false"));
 }
 
 #[test]
@@ -1203,6 +1248,18 @@ fn argument_value(command_line: &str, flag: &str) -> Option<String> {
     }
 
     None
+}
+
+fn argument_values(args: &[String], flag: &str) -> Vec<String> {
+    args.windows(2)
+        .filter_map(|window| {
+            if window[0] == flag {
+                Some(window[1].clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn mount_src_value(mount: &str) -> Option<String> {

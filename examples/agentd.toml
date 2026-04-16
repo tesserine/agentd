@@ -34,6 +34,14 @@ exec runa run
 # repository authentication. This value does not flow into the agent runtime.
 repo_token_source = "SITE_BUILDER_REPO_TOKEN"
 
+#[[profiles.mounts]]
+# Additional bind mounts are operator-chosen host paths.
+# `source` must be an absolute existing host path.
+# `target` must be an absolute container path.
+#source = "/home/core/.claude"
+#target = "/home/site-builder/.claude"
+#read_only = true
+
 [[profiles.credentials]]
 # Secret name exposed inside the session environment.
 name = "GITHUB_TOKEN"

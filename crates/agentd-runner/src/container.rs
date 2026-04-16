@@ -225,6 +225,17 @@ fn build_create_container_args(
             METHODOLOGY_MOUNT_PATH
         ),
     ];
+
+    for mount in &resources.additional_mounts {
+        args.push("--mount".to_string());
+        args.push(format!(
+            "type=bind,src={},target={},ro={},relabel=shared",
+            mount.source.display(),
+            mount.target.display(),
+            mount.read_only
+        ));
+    }
+
     let mut secret_bindings = resources.environment_secret_bindings.iter();
 
     for variable in &spec.environment {

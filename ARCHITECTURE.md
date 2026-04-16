@@ -140,6 +140,7 @@ agentd runs sessions in ephemeral Podman containers so agents remain separated f
 | Mount or Injection | Purpose | Need Served |
 |---|---|---|
 | Read-only methodology directory | Expose the configured methodology manifest and protocol assets without allowing mutation | Context |
+| Profile-declared bind mounts | Expose host-managed state such as subscription auth or persistent artifact storage with per-mount read-only vs read-write policy | Context, Credentials |
 | Credentials | Authenticate to external systems without baking secrets into images | Credentials |
 | Home workspace at `/home/{username}` with repo at `/home/{username}/repo` | Give the session a writable standard Linux home and a clean project workspace that starts fresh each run | Mission, Tool Availability, Identity |
 
@@ -147,9 +148,17 @@ From inside the environment, an agent should see:
 - identity-related environment variables
 - `$HOME` set to `/home/{username}`
 - a read-only methodology mount rooted at `manifest.toml`
+- any additional bind mounts declared by the selected profile
 - a fresh writable repository checkout at `/home/{username}/repo`
 - any runtime-managed state the configured session command creates inside the repo or home directory
 - the tools and runtime configuration needed for its assigned work
+
+Additional bind mounts are declared in profile configuration as `source`,
+`target`, and `read_only`. agentd validates absolute container targets and
+unique target paths, then stages canonical host sources through runner-managed
+symlinks before calling Podman so host paths containing commas remain mountable.
+Subscription auth is the first read-only consumer of this mechanism; persistent
+audit storage in `#76` builds on the same path with read-write mounts.
 
 ## 6. Credential Flow
 

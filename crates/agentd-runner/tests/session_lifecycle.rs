@@ -10,7 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agentd_runner::{
-    ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec, run_session,
+    BindMount, ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec,
+    run_session,
 };
 
 const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
@@ -33,6 +34,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
             profile_name: "success-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec![
                 "site-builder".to_string(),
                 "exec".to_string(),
@@ -82,6 +84,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
             profile_name: "mixed-env-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -130,6 +133,7 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
             profile_name: "unset-work-unit-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
@@ -170,6 +174,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
             profile_name: "failure-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -216,6 +221,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
             profile_name: "failure-run-125".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -263,6 +269,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             profile_name: "comma-methodology-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -290,6 +297,116 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
 }
 
 #[test]
+fn validates_read_only_additional_mounts_from_paths_containing_commas() {
+    if skip_if_podman_unavailable(
+        "validates_read_only_additional_mounts_from_paths_containing_commas",
+    ) {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("readonly-mount-run");
+    let image = fixture.build_image();
+    let host_mount = fixture.root.join("host,readonly");
+    fs::create_dir_all(&host_mount).expect("read-only host mount should be created");
+    fs::write(host_mount.join("auth.json"), "{\"token\":\"test\"}\n")
+        .expect("read-only host fixture file should be written");
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "readonly-mount-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: vec![BindMount {
+                source: host_mount.clone(),
+                target: PathBuf::from("/mnt/readonly"),
+                read_only: true,
+            }],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "verify-read-only-mount".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    assert!(
+        !host_mount.join("write-should-fail").exists(),
+        "read-only mount should not permit in-container writes"
+    );
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn preserves_host_writes_through_read_write_additional_mounts() {
+    if skip_if_podman_unavailable("preserves_host_writes_through_read_write_additional_mounts") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("readwrite-mount-run");
+    let image = fixture.build_image();
+    let host_mount = fixture.root.join("host-readwrite");
+    fs::create_dir_all(&host_mount).expect("read-write host mount should be created");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
+            .expect("read-write host mount should permit container writes");
+    }
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "readwrite-mount-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: vec![BindMount {
+                source: host_mount.clone(),
+                target: PathBuf::from("/mnt/readwrite"),
+                read_only: false,
+            }],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-read-write-mount".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    assert_eq!(
+        fs::read_to_string(host_mount.join("session-artifact.txt"))
+            .expect("read-write mount should persist host-visible writes"),
+        "persisted from container\n"
+    );
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
 fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
     if skip_if_podman_unavailable("times_out_when_a_timeout_is_provided_and_cleans_up_container") {
         return;
@@ -307,6 +424,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
             profile_name: "timeout-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -354,6 +472,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                 profile_name: "running-secret-run".to_string(),
                 base_image: image,
                 methodology_dir,
+                mounts: Vec::new(),
                 command: vec!["site-builder".to_string(), "exec".to_string()],
                 environment: vec![
                     ResolvedEnvironmentVariable {
@@ -877,6 +996,20 @@ case "$command_name" in
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "success-without-work-unit" ]; then
             [ "${AGENTD_WORK_UNIT+set}" != "set" ]
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "verify-read-only-mount" ]; then
+            [ -f /mnt/readonly/auth.json ]
+            if touch /mnt/readonly/write-should-fail 2>/dev/null; then
+                echo "read-only mount unexpectedly allowed writes" >&2
+                exit 91
+            fi
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-read-write-mount" ]; then
+            printf 'persisted from container\n' > /mnt/readwrite/session-artifact.txt
             exit 0
         fi
 

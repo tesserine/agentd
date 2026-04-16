@@ -17,6 +17,7 @@ pub(crate) fn test_session_spec() -> SessionSpec {
         profile_name: "site-builder".to_string(),
         base_image: "image".to_string(),
         methodology_dir: PathBuf::from("/tmp/methodology"),
+        mounts: Vec::new(),
         command: vec!["site-builder".to_string(), "exec".to_string()],
         environment: Vec::new(),
     }
