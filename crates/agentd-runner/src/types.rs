@@ -6,7 +6,7 @@
 //! for the standalone validators are also defined here.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
@@ -27,12 +27,14 @@ pub struct SessionSpec {
     /// [`validate_profile_name`](crate::validate_profile_name).
     pub profile_name: String,
     /// Container image reference. The image must provide `/bin/sh`, `git`,
-    /// and the setup/session binaries required by the configured profile
-    /// command in `PATH`, including `useradd` and `gosu`.
+    /// `find`, and the setup/session binaries required by the configured
+    /// profile command in `PATH`, including `useradd` and `gosu`.
     pub base_image: String,
     /// Host-side path to the methodology directory. Mounted read-only into
     /// the container at `/agentd/methodology`. Must contain `manifest.toml`.
     pub methodology_dir: PathBuf,
+    /// Additional host bind mounts declared by the selected profile.
+    pub mounts: Vec<BindMount>,
     /// Command array executed directly from the cloned repository after
     /// workspace setup. Not a shell command unless the profile explicitly
     /// configures one (for example, `["/bin/sh", "-lc", "..."]`).
@@ -41,6 +43,20 @@ pub struct SessionSpec {
     /// Non-empty values are passed via ephemeral podman secrets; empty values
     /// are passed as direct `--env` assignments.
     pub environment: Vec<ResolvedEnvironmentVariable>,
+}
+
+/// A host bind mount declared by a session profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindMount {
+    /// Host-side source path to bind into the container.
+    pub source: PathBuf,
+    /// Absolute in-container target path for the bind mount. Must satisfy
+    /// [`validate_mount_target`](crate::validate_mount_target). When
+    /// validated as part of a mount list, targets must also be pairwise
+    /// non-overlapping via [`validate_mount_overlap`](crate::validate_mount_overlap).
+    pub target: PathBuf,
+    /// Whether the mount is read-only inside the container.
+    pub read_only: bool,
 }
 
 /// A name-value pair representing an environment variable whose value has
@@ -240,6 +256,27 @@ pub enum ProfileNameValidationError {
     Reserved,
 }
 
+/// Error returned by [`validate_mount_target`](crate::validate_mount_target)
+/// when a bind-mount target violates runner rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountTargetValidationError {
+    /// The target is not absolute, contains `.` or `..`, contains `,`, ends
+    /// with `/`, or includes `find -path` metacharacters.
+    Invalid { path: PathBuf },
+    /// The target collides with a runner-managed path.
+    Reserved { target: PathBuf },
+}
+
+/// Error returned by [`validate_mount_overlap`](crate::validate_mount_overlap)
+/// when two distinct bind-mount targets overlap by path components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountOverlapError {
+    /// The first offending in-container mount target path.
+    pub first: PathBuf,
+    /// The second offending in-container mount target path.
+    pub second: PathBuf,
+}
+
 /// Errors produced during session execution.
 ///
 /// Validation errors ([`InvalidProfileName`](Self::InvalidProfileName),
@@ -276,9 +313,22 @@ pub enum RunnerError {
     /// An environment variable name collides with a runner-managed name.
     /// Produced during spec validation.
     ReservedEnvironmentName { name: String },
+    /// A configured bind mount source path is not absolute.
+    InvalidMountSource { path: PathBuf },
+    /// A configured bind mount target path is not absolute, contains `.` or
+    /// `..` components, or contains `,`.
+    InvalidMountTarget { path: PathBuf },
+    /// Two configured bind mounts share the same target path.
+    DuplicateMountTarget { target: PathBuf },
+    /// Two configured bind mounts target overlapping container paths.
+    OverlappingMountTargets { first: PathBuf, second: PathBuf },
+    /// A configured bind mount target collides with a runner-managed mount.
+    ReservedMountTarget { target: PathBuf },
     /// Filesystem failure, process I/O failure, or invalid external command
     /// output received after a successful process exit.
     Io(std::io::Error),
+    /// A configured bind mount source path does not exist.
+    MissingMountSource { path: PathBuf },
     /// A podman CLI invocation returned a non-zero exit status. Captures the
     /// argument list, exit status, and stderr for diagnostics.
     PodmanCommandFailed {
@@ -323,7 +373,25 @@ impl fmt::Display for RunnerError {
                     "environment variable name is reserved by the runner: {name}"
                 )
             }
+            RunnerError::InvalidMountSource { path } => {
+                write!(
+                    f,
+                    "mount source must be an absolute path: {}",
+                    path.display()
+                )
+            }
+            RunnerError::InvalidMountTarget { path } => mount_target_invalid_message(f, path),
+            RunnerError::DuplicateMountTarget { target } => {
+                write!(f, "mount targets must be unique: {}", target.display())
+            }
+            RunnerError::OverlappingMountTargets { first, second } => {
+                mount_target_overlap_message(f, first, second)
+            }
+            RunnerError::ReservedMountTarget { target } => mount_target_reserved_message(f, target),
             RunnerError::Io(error) => write!(f, "{error}"),
+            RunnerError::MissingMountSource { path } => {
+                write!(f, "mount source path does not exist: {}", path.display())
+            }
             RunnerError::PodmanCommandFailed {
                 args,
                 status,
@@ -339,6 +407,23 @@ impl fmt::Display for RunnerError {
     }
 }
 
+impl fmt::Display for MountTargetValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MountTargetValidationError::Invalid { path } => mount_target_invalid_message(f, path),
+            MountTargetValidationError::Reserved { target } => {
+                mount_target_reserved_message(f, target)
+            }
+        }
+    }
+}
+
+impl fmt::Display for MountOverlapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        mount_target_overlap_message(f, &self.first, &self.second)
+    }
+}
+
 impl std::error::Error for RunnerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -348,10 +433,43 @@ impl std::error::Error for RunnerError {
     }
 }
 
+impl std::error::Error for MountTargetValidationError {}
+
+impl std::error::Error for MountOverlapError {}
+
 impl From<std::io::Error> for RunnerError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
     }
+}
+
+fn mount_target_invalid_message(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "mount target must be an absolute path without trailing '/', '.' or '..' components, ',', or find metacharacters ('*', '?', '[', ']', '\\\\'): {}",
+        path.display()
+    )
+}
+
+fn mount_target_reserved_message(f: &mut fmt::Formatter<'_>, target: &Path) -> fmt::Result {
+    write!(
+        f,
+        "mount target is reserved by the runner: {}",
+        target.display()
+    )
+}
+
+fn mount_target_overlap_message(
+    f: &mut fmt::Formatter<'_>,
+    first: &Path,
+    second: &Path,
+) -> fmt::Result {
+    write!(
+        f,
+        "mount targets must not overlap: {} and {}",
+        first.display(),
+        second.display()
+    )
 }
 
 fn exit_status_label(status: &ExitStatus) -> String {

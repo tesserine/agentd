@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use agentd::config::{Config, ConfigError, DaemonConfig};
+use agentd_runner::MountTargetValidationError;
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -71,6 +72,37 @@ fn write_temp_config_under(base_dir: &Path, name: &str, contents: &str) -> PathB
     path
 }
 
+fn assert_invalid_mount_target_parse_error(
+    target: &str,
+    expected_error: MountTargetValidationError,
+) {
+    let target = target.replace('\\', "\\\\").replace('"', "\\\"");
+    let error = Config::from_str(&format!(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = "{target}"
+read_only = true
+"#
+    ))
+    .expect_err("runner-invalid mount targets should be rejected during config parse");
+
+    match error {
+        ConfigError::InvalidMountTarget { profile, error } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(error, expected_error);
+        }
+        other => panic!("expected invalid mount target error, got {other}"),
+    }
+}
+
 #[test]
 fn parses_example_config_into_static_profile_settings() {
     let config = Config::from_str(&example_config()).expect("example config should parse");
@@ -117,6 +149,7 @@ fn parses_example_config_into_static_profile_settings() {
         site_builder.credentials()[0].source(),
         "AGENTD_GITHUB_TOKEN"
     );
+    assert!(site_builder.mounts().is_empty());
 
     assert_eq!(code_reviewer.name(), "code-reviewer");
     assert_eq!(
@@ -145,6 +178,7 @@ fn parses_example_config_into_static_profile_settings() {
         code_reviewer.credentials()[0].source(),
         "AGENTD_GITHUB_TOKEN"
     );
+    assert!(code_reviewer.mounts().is_empty());
 }
 
 #[test]
@@ -552,6 +586,303 @@ command = ["site-builder", "exec"]
         .expect("profile should exist");
 
     assert_eq!(profile.schedule(), Some("*/15 * * * *"));
+}
+
+#[test]
+fn parses_profile_mounts_as_operator_declared_bind_mounts() {
+    let config = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = "/home/site-builder/.claude"
+read_only = true
+
+[[profiles.mounts]]
+source = "/var/lib/tesserine/audit"
+target = "/home/site-builder/.runa"
+read_only = false
+"#,
+    )
+    .expect("config should parse declared mounts");
+
+    let profile = config
+        .profile("site-builder")
+        .expect("profile should exist");
+
+    assert_eq!(profile.mounts().len(), 2);
+    assert_eq!(
+        profile.mounts()[0].source(),
+        Path::new("/home/core/.claude")
+    );
+    assert_eq!(
+        profile.mounts()[0].target(),
+        Path::new("/home/site-builder/.claude")
+    );
+    assert!(profile.mounts()[0].read_only());
+    assert_eq!(
+        profile.mounts()[1].source(),
+        Path::new("/var/lib/tesserine/audit")
+    );
+    assert_eq!(
+        profile.mounts()[1].target(),
+        Path::new("/home/site-builder/.runa")
+    );
+    assert!(!profile.mounts()[1].read_only());
+}
+
+#[test]
+fn rejects_profile_mount_sources_that_are_not_absolute() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "../claude"
+target = "/home/site-builder/.claude"
+read_only = true
+"#,
+    )
+    .expect_err("relative mount sources should be rejected");
+
+    match error {
+        ConfigError::MountSourceMustBeAbsolute { profile, source } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(source, Path::new("../claude"));
+        }
+        other => panic!("expected absolute mount source error, got {other}"),
+    }
+}
+
+#[test]
+fn rejects_profile_mount_targets_that_are_not_absolute() {
+    assert_invalid_mount_target_parse_error(
+        ".claude",
+        MountTargetValidationError::Invalid {
+            path: PathBuf::from(".claude"),
+        },
+    );
+}
+
+#[test]
+fn rejects_duplicate_profile_mount_targets() {
+    let error = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = "/home/site-builder/.claude"
+read_only = true
+
+[[profiles.mounts]]
+source = "/var/lib/tesserine/audit"
+target = "/home/site-builder/.claude"
+read_only = false
+"#,
+    )
+    .expect_err("duplicate mount targets should be rejected");
+
+    match error {
+        ConfigError::DuplicateMountTarget { profile, target } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(target, Path::new("/home/site-builder/.claude"));
+        }
+        other => panic!("expected duplicate mount target error, got {other}"),
+    }
+}
+
+#[test]
+fn load_rejects_overlapping_profile_mount_targets() {
+    let path = write_temp_config(
+        "overlapping-mount-targets",
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.config"
+target = "/home/site-builder/.config"
+read_only = true
+
+[[profiles.mounts]]
+source = "/home/core/.config/claude"
+target = "/home/site-builder/.config/claude"
+read_only = true
+"#,
+    );
+
+    let error = Config::load(&path).expect_err("overlapping mount targets should be rejected");
+
+    match error {
+        ConfigError::OverlappingMountTargets {
+            profile,
+            first,
+            second,
+        } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(first, Path::new("/home/site-builder/.config"));
+            assert_eq!(second, Path::new("/home/site-builder/.config/claude"));
+        }
+        other => panic!("expected overlapping mount target error, got {other}"),
+    }
+}
+
+#[test]
+fn rejects_profile_mount_targets_with_parent_dir_components() {
+    assert_invalid_mount_target_parse_error(
+        "/home/site-builder/x/../repo/.git",
+        MountTargetValidationError::Invalid {
+            path: PathBuf::from("/home/site-builder/x/../repo/.git"),
+        },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_with_current_dir_components() {
+    assert_invalid_mount_target_parse_error(
+        "/home/site-builder/./a",
+        MountTargetValidationError::Invalid {
+            path: PathBuf::from("/home/site-builder/./a"),
+        },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_containing_commas() {
+    assert_invalid_mount_target_parse_error(
+        "/home/site-builder/data,archive",
+        MountTargetValidationError::Invalid {
+            path: PathBuf::from("/home/site-builder/data,archive"),
+        },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_with_trailing_slashes() {
+    assert_invalid_mount_target_parse_error(
+        "/home/site-builder/.claude/",
+        MountTargetValidationError::Invalid {
+            path: PathBuf::from("/home/site-builder/.claude/"),
+        },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_containing_find_metacharacters() {
+    for target in [
+        "/home/site-builder/foo*bar",
+        "/home/site-builder/foo?bar",
+        "/home/site-builder/[x]",
+        r"/home/site-builder/foo\bar",
+    ] {
+        assert_invalid_mount_target_parse_error(
+            target,
+            MountTargetValidationError::Invalid {
+                path: PathBuf::from(target),
+            },
+        );
+    }
+}
+
+#[test]
+fn load_rejects_profile_mount_targets_with_trailing_slashes() {
+    let path = write_temp_config(
+        "invalid-mount-target-trailing-slash",
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = "/home/site-builder/.claude/"
+read_only = true
+"#,
+    );
+
+    let error = Config::load(&path).expect_err("trailing-slash mount targets should be rejected");
+
+    match &error {
+        ConfigError::InvalidMountTarget { profile, error } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(
+                error,
+                &MountTargetValidationError::Invalid {
+                    path: PathBuf::from("/home/site-builder/.claude/"),
+                }
+            );
+        }
+        other => panic!("expected invalid mount target error, got {other}"),
+    }
+
+    assert_eq!(
+        error.to_string(),
+        "profile 'site-builder' defines invalid mount target: mount target must be an absolute path without trailing '/', '.' or '..' components, ',', or find metacharacters ('*', '?', '[', ']', '\\\\'): /home/site-builder/.claude/"
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_that_are_ancestors_of_methodology_mount() {
+    assert_invalid_mount_target_parse_error(
+        "/agentd",
+        MountTargetValidationError::Reserved {
+            target: PathBuf::from("/agentd"),
+        },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_that_collide_with_methodology_mount() {
+    assert_invalid_mount_target_parse_error(
+        "/agentd/methodology",
+        MountTargetValidationError::Reserved {
+            target: PathBuf::from("/agentd/methodology"),
+        },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_that_collide_with_home_directory() {
+    assert_invalid_mount_target_parse_error(
+        "/home/site-builder",
+        MountTargetValidationError::Reserved {
+            target: PathBuf::from("/home/site-builder"),
+        },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_that_collide_with_repo_directory() {
+    assert_invalid_mount_target_parse_error(
+        "/home/site-builder/repo",
+        MountTargetValidationError::Reserved {
+            target: PathBuf::from("/home/site-builder/repo"),
+        },
+    );
 }
 
 #[test]

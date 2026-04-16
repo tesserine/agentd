@@ -1,6 +1,6 @@
 use super::*;
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
-use crate::resources::SessionResources;
+use crate::resources::{PreparedBindMount, SessionResources};
 use crate::test_support::{
     CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario, InspectBehavior,
     capture_tracing_events, exit_status, fake_podman_lock, test_session_spec,
@@ -21,6 +21,7 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
         },
@@ -49,6 +50,7 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
         },
@@ -96,6 +98,7 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
         },
@@ -112,6 +115,58 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
     assert_eq!(
         args.get(image_index + 2).map(String::as_str),
         Some(expected_script.as_str())
+    );
+}
+
+#[test]
+fn create_container_args_include_configured_additional_mounts_after_methodology_mount() {
+    let args = build_create_container_args(
+        &SessionResources {
+            container_name: "agentd-agent-session".to_string(),
+            methodology_staging_dir: PathBuf::from("/tmp/staging"),
+            methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            additional_mounts: vec![
+                PreparedBindMount {
+                    source: PathBuf::from("/tmp/staging/mount-0"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: true,
+                },
+                PreparedBindMount {
+                    source: PathBuf::from("/tmp/staging/mount-1"),
+                    target: PathBuf::from("/home/site-builder/.runa"),
+                    read_only: false,
+                },
+            ],
+            environment_secret_bindings: Vec::new(),
+            repo_token_secret_binding: None,
+        },
+        &test_session_spec(),
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    );
+
+    let mount_values = argument_values(&args, "--mount");
+    assert_eq!(mount_values.len(), 3);
+    assert!(mount_values[0].contains("src=/tmp/staging/methodology"));
+    assert!(mount_values[1].contains("src=/tmp/staging/mount-0"));
+    assert!(mount_values[1].contains("target=/home/site-builder/.claude"));
+    assert!(mount_values[1].contains("ro=true"));
+    assert!(
+        !mount_values[1].contains("relabel="),
+        "operator-declared mounts should not mutate host SELinux labels: {}",
+        mount_values[1]
+    );
+    assert!(mount_values[2].contains("src=/tmp/staging/mount-1"));
+    assert!(mount_values[2].contains("target=/home/site-builder/.runa"));
+    assert!(mount_values[2].contains("ro=false"));
+    assert!(
+        !mount_values[2].contains("relabel="),
+        "operator-declared mounts should not mutate host SELinux labels: {}",
+        mount_values[2]
     );
 }
 
@@ -163,16 +218,117 @@ fn build_container_script_creates_home_workspace_and_execs_profile_command_from_
 
     assert!(script.contains("useradd --create-home --home-dir '/home/myprofile' --shell /bin/sh --user-group 'myprofile'"));
     assert!(script.contains(
+        "\nfind '/home/myprofile' -mindepth 0 \\( -path '/home/myprofile/repo' \\) -prune -o -exec chown 'myprofile:myprofile' {} +\n"
+    ));
+    assert!(script.contains(
         "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/myprofile/repo'"
     ));
     assert!(script.contains("\ncd '/home/myprofile/repo'\n"));
-    assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
+    assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile/repo'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile'\n"));
+    assert!(!script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
     assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
     assert!(script.contains("\nexport AGENTD_WORK_UNIT='task-42'\n"));
     assert!(script.contains("exec gosu 'myprofile:myprofile' 'site-builder' 'exec'"));
     assert!(!script.contains("runa init"));
     assert!(!script.contains(".runa/config.toml"));
     assert!(!script.contains("runa run"));
+}
+
+#[test]
+fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_targets() {
+    let script = build_container_script(
+        &crate::SessionSpec {
+            profile_name: "myprofile".to_string(),
+            mounts: vec![
+                crate::BindMount {
+                    source: PathBuf::from("/srv/claude"),
+                    target: PathBuf::from("/home/myprofile/.claude"),
+                    read_only: true,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/claude-config"),
+                    target: PathBuf::from("/home/myprofile/.config/claude workspace"),
+                    read_only: false,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/git-config"),
+                    target: PathBuf::from("/home/myprofile/.config/git (session)"),
+                    read_only: false,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/deep-tree"),
+                    target: PathBuf::from("/home/myprofile/a/b/c"),
+                    read_only: false,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/outside-home"),
+                    target: PathBuf::from("/var/lib/shared"),
+                    read_only: false,
+                },
+            ],
+            ..test_session_spec()
+        },
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    );
+
+    assert!(
+        script.contains(
+            "\nfind '/home/myprofile' -mindepth 0 \\( -path '/home/myprofile/.claude' -o -path '/home/myprofile/.config/claude workspace' -o -path '/home/myprofile/.config/git (session)' -o -path '/home/myprofile/a/b/c' -o -path '/home/myprofile/repo' \\) -prune -o -exec chown 'myprofile:myprofile' {} +\n"
+        ),
+        "home ownership should be repaired with one find traversal that prunes mounts and the repo: {script}"
+    );
+    assert_eq!(
+        script.matches("-path '/home/myprofile/repo'").count(),
+        1,
+        "the repo prune should be emitted exactly once"
+    );
+    assert!(
+        !script.contains("-path '/var/lib/shared'"),
+        "mounts outside HOME should not be part of the HOME ownership traversal: {script}"
+    );
+}
+
+#[test]
+fn build_container_script_does_not_emit_intermediate_home_chown_commands() {
+    let script = build_container_script(
+        &crate::SessionSpec {
+            profile_name: "myprofile".to_string(),
+            mounts: vec![
+                crate::BindMount {
+                    source: PathBuf::from("/srv/claude"),
+                    target: PathBuf::from("/home/myprofile/.config/claude"),
+                    read_only: true,
+                },
+                crate::BindMount {
+                    source: PathBuf::from("/srv/git-config"),
+                    target: PathBuf::from("/home/myprofile/.config/git"),
+                    read_only: false,
+                },
+            ],
+            ..test_session_spec()
+        },
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    );
+
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.config'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.config/claude'\n"));
+    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.config/git'\n"));
+    assert!(
+        script.contains("\nfind '/home/myprofile' -mindepth 0 "),
+        "the find traversal should replace standalone home ownership chown lines: {script}"
+    );
 }
 
 #[test]
@@ -1203,6 +1359,18 @@ fn argument_value(command_line: &str, flag: &str) -> Option<String> {
     }
 
     None
+}
+
+fn argument_values(args: &[String], flag: &str) -> Vec<String> {
+    args.windows(2)
+        .filter_map(|window| {
+            if window[0] == flag {
+                Some(window[1].clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn mount_src_value(mount: &str) -> Option<String> {

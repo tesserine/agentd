@@ -31,12 +31,15 @@ visibility.
 Profiles may now declare a default repository and an optional cron schedule.
 Manual runs still flow through `agentd run`, and scheduled runs dispatch
 through the same daemon socket intake without introducing a separate job type.
+Profiles may also declare additional bind mounts for host-managed state such as
+subscription auth directories or persistent audit storage.
 
 ## Configuration
 
 A profile is a named environment specification: base image, methodology
-directory, optional default repo, optional cron schedule, credentials, and
-runtime command. Define profiles in a TOML config file — start from
+directory, optional additional bind mounts, optional default repo, optional
+cron schedule, credentials, and runtime command. Define profiles in a TOML
+config file — start from
 [`examples/agentd.toml`](examples/agentd.toml):
 
 ```toml
@@ -76,6 +79,16 @@ exec runa run
 # repository authentication. This value does not flow into the agent runtime.
 repo_token_source = "SITE_BUILDER_REPO_TOKEN"
 
+#[[profiles.mounts]]
+# Additional host bind mounts are declared explicitly per profile.
+# `source` must be an absolute host path and must already exist.
+# `target` must be an absolute path inside the container and must not
+# duplicate or overlap another mount target in the same profile.
+# `read_only = true` is appropriate for host-managed auth directories.
+#source = "/home/core/.claude"
+#target = "/home/site-builder/.claude"
+#read_only = true
+
 [[profiles.credentials]]
 # Secret name exposed inside the session environment.
 name = "GITHUB_TOKEN"
@@ -112,8 +125,16 @@ source = "AGENTD_GITHUB_TOKEN"
 ```
 
 Credential `source` fields name environment variables in the daemon's process
-environment — export them before starting the daemon. The base image must
-provide `/bin/sh`, `git`, `useradd`, `gosu`, and whatever binaries the
+environment — export them before starting the daemon. Additional `mounts`
+entries are bind mounts: `source` must be an absolute existing host path,
+`target` must be an absolute container path, targets must be unique within the
+profile, and runner-managed targets are reserved: `/agentd/methodology`,
+`/home/{profile}`, and `/home/{profile}/repo` plus its descendants. Other
+targets under `/home/{profile}` remain supported, including read-only auth
+mounts such as `/home/site-builder/.claude`. Additional mounts are not
+relabelled; on SELinux-enabled hosts, operators must ensure each host path
+already has a container-compatible label. The base image must provide
+`/bin/sh`, `find`, `git`, `useradd`, `gosu`, and whatever binaries the
 configured session command uses. When a profile declares `schedule`, it must
 also declare `repo`. Schedules are evaluated in daemon-local time and missed
 fires are not backfilled after downtime.
@@ -158,6 +179,7 @@ the container, the agent sees:
 - An unprivileged user with `$HOME` at `/home/site-builder`
 - A fresh clone of the repository at `/home/site-builder/repo`
 - Read-only methodology mount at `/agentd/methodology`
+- Any operator-declared additional bind mounts, read-only or read-write per profile
 - Credentials injected as environment variables
 - `AGENTD_WORK_UNIT` when the invocation includes one
 - The configured session command executing from the repo directory

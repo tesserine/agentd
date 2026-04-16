@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +12,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agentd_runner::{
-    ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec, run_session,
+    BindMount, ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec,
+    run_session,
 };
 
 const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
@@ -33,6 +36,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
             profile_name: "success-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec![
                 "site-builder".to_string(),
                 "exec".to_string(),
@@ -82,6 +86,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
             profile_name: "mixed-env-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -130,6 +135,7 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
             profile_name: "unset-work-unit-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
@@ -170,6 +176,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
             profile_name: "failure-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -216,6 +223,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
             profile_name: "failure-run-125".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -263,6 +271,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             profile_name: "comma-methodology-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -279,6 +288,252 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: Some("task-42".to_string()),
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn validates_read_only_additional_mounts_from_paths_containing_commas() {
+    if skip_if_podman_unavailable(
+        "validates_read_only_additional_mounts_from_paths_containing_commas",
+    ) {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("readonly-mount-run");
+    let image = fixture.build_image();
+    let host_mount = fixture.root.join("host,readonly");
+    fs::create_dir_all(&host_mount).expect("read-only host mount should be created");
+    fs::write(host_mount.join("auth.json"), "{\"token\":\"test\"}\n")
+        .expect("read-only host fixture file should be written");
+    fs::write(
+        host_mount.join("sentinel.txt"),
+        "host data should remain untouched\n",
+    )
+    .expect("read-only host sentinel file should be written");
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "readonly-mount-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: vec![BindMount {
+                source: host_mount.clone(),
+                target: PathBuf::from("/home/readonly-mount-run/.claude"),
+                read_only: true,
+            }],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "verify-read-only-mount".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    assert!(
+        !host_mount.join("write-should-fail").exists(),
+        "read-only mount should not permit in-container writes"
+    );
+    assert_eq!(
+        fs::read_to_string(host_mount.join("auth.json"))
+            .expect("read-only host auth fixture should remain readable"),
+        "{\"token\":\"test\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(host_mount.join("sentinel.txt"))
+            .expect("read-only host sentinel should remain readable"),
+        "host data should remain untouched\n"
+    );
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn preserves_host_writes_through_read_write_additional_mounts() {
+    if skip_if_podman_unavailable("preserves_host_writes_through_read_write_additional_mounts") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("readwrite-mount-run");
+    let image = fixture.build_image();
+    let host_mount = fixture.root.join("host-readwrite");
+    fs::create_dir_all(&host_mount).expect("read-write host mount should be created");
+    fs::write(host_mount.join("sentinel.txt"), "host sentinel\n")
+        .expect("read-write host sentinel should be written");
+    #[cfg(unix)]
+    let sentinel_metadata_before =
+        fs::metadata(host_mount.join("sentinel.txt")).expect("sentinel metadata should exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
+            .expect("read-write host mount should permit container writes");
+    }
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "readwrite-mount-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: vec![BindMount {
+                source: host_mount.clone(),
+                target: PathBuf::from("/home/readwrite-mount-run/.runa"),
+                read_only: false,
+            }],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-read-write-mount".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    assert_eq!(
+        fs::read_to_string(host_mount.join("session-artifact.txt"))
+            .expect("read-write mount should persist host-visible writes"),
+        "persisted from container\n"
+    );
+    assert_eq!(
+        fs::read_to_string(host_mount.join("sentinel.txt"))
+            .expect("read-write host sentinel should remain readable"),
+        "host sentinel\n"
+    );
+    #[cfg(unix)]
+    {
+        let sentinel_metadata_after =
+            fs::metadata(host_mount.join("sentinel.txt")).expect("sentinel metadata should exist");
+        assert_eq!(
+            sentinel_metadata_after.uid(),
+            sentinel_metadata_before.uid(),
+            "runner setup must not re-own host-backed files under home mounts"
+        );
+        assert_eq!(
+            sentinel_metadata_after.gid(),
+            sentinel_metadata_before.gid(),
+            "runner setup must not re-own host-backed files under home mounts"
+        );
+    }
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn preserves_writable_home_for_nested_additional_mount_parents() {
+    if skip_if_podman_unavailable("preserves_writable_home_for_nested_additional_mount_parents") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("nested-home-mount-run");
+    let image = fixture.build_image();
+    let host_mount = fixture.root.join("host-nested-claude");
+    fs::create_dir_all(&host_mount).expect("nested host mount should be created");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
+            .expect("nested host mount should permit container writes");
+    }
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "nested-home-mount-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: vec![BindMount {
+                source: host_mount.clone(),
+                target: PathBuf::from("/home/nested-home-mount-run/.config/claude"),
+                read_only: false,
+            }],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-nested-home-mount".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    assert_eq!(
+        fs::read_to_string(host_mount.join("nested-artifact.txt"))
+            .expect("nested home mount should persist host-visible writes"),
+        "persisted from nested mount\n"
+    );
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn preserves_session_user_access_to_preexisting_home_content() {
+    if skip_if_podman_unavailable("preserves_session_user_access_to_preexisting_home_content") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("preexisting-home-run");
+    let image = fixture.build_image_with_preexisting_home_file();
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "preexisting-home-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-preexisting-home-file".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
             timeout: None,
         },
     )
@@ -307,6 +562,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
             profile_name: "timeout-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
@@ -354,6 +610,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                 profile_name: "running-secret-run".to_string(),
                 base_image: image,
                 methodology_dir,
+                mounts: Vec::new(),
                 command: vec!["site-builder".to_string(), "exec".to_string()],
                 environment: vec![
                     ResolvedEnvironmentVariable {
@@ -443,11 +700,26 @@ impl SessionFixture {
         self.build_image_with_agentd_work_unit_line(None)
     }
 
+    fn build_image_with_preexisting_home_file(&self) -> String {
+        self.build_image_with_customizations(
+            None,
+            "RUN mkdir -p /home/preexisting-home-run \\\n    && printf 'root owned fixture\\n' > /home/preexisting-home-run/.preexisting\n",
+        )
+    }
+
     fn build_image_with_agentd_work_unit(&self, work_unit: &str) -> String {
         self.build_image_with_agentd_work_unit_line(Some(work_unit))
     }
 
     fn build_image_with_agentd_work_unit_line(&self, work_unit: Option<&str>) -> String {
+        self.build_image_with_customizations(work_unit, "")
+    }
+
+    fn build_image_with_customizations(
+        &self,
+        work_unit: Option<&str>,
+        extra_containerfile_lines: &str,
+    ) -> String {
         let context_dir = self.root.join("image-context");
         fs::create_dir_all(&context_dir).expect("image context should be created");
 
@@ -455,12 +727,15 @@ impl SessionFixture {
             .expect("site-builder stub should be written");
         fs::write(context_dir.join("entrypoint.sh"), ENTRYPOINT_SH)
             .expect("entrypoint script should be written");
-        let containerfile = work_unit
+        let mut containerfile = work_unit
             .map(|work_unit| CONTAINERFILE.replace(
                 "FROM docker.io/library/debian:bookworm-slim\n",
                 &format!("FROM docker.io/library/debian:bookworm-slim\nENV AGENTD_WORK_UNIT={work_unit}\n"),
             ))
             .unwrap_or_else(|| CONTAINERFILE.to_string());
+        if !extra_containerfile_lines.is_empty() {
+            containerfile.push_str(extra_containerfile_lines);
+        }
         fs::write(context_dir.join("Containerfile"), containerfile)
             .expect("containerfile should be written");
 
@@ -708,7 +983,7 @@ const CONTAINERFILE: &str = r#"
 FROM docker.io/library/debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git gosu passwd \
+    && apt-get install -y --no-install-recommends findutils git gosu passwd \
     && rm -rf /var/lib/apt/lists/*
 COPY site-builder /usr/local/bin/site-builder
 COPY entrypoint.sh /entrypoint.sh
@@ -877,6 +1152,38 @@ case "$command_name" in
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "success-without-work-unit" ]; then
             [ "${AGENTD_WORK_UNIT+set}" != "set" ]
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "verify-read-only-mount" ]; then
+            [ -f "${HOME}/.claude/auth.json" ]
+            if touch "${HOME}/.claude/write-should-fail" 2>/dev/null; then
+                echo "read-only mount unexpectedly allowed writes" >&2
+                exit 91
+            fi
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-read-write-mount" ]; then
+            printf 'persisted from container\n' > "${HOME}/.runa/session-artifact.txt"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-nested-home-mount" ]; then
+            # The mkdir/write below is the regression probe: if setup leaves
+            # $HOME/.config owned by root, creating the sibling git config
+            # fails and we never reach the mounted-target sentinel write.
+            mkdir -p "${HOME}/.config/git"
+            printf 'sibling write succeeded\n' > "${HOME}/.config/git/config"
+            printf 'persisted from nested mount\n' > "${HOME}/.config/claude/nested-artifact.txt"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-preexisting-home-file" ]; then
+            [ -f "${HOME}/.preexisting" ]
+            [ "$(cat "${HOME}/.preexisting")" = "root owned fixture" ]
+            printf 'session write succeeded\n' > "${HOME}/.preexisting"
+            [ "$(cat "${HOME}/.preexisting")" = "session write succeeded" ]
             exit 0
         fi
 

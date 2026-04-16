@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -69,6 +69,30 @@ name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#
     ))
+    .expect("config should parse")
+}
+
+fn config_with_mounts() -> Config {
+    Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = "/home/site-builder/.claude"
+read_only = true
+
+[[profiles.mounts]]
+source = "/var/lib/tesserine/audit"
+target = "/home/site-builder/.runa"
+read_only = false
+"#,
+    )
     .expect("config should parse")
 }
 
@@ -274,4 +298,39 @@ command = ["site-builder", "exec"]
         }
         other => panic!("expected config error, got {other:?}"),
     }
+}
+
+#[test]
+fn dispatch_run_forwards_profile_mounts_into_session_spec() {
+    let config = config_with_mounts();
+    let request = RunRequest {
+        profile: "site-builder".to_string(),
+        repo_url: "https://example.com/repo.git".to_string(),
+        work_unit: None,
+    };
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
+
+    let state = state.lock().expect("recording state should lock");
+    let spec = state
+        .last_spec
+        .as_ref()
+        .expect("executor should receive spec");
+
+    assert_eq!(
+        spec.mounts,
+        vec![
+            agentd_runner::BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/.claude"),
+                read_only: true,
+            },
+            agentd_runner::BindMount {
+                source: PathBuf::from("/var/lib/tesserine/audit"),
+                target: PathBuf::from("/home/site-builder/.runa"),
+                read_only: false,
+            },
+        ]
+    );
 }

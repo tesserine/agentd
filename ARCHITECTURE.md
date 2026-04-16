@@ -122,8 +122,8 @@ The runner prepares the execution environment:
 2. Sets identity inside the container, including `PROFILE_NAME` and a unique container name derived from the profile.
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only.
-5. Creates an unprivileged unix user whose username is the configured profile name, with home directory `/home/{username}`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the session command starts. Base images that lack `/bin/sh`, `git`, `useradd`, or `gosu` are not supported.
-6. Recursively transfers ownership of `/home/{username}` to that user, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready.
+5. Creates an unprivileged unix user whose username is the configured profile name, with home directory `/home/{username}`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the session command starts. Base images that lack `/bin/sh`, `find`, `git`, `useradd`, or `gosu` are not supported.
+6. Recursively transfers ownership of pre-existing content under `/home/{username}` while pruning host-backed bind-mount targets and `/home/{username}/repo`, then transfers ownership of `/home/{username}/repo` after the clone, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready. The runner reserves `/home/{username}` itself and `/home/{username}/repo` plus its descendants so host-backed bind mounts cannot collide with runner-managed paths.
 
 ### Phase 3: Execution (`agentd-runner`)
 
@@ -140,6 +140,7 @@ agentd runs sessions in ephemeral Podman containers so agents remain separated f
 | Mount or Injection | Purpose | Need Served |
 |---|---|---|
 | Read-only methodology directory | Expose the configured methodology manifest and protocol assets without allowing mutation | Context |
+| Profile-declared bind mounts | Expose host-managed state such as subscription auth or persistent artifact storage with per-mount read-only vs read-write policy | Context, Credentials |
 | Credentials | Authenticate to external systems without baking secrets into images | Credentials |
 | Home workspace at `/home/{username}` with repo at `/home/{username}/repo` | Give the session a writable standard Linux home and a clean project workspace that starts fresh each run | Mission, Tool Availability, Identity |
 
@@ -147,9 +148,21 @@ From inside the environment, an agent should see:
 - identity-related environment variables
 - `$HOME` set to `/home/{username}`
 - a read-only methodology mount rooted at `manifest.toml`
+- any additional bind mounts declared by the selected profile
 - a fresh writable repository checkout at `/home/{username}/repo`
 - any runtime-managed state the configured session command creates inside the repo or home directory
 - the tools and runtime configuration needed for its assigned work
+
+Additional bind mounts are declared in profile configuration as `source`,
+`target`, and `read_only`. agentd validates absolute container targets plus a
+per-profile disjointness invariant: target paths must be unique and no target
+may be a path-component prefix of another. It then stages canonical host
+sources through runner-managed symlinks before calling Podman so host paths
+containing commas remain mountable. Subscription auth is the first read-only
+consumer of this mechanism; persistent audit storage in `#76` builds on the
+same path with read-write mounts. Additional mounts are not relabelled; on
+SELinux-enabled hosts, operators must pre-label those host paths with a
+container-compatible context.
 
 ## 6. Credential Flow
 

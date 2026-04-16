@@ -138,6 +138,11 @@ pub fn dispatch_run(
                 profile_name: profile.name().to_string(),
                 base_image: profile.base_image().to_string(),
                 methodology_dir: profile.methodology_dir().to_path_buf(),
+                mounts: profile
+                    .mounts()
+                    .iter()
+                    .map(|mount| mount.to_runner_mount())
+                    .collect(),
                 command: profile.command().to_vec(),
                 environment,
             },

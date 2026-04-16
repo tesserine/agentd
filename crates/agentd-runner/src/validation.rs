@@ -1,15 +1,19 @@
 //! Input validation for session specs and invocations.
 //!
 //! All validation runs before any filesystem or podman interaction, so invalid
-//! inputs are rejected without side effects. The two public validators
-//! ([`validate_profile_name`] and [`validate_environment_name`]) are also used
-//! by the configuration layer in the `agentd` crate.
+//! inputs are rejected without side effects. The public validators
+//! ([`validate_profile_name`], [`validate_environment_name`], and
+//! [`validate_mount_target`], [`validate_mount_overlap`]) are also used by the
+//! configuration layer in the `agentd` crate.
 
 use crate::naming::is_daemon_instance_id;
+use crate::session_paths::{session_home_dir, session_repo_dir};
 use crate::types::{
-    EnvironmentNameValidationError, ProfileNameValidationError, RunnerError, SessionInvocation,
-    SessionSpec,
+    BindMount, EnvironmentNameValidationError, MountOverlapError, MountTargetValidationError,
+    ProfileNameValidationError, RunnerError, SessionInvocation, SessionSpec,
 };
+use std::collections::HashSet;
+use std::path::Path;
 
 const PROFILE_NAME_ENV: &str = "PROFILE_NAME";
 const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
@@ -17,6 +21,7 @@ pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
 const RESERVED_PROFILE_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
+const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 
 pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if !is_daemon_instance_id(&spec.daemon_instance_id) {
@@ -32,6 +37,32 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
         return Err(RunnerError::InvalidCommand);
     }
 
+    let mut seen_mount_targets = HashSet::new();
+    for mount in &spec.mounts {
+        if !mount.source.is_absolute() {
+            return Err(RunnerError::InvalidMountSource {
+                path: mount.source.clone(),
+            });
+        }
+        match validate_mount_target(&mount.target, &spec.profile_name) {
+            Ok(()) => {}
+            Err(MountTargetValidationError::Invalid { path }) => {
+                return Err(RunnerError::InvalidMountTarget { path });
+            }
+            Err(MountTargetValidationError::Reserved { target }) => {
+                return Err(RunnerError::ReservedMountTarget { target });
+            }
+        }
+        if !seen_mount_targets.insert(mount.target.clone()) {
+            return Err(RunnerError::DuplicateMountTarget {
+                target: mount.target.clone(),
+            });
+        }
+    }
+    if let Err(MountOverlapError { first, second }) = validate_mount_overlap(&spec.mounts) {
+        return Err(RunnerError::OverlappingMountTargets { first, second });
+    }
+
     for variable in &spec.environment {
         match validate_environment_name(&variable.name) {
             Ok(()) => {}
@@ -43,6 +74,61 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
             Err(EnvironmentNameValidationError::Reserved) => {
                 return Err(RunnerError::ReservedEnvironmentName {
                     name: variable.name.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates an in-container bind-mount target against the runner contract.
+///
+/// Rejects targets that are not absolute, contain `.` or `..` components,
+/// contain `,`, end with `/`, contain `find -path` metacharacters, or collide
+/// with runner-managed paths such as `/agentd/methodology`,
+/// `/home/{profile}`, or `/home/{profile}/repo`.
+pub fn validate_mount_target(
+    target: &Path,
+    profile_name: &str,
+) -> Result<(), MountTargetValidationError> {
+    if !target.is_absolute()
+        || has_relative_mount_target_component(target)
+        || mount_target_contains_comma(target)
+        || mount_target_has_trailing_slash(target)
+        || mount_target_contains_find_metacharacters(target)
+    {
+        return Err(MountTargetValidationError::Invalid {
+            path: target.to_path_buf(),
+        });
+    }
+    if is_reserved_mount_target(target, profile_name) {
+        return Err(MountTargetValidationError::Reserved {
+            target: target.to_path_buf(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validates that declared bind-mount targets are pairwise non-overlapping.
+///
+/// Rejects distinct targets when one is a component-aware prefix of the other,
+/// such as `/home/{profile}/.config` and `/home/{profile}/.config/claude`.
+pub fn validate_mount_overlap(mounts: &[BindMount]) -> Result<(), MountOverlapError> {
+    for (index, mount) in mounts.iter().enumerate() {
+        for other in mounts.iter().skip(index + 1) {
+            // Exact-equal targets are ignored here because this public validator
+            // must remain a standalone overlap check; duplicate detection lives
+            // elsewhere and preserves a more precise error message.
+            if mount.target == other.target {
+                continue;
+            }
+
+            if mount.target.starts_with(&other.target) || other.target.starts_with(&mount.target) {
+                return Err(MountOverlapError {
+                    first: mount.target.clone(),
+                    second: other.target.clone(),
                 });
             }
         }
@@ -191,6 +277,59 @@ fn is_reserved_profile_name(name: &str) -> bool {
     RESERVED_PROFILE_NAMES.contains(&name)
 }
 
+fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
+    let home_dir = session_home_dir(profile_name);
+    let repo_dir = session_repo_dir(profile_name);
+    let methodology_dir = Path::new(METHODOLOGY_MOUNT_PATH);
+
+    // Each rule states the invariant for one runner-owned path. Intentional
+    // overlap is part of the contract: targets like `/home` or `/` can
+    // legitimately collide with more than one runner-owned path, and a future
+    // refactor should preserve that instead of collapsing these checks.
+    //
+    // Target and runner-owned methodology path must be disjoint by path
+    // components: neither may be a prefix of the other.
+    if target.starts_with(methodology_dir) || methodology_dir.starts_with(target) {
+        return true;
+    }
+
+    // Target and runner-owned repo path must be disjoint by path components:
+    // neither may be a prefix of the other. This keeps `/home/{profile}/repo-cache`
+    // valid while reserving `/home/{profile}/repo`, its descendants, and its
+    // ancestors.
+    if target.starts_with(&repo_dir) || repo_dir.starts_with(target) {
+        return true;
+    }
+
+    // Home is narrower: the home root and its ancestors are reserved, while
+    // descendants such as `.claude` and `.runa` are the supported mount surface.
+    home_dir.starts_with(target)
+}
+
+fn has_relative_mount_target_component(target: &Path) -> bool {
+    target
+        .as_os_str()
+        .to_string_lossy()
+        .split('/')
+        .any(|component| matches!(component, "." | ".."))
+}
+
+fn mount_target_contains_comma(target: &Path) -> bool {
+    target.as_os_str().to_string_lossy().contains(',')
+}
+
+fn mount_target_has_trailing_slash(target: &Path) -> bool {
+    target != Path::new("/") && target.as_os_str().to_string_lossy().ends_with('/')
+}
+
+fn mount_target_contains_find_metacharacters(target: &Path) -> bool {
+    target
+        .as_os_str()
+        .to_string_lossy()
+        .chars()
+        .any(|character| matches!(character, '*' | '?' | '[' | ']' | '\\'))
+}
+
 fn is_valid_unix_username(name: &str) -> bool {
     let mut characters = name.chars();
     let Some(first_character) = characters.next() else {
@@ -212,7 +351,7 @@ fn is_valid_unix_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ResolvedEnvironmentVariable, test_support::test_session_spec};
+    use crate::{BindMount, ResolvedEnvironmentVariable, test_support::test_session_spec};
     use std::path::PathBuf;
 
     #[test]
@@ -303,6 +442,512 @@ mod tests {
                 matches!(error, RunnerError::InvalidBaseImage),
                 "expected InvalidBaseImage for {base_image:?}, got {error:?}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_sources_that_are_not_absolute() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("relative/source"),
+                target: PathBuf::from("/home/site-builder/.claude"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("relative mount sources should be rejected");
+
+        match error {
+            RunnerError::InvalidMountSource { path } => {
+                assert_eq!(path, PathBuf::from("relative/source"));
+            }
+            other => panic!("expected InvalidMountSource, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_are_not_absolute() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from(".claude"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("relative mount targets should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from(".claude"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_duplicate_mount_targets() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![
+                BindMount {
+                    source: PathBuf::from("/home/core/.claude"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/var/lib/tesserine/audit"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: false,
+                },
+            ],
+            ..test_session_spec()
+        })
+        .expect_err("duplicate mount targets should be rejected");
+
+        match error {
+            RunnerError::DuplicateMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder/.claude"));
+            }
+            other => panic!("expected DuplicateMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_methodology_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/methodology"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the methodology mount");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd/methodology"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_under_methodology_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/methodology/manifest.toml"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets under the methodology mount should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd/methodology/manifest.toml"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_are_ancestors_of_methodology_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets that are ancestors of the methodology mount should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_home_directory() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the runner-managed home directory");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_are_ancestors_of_home_directory() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets that are ancestors of the runner-managed home directory should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_repo_directory() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/var/lib/tesserine/repo-cache"),
+                target: PathBuf::from("/home/site-builder/repo"),
+                read_only: false,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the runner-managed repo directory");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder/repo"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_under_repo_directory() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/var/lib/tesserine/git"),
+                target: PathBuf::from("/home/site-builder/repo/.git"),
+                read_only: false,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets under the repo directory should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder/repo/.git"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_are_ancestors_of_all_runner_managed_paths() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err(
+            "mount targets that are ancestors of every runner-managed path should be reserved",
+        );
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_with_parent_dir_components() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/var/lib/tesserine/git"),
+                target: PathBuf::from("/home/site-builder/x/../repo/.git"),
+                read_only: false,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets with '..' components should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from("/home/site-builder/x/../repo/.git"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_with_current_dir_components() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/./a"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets with '.' components should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from("/home/site-builder/./a"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_containing_commas() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/data,archive"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets containing commas should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from("/home/site-builder/data,archive"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_with_trailing_slashes() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/.claude/"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets with trailing slashes should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from("/home/site-builder/.claude/"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_containing_find_metacharacters() {
+        for target in [
+            "/home/site-builder/foo*bar",
+            "/home/site-builder/foo?bar",
+            "/home/site-builder/[x]",
+            r"/home/site-builder/foo\bar",
+        ] {
+            let error = validate_spec(&SessionSpec {
+                mounts: vec![BindMount {
+                    source: PathBuf::from("/home/core/.claude"),
+                    target: PathBuf::from(target),
+                    read_only: true,
+                }],
+                ..test_session_spec()
+            })
+            .expect_err("mount targets with find metacharacters should be rejected");
+
+            match error {
+                RunnerError::InvalidMountTarget { path } => {
+                    assert_eq!(path, PathBuf::from(target));
+                }
+                other => panic!("expected InvalidMountTarget, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn validate_spec_accepts_mount_targets_under_home_outside_runner_managed_paths() {
+        validate_spec(&SessionSpec {
+            mounts: vec![
+                BindMount {
+                    source: PathBuf::from("/home/core/.claude"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/var/lib/tesserine/session-runtime"),
+                    target: PathBuf::from("/home/site-builder/.runa"),
+                    read_only: false,
+                },
+                BindMount {
+                    source: PathBuf::from("/var/lib/tesserine/repo-cache"),
+                    target: PathBuf::from("/home/site-builder/repo-cache"),
+                    read_only: false,
+                },
+            ],
+            ..test_session_spec()
+        })
+        .expect("mount targets under home outside runner-managed paths should be accepted");
+    }
+
+    #[test]
+    fn validate_spec_accepts_mount_targets_without_trailing_slashes_or_find_metacharacters() {
+        validate_spec(&SessionSpec {
+            mounts: vec![
+                BindMount {
+                    source: PathBuf::from("/home/core/.claude"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/home/core/.config/claude"),
+                    target: PathBuf::from("/home/site-builder/.config/claude"),
+                    read_only: true,
+                },
+            ],
+            ..test_session_spec()
+        })
+        .expect("mount targets without trailing slashes or find metacharacters should be accepted");
+    }
+
+    #[test]
+    fn validate_spec_accepts_mount_targets_with_methodology_prefix_outside_reserved_tree() {
+        validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/methodology-cache"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect("mount targets outside the methodology path components should be accepted");
+    }
+
+    #[test]
+    fn validate_mount_overlap_rejects_nested_mount_targets() {
+        let error = validate_mount_overlap(&[
+            BindMount {
+                source: PathBuf::from("/home/core/.config"),
+                target: PathBuf::from("/home/site-builder/.config"),
+                read_only: true,
+            },
+            BindMount {
+                source: PathBuf::from("/home/core/.config/claude"),
+                target: PathBuf::from("/home/site-builder/.config/claude"),
+                read_only: true,
+            },
+        ])
+        .expect_err("nested mount targets should be rejected");
+
+        assert_eq!(
+            error,
+            MountOverlapError {
+                first: PathBuf::from("/home/site-builder/.config"),
+                second: PathBuf::from("/home/site-builder/.config/claude"),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_mount_overlap_rejects_nested_mount_targets_in_reverse_order() {
+        let error = validate_mount_overlap(&[
+            BindMount {
+                source: PathBuf::from("/home/core/.config/claude"),
+                target: PathBuf::from("/home/site-builder/.config/claude"),
+                read_only: true,
+            },
+            BindMount {
+                source: PathBuf::from("/home/core/.config"),
+                target: PathBuf::from("/home/site-builder/.config"),
+                read_only: true,
+            },
+        ])
+        .expect_err("nested mount targets should be rejected regardless of order");
+
+        assert_eq!(
+            error,
+            MountOverlapError {
+                first: PathBuf::from("/home/site-builder/.config/claude"),
+                second: PathBuf::from("/home/site-builder/.config"),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_mount_overlap_accepts_disjoint_sibling_targets() {
+        validate_mount_overlap(&[
+            BindMount {
+                source: PathBuf::from("/home/core/.config"),
+                target: PathBuf::from("/home/site-builder/.config"),
+                read_only: true,
+            },
+            BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/.claude"),
+                read_only: true,
+            },
+        ])
+        .expect("disjoint sibling targets should be accepted");
+    }
+
+    #[test]
+    fn validate_mount_overlap_accepts_component_distinct_targets() {
+        validate_mount_overlap(&[
+            BindMount {
+                source: PathBuf::from("/home/core/.config-alt"),
+                target: PathBuf::from("/home/site-builder/.config-alt"),
+                read_only: true,
+            },
+            BindMount {
+                source: PathBuf::from("/home/core/.config"),
+                target: PathBuf::from("/home/site-builder/.config"),
+                read_only: true,
+            },
+        ])
+        .expect("component-distinct targets should be accepted");
+    }
+
+    #[test]
+    fn validate_spec_rejects_overlapping_mount_targets() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![
+                BindMount {
+                    source: PathBuf::from("/home/core/.config"),
+                    target: PathBuf::from("/home/site-builder/.config"),
+                    read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/home/core/.config/claude"),
+                    target: PathBuf::from("/home/site-builder/.config/claude"),
+                    read_only: true,
+                },
+            ],
+            ..test_session_spec()
+        })
+        .expect_err("overlapping mount targets should be rejected");
+
+        match error {
+            RunnerError::OverlappingMountTargets { first, second } => {
+                assert_eq!(first, PathBuf::from("/home/site-builder/.config"));
+                assert_eq!(second, PathBuf::from("/home/site-builder/.config/claude"));
+            }
+            other => panic!("expected OverlappingMountTargets, got {other:?}"),
         }
     }
 
