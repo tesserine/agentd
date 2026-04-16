@@ -50,7 +50,8 @@ pub struct SessionSpec {
 pub struct BindMount {
     /// Host-side source path to bind into the container.
     pub source: PathBuf,
-    /// Absolute in-container target path for the bind mount.
+    /// Absolute in-container target path for the bind mount. Must not contain
+    /// `.` or `..` components or `,`.
     pub target: PathBuf,
     /// Whether the mount is read-only inside the container.
     pub read_only: bool,
@@ -291,7 +292,8 @@ pub enum RunnerError {
     ReservedEnvironmentName { name: String },
     /// A configured bind mount source path is not absolute.
     InvalidMountSource { path: PathBuf },
-    /// A configured bind mount target path is not absolute.
+    /// A configured bind mount target path is not absolute, contains `.` or
+    /// `..` components, or contains `,`.
     InvalidMountTarget { path: PathBuf },
     /// Two configured bind mounts share the same target path.
     DuplicateMountTarget { target: PathBuf },
@@ -356,7 +358,7 @@ impl fmt::Display for RunnerError {
             RunnerError::InvalidMountTarget { path } => {
                 write!(
                     f,
-                    "mount target must be an absolute path: {}",
+                    "mount target must be an absolute path without '.' or '..' components or ',': {}",
                     path.display()
                 )
             }

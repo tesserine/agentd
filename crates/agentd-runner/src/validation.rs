@@ -48,6 +48,13 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
                 path: mount.target.clone(),
             });
         }
+        if has_relative_mount_target_component(&mount.target)
+            || mount_target_contains_comma(&mount.target)
+        {
+            return Err(RunnerError::InvalidMountTarget {
+                path: mount.target.clone(),
+            });
+        }
         if is_reserved_mount_target(&mount.target, &spec.profile_name) {
             return Err(RunnerError::ReservedMountTarget {
                 target: mount.target.clone(),
@@ -222,14 +229,27 @@ fn is_reserved_profile_name(name: &str) -> bool {
 fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
     let home_dir = session_home_dir(profile_name);
     let repo_dir = session_repo_dir(profile_name);
+    let methodology_dir = Path::new(METHODOLOGY_MOUNT_PATH);
 
-    if target == Path::new(METHODOLOGY_MOUNT_PATH) || target == home_dir {
+    if target == methodology_dir || target.starts_with(methodology_dir) || target == home_dir {
         return true;
     }
 
     // Compare by path components, not string prefix, so `/home/{profile}/repo-cache`
     // remains valid while `/home/{profile}/repo/.git` is correctly reserved.
     target.starts_with(&repo_dir)
+}
+
+fn has_relative_mount_target_component(target: &Path) -> bool {
+    target
+        .as_os_str()
+        .to_string_lossy()
+        .split('/')
+        .any(|component| matches!(component, "." | ".."))
+}
+
+fn mount_target_contains_comma(target: &Path) -> bool {
+    target.as_os_str().to_string_lossy().contains(',')
 }
 
 fn is_valid_unix_username(name: &str) -> bool {
@@ -435,6 +455,26 @@ mod tests {
     }
 
     #[test]
+    fn validate_spec_rejects_mount_targets_under_methodology_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/methodology/manifest.toml"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets under the methodology mount should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd/methodology/manifest.toml"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_spec_rejects_mount_targets_that_collide_with_home_directory() {
         let error = validate_spec(&SessionSpec {
             mounts: vec![BindMount {
@@ -495,6 +535,66 @@ mod tests {
     }
 
     #[test]
+    fn validate_spec_rejects_mount_targets_with_parent_dir_components() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/var/lib/tesserine/git"),
+                target: PathBuf::from("/home/site-builder/x/../repo/.git"),
+                read_only: false,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets with '..' components should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from("/home/site-builder/x/../repo/.git"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_with_current_dir_components() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/./a"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets with '.' components should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from("/home/site-builder/./a"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_containing_commas() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/data,archive"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets containing commas should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from("/home/site-builder/data,archive"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_spec_accepts_mount_targets_under_home_outside_runner_managed_paths() {
         validate_spec(&SessionSpec {
             mounts: vec![
@@ -512,6 +612,19 @@ mod tests {
             ..test_session_spec()
         })
         .expect("mount targets under home outside runner-managed paths should be accepted");
+    }
+
+    #[test]
+    fn validate_spec_accepts_mount_targets_with_methodology_prefix_outside_reserved_tree() {
+        validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/methodology-cache"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect("mount targets outside the methodology path components should be accepted");
     }
 
     #[test]
