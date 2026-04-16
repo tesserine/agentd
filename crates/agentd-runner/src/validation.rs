@@ -85,8 +85,9 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
 /// Validates an in-container bind-mount target against the runner contract.
 ///
 /// Rejects targets that are not absolute, contain `.` or `..` components,
-/// contain `,`, or collide with runner-managed paths such as
-/// `/agentd/methodology`, `/home/{profile}`, or `/home/{profile}/repo`.
+/// contain `,`, end with `/`, contain `find -path` metacharacters, or collide
+/// with runner-managed paths such as `/agentd/methodology`,
+/// `/home/{profile}`, or `/home/{profile}/repo`.
 pub fn validate_mount_target(
     target: &Path,
     profile_name: &str,
@@ -94,6 +95,8 @@ pub fn validate_mount_target(
     if !target.is_absolute()
         || has_relative_mount_target_component(target)
         || mount_target_contains_comma(target)
+        || mount_target_has_trailing_slash(target)
+        || mount_target_contains_find_metacharacters(target)
     {
         return Err(MountTargetValidationError::Invalid {
             path: target.to_path_buf(),
@@ -313,6 +316,18 @@ fn has_relative_mount_target_component(target: &Path) -> bool {
 
 fn mount_target_contains_comma(target: &Path) -> bool {
     target.as_os_str().to_string_lossy().contains(',')
+}
+
+fn mount_target_has_trailing_slash(target: &Path) -> bool {
+    target != Path::new("/") && target.as_os_str().to_string_lossy().ends_with('/')
+}
+
+fn mount_target_contains_find_metacharacters(target: &Path) -> bool {
+    target
+        .as_os_str()
+        .to_string_lossy()
+        .chars()
+        .any(|character| matches!(character, '*' | '?' | '[' | ']' | '\\'))
 }
 
 fn is_valid_unix_username(name: &str) -> bool {
@@ -720,6 +735,53 @@ mod tests {
     }
 
     #[test]
+    fn validate_spec_rejects_mount_targets_with_trailing_slashes() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home/site-builder/.claude/"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets with trailing slashes should be rejected");
+
+        match error {
+            RunnerError::InvalidMountTarget { path } => {
+                assert_eq!(path, PathBuf::from("/home/site-builder/.claude/"));
+            }
+            other => panic!("expected InvalidMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_containing_find_metacharacters() {
+        for target in [
+            "/home/site-builder/foo*bar",
+            "/home/site-builder/foo?bar",
+            "/home/site-builder/[x]",
+            r"/home/site-builder/foo\bar",
+        ] {
+            let error = validate_spec(&SessionSpec {
+                mounts: vec![BindMount {
+                    source: PathBuf::from("/home/core/.claude"),
+                    target: PathBuf::from(target),
+                    read_only: true,
+                }],
+                ..test_session_spec()
+            })
+            .expect_err("mount targets with find metacharacters should be rejected");
+
+            match error {
+                RunnerError::InvalidMountTarget { path } => {
+                    assert_eq!(path, PathBuf::from(target));
+                }
+                other => panic!("expected InvalidMountTarget, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn validate_spec_accepts_mount_targets_under_home_outside_runner_managed_paths() {
         validate_spec(&SessionSpec {
             mounts: vec![
@@ -742,6 +804,26 @@ mod tests {
             ..test_session_spec()
         })
         .expect("mount targets under home outside runner-managed paths should be accepted");
+    }
+
+    #[test]
+    fn validate_spec_accepts_mount_targets_without_trailing_slashes_or_find_metacharacters() {
+        validate_spec(&SessionSpec {
+            mounts: vec![
+                BindMount {
+                    source: PathBuf::from("/home/core/.claude"),
+                    target: PathBuf::from("/home/site-builder/.claude"),
+                    read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/home/core/.config/claude"),
+                    target: PathBuf::from("/home/site-builder/.config/claude"),
+                    read_only: true,
+                },
+            ],
+            ..test_session_spec()
+        })
+        .expect("mount targets without trailing slashes or find metacharacters should be accepted");
     }
 
     #[test]

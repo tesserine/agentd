@@ -76,6 +76,7 @@ fn assert_invalid_mount_target_parse_error(
     target: &str,
     expected_error: MountTargetValidationError,
 ) {
+    let target = target.replace('\\', "\\\\").replace('"', "\\\"");
     let error = Config::from_str(&format!(
         r#"
 [[profiles]]
@@ -774,6 +775,73 @@ fn rejects_profile_mount_targets_containing_commas() {
         MountTargetValidationError::Invalid {
             path: PathBuf::from("/home/site-builder/data,archive"),
         },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_with_trailing_slashes() {
+    assert_invalid_mount_target_parse_error(
+        "/home/site-builder/.claude/",
+        MountTargetValidationError::Invalid {
+            path: PathBuf::from("/home/site-builder/.claude/"),
+        },
+    );
+}
+
+#[test]
+fn rejects_profile_mount_targets_containing_find_metacharacters() {
+    for target in [
+        "/home/site-builder/foo*bar",
+        "/home/site-builder/foo?bar",
+        "/home/site-builder/[x]",
+        r"/home/site-builder/foo\bar",
+    ] {
+        assert_invalid_mount_target_parse_error(
+            target,
+            MountTargetValidationError::Invalid {
+                path: PathBuf::from(target),
+            },
+        );
+    }
+}
+
+#[test]
+fn load_rejects_profile_mount_targets_with_trailing_slashes() {
+    let path = write_temp_config(
+        "invalid-mount-target-trailing-slash",
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+
+[[profiles.mounts]]
+source = "/home/core/.claude"
+target = "/home/site-builder/.claude/"
+read_only = true
+"#,
+    );
+
+    let error = Config::load(&path).expect_err("trailing-slash mount targets should be rejected");
+
+    match &error {
+        ConfigError::InvalidMountTarget { profile, error } => {
+            assert_eq!(profile, "site-builder");
+            assert_eq!(
+                error,
+                &MountTargetValidationError::Invalid {
+                    path: PathBuf::from("/home/site-builder/.claude/"),
+                }
+            );
+        }
+        other => panic!("expected invalid mount target error, got {other}"),
+    }
+
+    assert_eq!(
+        error.to_string(),
+        "profile 'site-builder' defines invalid mount target: mount target must be an absolute path without trailing '/', '.' or '..' components, ',', or find metacharacters ('*', '?', '[', ']', '\\\\'): /home/site-builder/.claude/"
     );
 }
 

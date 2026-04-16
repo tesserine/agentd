@@ -260,7 +260,8 @@ pub enum ProfileNameValidationError {
 /// when a bind-mount target violates runner rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MountTargetValidationError {
-    /// The target is not absolute, contains `.` or `..`, or contains `,`.
+    /// The target is not absolute, contains `.` or `..`, contains `,`, ends
+    /// with `/`, or includes `find -path` metacharacters.
     Invalid { path: PathBuf },
     /// The target collides with a runner-managed path.
     Reserved { target: PathBuf },
@@ -445,7 +446,7 @@ impl From<std::io::Error> for RunnerError {
 fn mount_target_invalid_message(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
     write!(
         f,
-        "mount target must be an absolute path without '.' or '..' components or ',': {}",
+        "mount target must be an absolute path without trailing '/', '.' or '..' components, ',', or find metacharacters ('*', '?', '[', ']', '\\\\'): {}",
         path.display()
     )
 }
