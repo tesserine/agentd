@@ -27,8 +27,8 @@ pub struct SessionSpec {
     /// [`validate_profile_name`](crate::validate_profile_name).
     pub profile_name: String,
     /// Container image reference. The image must provide `/bin/sh`, `git`,
-    /// and the setup/session binaries required by the configured profile
-    /// command in `PATH`, including `useradd` and `gosu`.
+    /// `find`, and the setup/session binaries required by the configured
+    /// profile command in `PATH`, including `useradd` and `gosu`.
     pub base_image: String,
     /// Host-side path to the methodology directory. Mounted read-only into
     /// the container at `/agentd/methodology`. Must contain `manifest.toml`.

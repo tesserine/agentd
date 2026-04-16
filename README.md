@@ -131,11 +131,13 @@ entries are bind mounts: `source` must be an absolute existing host path,
 profile, and runner-managed targets are reserved: `/agentd/methodology`,
 `/home/{profile}`, and `/home/{profile}/repo` plus its descendants. Other
 targets under `/home/{profile}` remain supported, including read-only auth
-mounts such as `/home/site-builder/.claude`. The base image must provide
-`/bin/sh`, `git`, `useradd`, `gosu`, and whatever binaries the configured
-session command uses. When a profile declares `schedule`, it must also declare
-`repo`. Schedules are evaluated in daemon-local time and missed fires are not
-backfilled after downtime.
+mounts such as `/home/site-builder/.claude`. Additional mounts are not
+relabelled; on SELinux-enabled hosts, operators must ensure each host path
+already has a container-compatible label. The base image must provide
+`/bin/sh`, `find`, `git`, `useradd`, `gosu`, and whatever binaries the
+configured session command uses. When a profile declares `schedule`, it must
+also declare `repo`. Schedules are evaluated in daemon-local time and missed
+fires are not backfilled after downtime.
 
 ## Running a Session
 

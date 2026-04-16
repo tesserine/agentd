@@ -506,6 +506,45 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
 }
 
 #[test]
+fn preserves_session_user_access_to_preexisting_home_content() {
+    if skip_if_podman_unavailable("preserves_session_user_access_to_preexisting_home_content") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("preexisting-home-run");
+    let image = fixture.build_image_with_preexisting_home_file();
+
+    let outcome = run_session(
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "preexisting-home-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-preexisting-home-file".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
 fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
     if skip_if_podman_unavailable("times_out_when_a_timeout_is_provided_and_cleans_up_container") {
         return;
@@ -661,11 +700,26 @@ impl SessionFixture {
         self.build_image_with_agentd_work_unit_line(None)
     }
 
+    fn build_image_with_preexisting_home_file(&self) -> String {
+        self.build_image_with_customizations(
+            None,
+            "RUN mkdir -p /home/preexisting-home-run \\\n    && printf 'root owned fixture\\n' > /home/preexisting-home-run/.preexisting\n",
+        )
+    }
+
     fn build_image_with_agentd_work_unit(&self, work_unit: &str) -> String {
         self.build_image_with_agentd_work_unit_line(Some(work_unit))
     }
 
     fn build_image_with_agentd_work_unit_line(&self, work_unit: Option<&str>) -> String {
+        self.build_image_with_customizations(work_unit, "")
+    }
+
+    fn build_image_with_customizations(
+        &self,
+        work_unit: Option<&str>,
+        extra_containerfile_lines: &str,
+    ) -> String {
         let context_dir = self.root.join("image-context");
         fs::create_dir_all(&context_dir).expect("image context should be created");
 
@@ -673,12 +727,15 @@ impl SessionFixture {
             .expect("site-builder stub should be written");
         fs::write(context_dir.join("entrypoint.sh"), ENTRYPOINT_SH)
             .expect("entrypoint script should be written");
-        let containerfile = work_unit
+        let mut containerfile = work_unit
             .map(|work_unit| CONTAINERFILE.replace(
                 "FROM docker.io/library/debian:bookworm-slim\n",
                 &format!("FROM docker.io/library/debian:bookworm-slim\nENV AGENTD_WORK_UNIT={work_unit}\n"),
             ))
             .unwrap_or_else(|| CONTAINERFILE.to_string());
+        if !extra_containerfile_lines.is_empty() {
+            containerfile.push_str(extra_containerfile_lines);
+        }
         fs::write(context_dir.join("Containerfile"), containerfile)
             .expect("containerfile should be written");
 
@@ -926,7 +983,7 @@ const CONTAINERFILE: &str = r#"
 FROM docker.io/library/debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git gosu passwd \
+    && apt-get install -y --no-install-recommends findutils git gosu passwd \
     && rm -rf /var/lib/apt/lists/*
 COPY site-builder /usr/local/bin/site-builder
 COPY entrypoint.sh /entrypoint.sh
@@ -1119,6 +1176,14 @@ case "$command_name" in
             mkdir -p "${HOME}/.config/git"
             printf 'sibling write succeeded\n' > "${HOME}/.config/git/config"
             printf 'persisted from nested mount\n' > "${HOME}/.config/claude/nested-artifact.txt"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-preexisting-home-file" ]; then
+            [ -f "${HOME}/.preexisting" ]
+            [ "$(cat "${HOME}/.preexisting")" = "root owned fixture" ]
+            printf 'session write succeeded\n' > "${HOME}/.preexisting"
+            [ "$(cat "${HOME}/.preexisting")" = "session write succeeded" ]
             exit 0
         fi
 
