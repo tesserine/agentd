@@ -231,13 +231,28 @@ fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
     let repo_dir = session_repo_dir(profile_name);
     let methodology_dir = Path::new(METHODOLOGY_MOUNT_PATH);
 
-    if target == methodology_dir || target.starts_with(methodology_dir) || target == home_dir {
+    // Each rule states the invariant for one runner-owned path. Intentional
+    // overlap is part of the contract: targets like `/home` or `/` can
+    // legitimately collide with more than one runner-owned path, and a future
+    // refactor should preserve that instead of collapsing these checks.
+    //
+    // Target and runner-owned methodology path must be disjoint by path
+    // components: neither may be a prefix of the other.
+    if target.starts_with(methodology_dir) || methodology_dir.starts_with(target) {
         return true;
     }
 
-    // Compare by path components, not string prefix, so `/home/{profile}/repo-cache`
-    // remains valid while `/home/{profile}/repo/.git` is correctly reserved.
-    target.starts_with(&repo_dir)
+    // Target and runner-owned repo path must be disjoint by path components:
+    // neither may be a prefix of the other. This keeps `/home/{profile}/repo-cache`
+    // valid while reserving `/home/{profile}/repo`, its descendants, and its
+    // ancestors.
+    if target.starts_with(&repo_dir) || repo_dir.starts_with(target) {
+        return true;
+    }
+
+    // Home is narrower: the home root and its ancestors are reserved, while
+    // descendants such as `.claude` and `.runa` are the supported mount surface.
+    home_dir.starts_with(target)
 }
 
 fn has_relative_mount_target_component(target: &Path) -> bool {
@@ -475,6 +490,26 @@ mod tests {
     }
 
     #[test]
+    fn validate_spec_rejects_mount_targets_that_are_ancestors_of_methodology_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets that are ancestors of the methodology mount should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_spec_rejects_mount_targets_that_collide_with_home_directory() {
         let error = validate_spec(&SessionSpec {
             mounts: vec![BindMount {
@@ -489,6 +524,26 @@ mod tests {
         match error {
             RunnerError::ReservedMountTarget { target } => {
                 assert_eq!(target, PathBuf::from("/home/site-builder"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_are_ancestors_of_home_directory() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/home"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets that are ancestors of the runner-managed home directory should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home"));
             }
             other => panic!("expected ReservedMountTarget, got {other:?}"),
         }
@@ -529,6 +584,28 @@ mod tests {
         match error {
             RunnerError::ReservedMountTarget { target } => {
                 assert_eq!(target, PathBuf::from("/home/site-builder/repo/.git"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_are_ancestors_of_all_runner_managed_paths() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err(
+            "mount targets that are ancestors of every runner-managed path should be reserved",
+        );
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/"));
             }
             other => panic!("expected ReservedMountTarget, got {other:?}"),
         }
@@ -602,6 +679,11 @@ mod tests {
                     source: PathBuf::from("/home/core/.claude"),
                     target: PathBuf::from("/home/site-builder/.claude"),
                     read_only: true,
+                },
+                BindMount {
+                    source: PathBuf::from("/var/lib/tesserine/session-runtime"),
+                    target: PathBuf::from("/home/site-builder/.runa"),
+                    read_only: false,
                 },
                 BindMount {
                     source: PathBuf::from("/var/lib/tesserine/repo-cache"),
