@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session outcomes now follow the shared `commons` exit-code convention across `agentd` and `agentd-runner`: outcomes carry semantic labels plus raw exit codes, daemon and CLI surfaces report labels such as `blocked` and `generic_failure`, `agentd run` exits successfully for normal terminal states (`success`, `blocked`, `nothing_ready`), and timeout remains an agentd-layer outcome outside the shared exit-code vocabulary.
 - Additional bind mounts now reserve only runner-owned targets (`/agentd/methodology`, `/home/{profile}`, and `/home/{profile}/repo` plus descendants), allowing supported read-only and read-write mounts elsewhere under `$HOME` without runner setup mutating host-backed data.
 - Profile-declared bind mounts now reject overlapping container targets within the same profile, so nested targets fail validation before startup instead of reaching the container setup script.
-- Each session now leaves a persistent host audit record under `/var/lib/tesserine/audit/<profile>/<session_id>/`, with preserved `runa/` state, structured agentd metadata in `agentd/session.json`, repo-root `.runa` reserved as a runner-managed audit bridge, and completed records sealed read-only after teardown.
+- Persistent audit records now default to `$XDG_STATE_HOME/tesserine/audit/<profile>/<session_id>/`, falling back to `$HOME/.local/state/tesserine/audit/<profile>/<session_id>/` for rootless installs, with `daemon.audit_root` available as an explicit override for root-owned system installs such as `/var/lib/tesserine/audit/`.
+- Completed audit records now seal directories to `0555` and non-symlink entries to `0444`, skip symlinks while sealing, and update `agentd/session.json` through atomic temp-file replacement instead of truncate-and-write.
+- `agentd_runner::SessionSpec` now requires an explicit `audit_root` field, making the audit-record destination part of the runner API instead of an implicit process-environment override.
 
 ## [0.1.0] — 2026-04-10
 

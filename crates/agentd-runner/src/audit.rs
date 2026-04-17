@@ -1,13 +1,12 @@
 use crate::podman::run_podman_command;
 use crate::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use serde::Serialize;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-const HOST_AUDIT_ROOT: &str = "/var/lib/tesserine/audit";
-const TEST_AUDIT_ROOT_ENV: &str = "AGENTD_TEST_AUDIT_ROOT";
 const METADATA_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +48,7 @@ pub(crate) fn prepare_session_audit_record(
     spec: &SessionSpec,
     invocation: &SessionInvocation,
 ) -> Result<SessionAuditRecord, RunnerError> {
-    prepare_session_audit_record_at(&host_audit_root(), session_id, spec, invocation)
+    prepare_session_audit_record_at(&spec.audit_root, session_id, spec, invocation)
 }
 
 fn prepare_session_audit_record_at(
@@ -117,7 +116,7 @@ fn write_session_audit_metadata(
     let mut payload = serde_json::to_vec_pretty(&metadata)
         .map_err(|error| RunnerError::Io(std::io::Error::other(error)))?;
     payload.push(b'\n');
-    fs::write(&record.metadata_path, payload)?;
+    write_atomic(&record.metadata_path, &payload)?;
     Ok(())
 }
 
@@ -125,12 +124,6 @@ fn current_timestamp() -> Result<String, RunnerError> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| RunnerError::Io(std::io::Error::other(error)))
-}
-
-fn host_audit_root() -> PathBuf {
-    std::env::var_os(TEST_AUDIT_ROOT_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(HOST_AUDIT_ROOT))
 }
 
 fn set_active_runa_permissions(path: &Path) -> Result<(), RunnerError> {
@@ -163,6 +156,10 @@ fn seal_session_audit_record(record: &SessionAuditRecord) -> Result<(), RunnerEr
 
 fn seal_path_recursive(path: &Path) -> Result<(), RunnerError> {
     let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
     if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
@@ -170,15 +167,15 @@ fn seal_path_recursive(path: &Path) -> Result<(), RunnerError> {
         }
     }
 
-    seal_path(path, metadata.permissions())
+    seal_path(path, metadata.is_dir())
 }
 
-fn seal_path(path: &Path, permissions: fs::Permissions) -> Result<(), RunnerError> {
+fn seal_path(path: &Path, is_dir: bool) -> Result<(), RunnerError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let sealed_mode = permissions.mode() & !0o222;
+        let sealed_mode = if is_dir { 0o555 } else { 0o444 };
         fs::set_permissions(path, fs::Permissions::from_mode(sealed_mode))?;
         Ok(())
     }
@@ -195,12 +192,72 @@ fn seal_path(path: &Path, permissions: fs::Permissions) -> Result<(), RunnerErro
 fn seal_with_podman_unshare(path: &Path) -> Result<(), RunnerError> {
     run_podman_command(vec![
         "unshare".to_string(),
-        "chmod".to_string(),
-        "-R".to_string(),
-        "a-w".to_string(),
+        "find".to_string(),
+        "-P".to_string(),
         path.display().to_string(),
+        "-type".to_string(),
+        "d".to_string(),
+        "-exec".to_string(),
+        "chmod".to_string(),
+        "0555".to_string(),
+        "{}".to_string(),
+        "+".to_string(),
+    ])?;
+    run_podman_command(vec![
+        "unshare".to_string(),
+        "find".to_string(),
+        "-P".to_string(),
+        path.display().to_string(),
+        "!".to_string(),
+        "-type".to_string(),
+        "d".to_string(),
+        "!".to_string(),
+        "-type".to_string(),
+        "l".to_string(),
+        "-exec".to_string(),
+        "chmod".to_string(),
+        "0444".to_string(),
+        "{}".to_string(),
+        "+".to_string(),
     ])
     .map(|_| ())
+}
+
+fn write_atomic(path: &Path, payload: &[u8]) -> Result<(), RunnerError> {
+    let temp_path = path.with_extension("json.tmp");
+    let parent = path.parent().ok_or_else(|| {
+        RunnerError::Io(std::io::Error::other(
+            "audit metadata path must have a parent directory",
+        ))
+    })?;
+    let write_result = (|| -> Result<(), RunnerError> {
+        let mut temp_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temp_path)?;
+        temp_file.write_all(payload)?;
+        temp_file.sync_all()?;
+        drop(temp_file);
+        fs::rename(&temp_path, path)?;
+        sync_parent_dir(parent)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    write_result
+}
+
+fn sync_parent_dir(path: &Path) -> Result<(), RunnerError> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -228,6 +285,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let metadata = fs::symlink_metadata(path).expect("path metadata should exist");
+        if metadata.file_type().is_symlink() {
+            return;
+        }
+
         if metadata.is_dir() {
             for entry in fs::read_dir(path).expect("directory should be readable") {
                 let entry = entry.expect("directory entry should be readable");
@@ -312,8 +373,93 @@ mod tests {
                 .expect("runa dir metadata should exist")
                 .permissions()
                 .mode();
-            assert_eq!(runa_mode & 0o222, 0);
+            let metadata_mode = fs::metadata(&record.metadata_path)
+                .expect("metadata file should exist")
+                .permissions()
+                .mode();
+            assert_eq!(runa_mode & 0o777, 0o555);
+            assert_eq!(metadata_mode & 0o777, 0o444);
         }
+
+        #[cfg(unix)]
+        make_tree_writable(&root);
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn finalize_session_audit_record_skips_symlinks_when_sealing() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = unique_test_dir("agentd-audit-symlink");
+        let outside_target = root.join("outside-target.txt");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "1111222233334444",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+
+        fs::write(&outside_target, "outside\n").expect("outside target should be writable");
+        fs::set_permissions(&outside_target, fs::Permissions::from_mode(0o666))
+            .expect("outside target mode should be writable");
+        symlink(&outside_target, record.runa_dir.join("escaped-link"))
+            .expect("symlink should be created");
+
+        super::finalize_session_audit_record(
+            &record,
+            SessionAuditCompletion::Outcome(&SessionOutcome::Success { exit_code: 0 }),
+        )
+        .expect("audit record should finalize");
+
+        let outside_mode = fs::metadata(&outside_target)
+            .expect("outside target metadata should exist")
+            .permissions()
+            .mode();
+        assert_eq!(outside_mode & 0o777, 0o666);
+
+        make_tree_writable(&root);
+        fs::remove_file(&outside_target).expect("outside target should be removed");
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn write_session_audit_metadata_replaces_file_without_leaving_temp_file() {
+        let root = unique_test_dir("agentd-audit-atomic-write");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "abcdabcdabcdabcd",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+
+        super::finalize_session_audit_record(
+            &record,
+            SessionAuditCompletion::Outcome(&SessionOutcome::Success { exit_code: 0 }),
+        )
+        .expect("audit record should finalize");
+
+        let payload = fs::read_to_string(&record.metadata_path)
+            .expect("final session metadata should be readable");
+        let json: Value = serde_json::from_str(&payload).expect("metadata should be valid json");
+        assert_eq!(json["outcome"], "success");
+        assert!(
+            !record.metadata_path.with_extension("json.tmp").exists(),
+            "temporary metadata file should not remain after atomic replace"
+        );
 
         #[cfg(unix)]
         make_tree_writable(&root);

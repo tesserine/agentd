@@ -1,8 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
 
 use agentd::config::{Config, ConfigError, DaemonConfig};
 use agentd_runner::MountTargetValidationError;
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -518,6 +524,170 @@ command = ["site-builder", "exec"]
     assert_eq!(
         config.daemon().pid_file(),
         Path::new("/tmp/agentd-test.pid")
+    );
+}
+
+#[test]
+fn parses_explicit_daemon_audit_root() {
+    let config = Config::from_str(
+        r#"
+[daemon]
+socket_path = "/tmp/agentd-test.sock"
+pid_file = "/tmp/agentd-test.pid"
+audit_root = "/srv/agentd/audit"
+
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse explicit daemon paths");
+
+    assert_eq!(
+        config
+            .daemon()
+            .resolve_audit_root()
+            .expect("audit root should resolve"),
+        Path::new("/srv/agentd/audit")
+    );
+}
+
+#[test]
+fn loading_daemon_config_resolves_relative_audit_root_from_file_location() {
+    let path = write_temp_config(
+        "daemon-only-relative-audit-root",
+        r#"
+[daemon]
+socket_path = "runtime/agentd.sock"
+pid_file = "runtime/agentd.pid"
+audit_root = "state/audit"
+
+[[profiles]]
+name = "Site-Builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+"#,
+    );
+
+    let config = DaemonConfig::load(&path).expect("daemon config should parse");
+    let base_dir = path
+        .parent()
+        .expect("config file should have a parent directory");
+
+    assert_eq!(
+        config
+            .resolve_audit_root()
+            .expect("audit root should resolve"),
+        base_dir.join("state/audit")
+    );
+}
+
+#[test]
+fn daemon_audit_root_uses_xdg_state_home_before_home_fallback() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("XDG_STATE_HOME", "/tmp/xdg-state-home");
+        std::env::set_var("HOME", "/tmp/home-fallback");
+    }
+
+    let config = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse");
+
+    assert_eq!(
+        config
+            .daemon()
+            .resolve_audit_root()
+            .expect("audit root should resolve"),
+        Path::new("/tmp/xdg-state-home/tesserine/audit")
+    );
+
+    unsafe {
+        std::env::remove_var("XDG_STATE_HOME");
+        std::env::remove_var("HOME");
+    }
+}
+
+#[test]
+fn daemon_audit_root_falls_back_to_home_local_state_when_xdg_state_home_is_unset() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::remove_var("XDG_STATE_HOME");
+        std::env::set_var("HOME", "/tmp/home-fallback");
+    }
+
+    let config = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse");
+
+    assert_eq!(
+        config
+            .daemon()
+            .resolve_audit_root()
+            .expect("audit root should resolve"),
+        Path::new("/tmp/home-fallback/.local/state/tesserine/audit")
+    );
+
+    unsafe {
+        std::env::remove_var("HOME");
+    }
+}
+
+#[test]
+fn daemon_audit_root_requires_a_usable_default_when_not_explicitly_configured() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::remove_var("XDG_STATE_HOME");
+        std::env::remove_var("HOME");
+    }
+
+    let config = Config::from_str(
+        r#"
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+command = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse");
+
+    let error = config
+        .daemon()
+        .resolve_audit_root()
+        .expect_err("missing environment-backed audit root should fail");
+
+    assert!(
+        error.to_string().contains("audit root"),
+        "expected audit-root error, got {error}"
     );
 }
 

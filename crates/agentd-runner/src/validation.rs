@@ -33,6 +33,11 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if spec.base_image.trim().is_empty() || spec.base_image != spec.base_image.trim() {
         return Err(RunnerError::InvalidBaseImage);
     }
+    if !spec.audit_root.is_absolute() {
+        return Err(RunnerError::InvalidAuditRoot {
+            path: spec.audit_root.clone(),
+        });
+    }
     if spec.command.is_empty() || spec.command.iter().any(|arg| arg.is_empty()) {
         return Err(RunnerError::InvalidCommand);
     }
@@ -451,6 +456,22 @@ mod tests {
                 matches!(error, RunnerError::InvalidBaseImage),
                 "expected InvalidBaseImage for {base_image:?}, got {error:?}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_relative_audit_roots() {
+        let error = validate_spec(&SessionSpec {
+            audit_root: PathBuf::from("relative/audit-root"),
+            ..test_session_spec()
+        })
+        .expect_err("relative audit roots should be rejected");
+
+        match error {
+            RunnerError::InvalidAuditRoot { path } => {
+                assert_eq!(path, PathBuf::from("relative/audit-root"));
+            }
+            other => panic!("expected InvalidAuditRoot, got {other:?}"),
         }
     }
 

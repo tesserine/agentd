@@ -33,7 +33,10 @@ Manual runs still flow through `agentd run`, and scheduled runs dispatch
 through the same daemon socket intake without introducing a separate job type.
 Profiles may also declare additional bind mounts for host-managed state such as
 subscription auth directories. Independently of profile mounts, agentd now
-persists each session's audit record under `/var/lib/tesserine/audit/`.
+persists each session's audit record under the rootless default
+`$XDG_STATE_HOME/tesserine/audit/`, falling back to
+`$HOME/.local/state/tesserine/audit/`, with `daemon.audit_root` available as an
+explicit override for root-owned installs such as `/var/lib/tesserine/audit/`.
 
 ## Configuration
 
@@ -46,6 +49,14 @@ config file — start from
 ```toml
 # Static profile registry for agentd.
 # A profile can carry its own default repo and optional schedule.
+
+#[daemon]
+# Optional explicit host path for persistent audit records. Rootless installs
+# default to $XDG_STATE_HOME/tesserine/audit, falling back to
+# $HOME/.local/state/tesserine/audit when XDG_STATE_HOME is unset.
+# Root-owned system installs should typically point this at
+# /var/lib/tesserine/audit.
+#audit_root = "/var/lib/tesserine/audit"
 
 [[profiles]]
 # Stable operator-facing profile name used for lookup and container identity.
@@ -139,7 +150,9 @@ already has a container-compatible label. The base image must provide
 `/bin/sh`, `find`, `git`, `useradd`, `gosu`, and whatever binaries the
 configured session command uses. When a profile declares `schedule`, it must
 also declare `repo`. Schedules are evaluated in daemon-local time and missed
-fires are not backfilled after downtime.
+fires are not backfilled after downtime. Persistent audit records default to
+`$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set
+`daemon.audit_root` to override that for system installations.
 
 ## Running a Session
 
@@ -188,8 +201,9 @@ the container, the agent sees:
 - The configured session command executing from the repo directory
 
 The container is force-removed on completion. The session's audit record
-persists on the host under `/var/lib/tesserine/audit/<profile>/<session_id>/`,
-with runa state in `runa/` and agentd metadata in `agentd/session.json`.
+persists on the host under the resolved audit root
+`<audit_root>/<profile>/<session_id>/`, with runa state in `runa/` and agentd
+metadata in `agentd/session.json`.
 
 ## Scheduled Runs
 

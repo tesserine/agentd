@@ -17,6 +17,7 @@ pub(crate) fn test_session_spec() -> SessionSpec {
         profile_name: "site-builder".to_string(),
         base_image: "image".to_string(),
         methodology_dir: PathBuf::from("/tmp/methodology"),
+        audit_root: std::env::temp_dir().join("agentd-runner-test-audit-root"),
         mounts: Vec::new(),
         command: vec!["site-builder".to_string(), "exec".to_string()],
         environment: Vec::new(),
@@ -491,7 +492,6 @@ impl FakePodmanFixture {
         unsafe {
             env::set_var("PATH", &fake_path);
             env::set_var("AGENTD_FAKE_PODMAN_LOG_DIR", &self.log_dir);
-            env::set_var("AGENTD_TEST_AUDIT_ROOT", self.root.join("audit-root"));
         }
 
         let result = run();
@@ -499,7 +499,6 @@ impl FakePodmanFixture {
         unsafe {
             env::set_var("PATH", original_path);
             env::remove_var("AGENTD_FAKE_PODMAN_LOG_DIR");
-            env::remove_var("AGENTD_TEST_AUDIT_ROOT");
         }
 
         result

@@ -123,7 +123,7 @@ The runner prepares the execution environment:
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only.
 5. Creates an unprivileged unix user whose username is the configured profile name, with home directory `/home/{username}`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the session command starts. Base images that lack `/bin/sh`, `find`, `git`, `useradd`, or `gosu` are not supported.
-6. Allocates a host audit record at `/var/lib/tesserine/audit/{profile}/{session_id}/`, writes start metadata to `agentd/session.json`, and bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa` before the runtime initializes runa state.
+6. Resolves the host audit root, creates it if needed, and probes writability before accepting work. The default for rootless deployments is `$XDG_STATE_HOME/tesserine/audit`, falling back to `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset. Operators may override that with `daemon.audit_root`; root-owned system installs should typically point it at `/var/lib/tesserine/audit`. After resolution, the runner allocates a host audit record at `{audit_root}/{profile}/{session_id}/`, writes start metadata to `agentd/session.json`, and bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa` before the runtime initializes runa state.
 7. Recursively transfers ownership of pre-existing content under `/home/{username}` while pruning host-backed bind-mount targets, the runner-owned audit leaf `/home/{username}/.agentd/audit/runa`, and `/home/{username}/repo`, then transfers ownership of `/home/{username}/repo` after the clone, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready. The runner reserves `/home/{username}` itself, `/home/{username}/.agentd` plus its descendants, and `/home/{username}/repo` plus its descendants so host-backed bind mounts cannot collide with runner-managed paths.
 8. Creates `/home/{username}/repo/.runa` as a symlink to `/home/{username}/.agentd/audit/runa`. This is a runner-owned repo contract: cloned repositories must not contain a `.runa` entry at repo root. If the clone already contains one, setup fails explicitly rather than overwriting repository content.
 
@@ -133,7 +133,7 @@ The runner drops privileges with `gosu` and launches the profile's configured se
 
 ### Phase 4: Teardown (`agentd-runner`)
 
-When the session ends or times out, the runner force-removes the container, finalizes `agentd/session.json` with end timestamp and outcome, and seals the session record read-only on the host. The ephemeral container workspace still disappears, but the host audit record remains at `/var/lib/tesserine/audit/{profile}/{session_id}/`.
+When the session ends or times out, the runner force-removes the container, finalizes `agentd/session.json` with end timestamp and outcome through an atomic same-directory temp-file rename, and seals the session record read-only on the host. The ephemeral container workspace still disappears, but the host audit record remains at `{audit_root}/{profile}/{session_id}/`.
 
 If agentd is interrupted after writing start metadata but before finalization, the session record remains **incomplete**: `agentd/session.json` has `start_timestamp` but no `end_timestamp` or `outcome`. Operators should read that state as "the daemon stopped before closeout completed," not as a successful or failed terminal outcome.
 
@@ -177,13 +177,18 @@ SELinux-enforcing hosts such as Fedora CoreOS. `agentd/session.json` is not
 mounted into the container; it stays host-only so runa-written state and
 agentd-written metadata are distinguishable on disk without disambiguation.
 
-Host audit records live under `/var/lib/tesserine/audit/<profile>/<session_id>/`
-with this layout:
+Host audit records live under the resolved audit root, by default
+`$XDG_STATE_HOME/tesserine/audit/<profile>/<session_id>/` or
+`$HOME/.local/state/tesserine/audit/<profile>/<session_id>/` when
+`XDG_STATE_HOME` is unset. Root-owned system installs should set
+`daemon.audit_root = "/var/lib/tesserine/audit"`. Each record has this
+layout:
 
 - `runa/` — preserved runa state written naturally by the runtime
 - `agentd/session.json` — agentd-written metadata (`session_id`, `profile`,
   `repo_url`, optional `work_unit`, timestamps, outcome, exit code when
-  applicable)
+  applicable) written by atomic temp-file replacement within the record
+  directory
 
 Coverage is intentionally scoped to the repo-root `.runa/` tree. That captures
 `runa`'s non-configurable `.runa/store/` and the default `.runa/workspace/`.
@@ -192,15 +197,35 @@ that workspace path is outside the audit mount and will not be preserved.
 Groundwork uses the default `.runa/workspace/` layout and is fully covered.
 
 Retention is intentionally out of scope here. Audit records accumulate
-indefinitely under `/var/lib/tesserine/audit/`; pruning and retention policy
-are future work, so disk growth is currently an operator concern.
+indefinitely under the resolved audit root; pruning and retention policy are
+future work, so disk growth is currently an operator concern. Completed records
+seal directories to `0555` and non-symlink entries to `0444`, so deleting old
+records requires restoring write permission first, for example
+`chmod -R u+w <record_dir> && rm -rf <record_dir>`.
 
 The host security model is intentionally single-tenant. While a session is
 running, agentd opens the mounted `runa/` subtree with mode `0o777` so writes
 through the rootless container's UID mapping succeed. Any user with host shell
-access can therefore read or write that subtree during the active session. For
-single-tenant deployments such as babbie, that tradeoff is acceptable; a
-multi-tenant host would need a different permission model before deployment.
+access can therefore read or write that subtree during the active session. On
+completion, agentd seals directories to `0555` and non-symlink entries to
+`0444`, making finished records world-readable on the host. For single-tenant
+deployments such as babbie, that tradeoff is acceptable; a multi-tenant host
+would need a different permission model before deployment.
+
+The startup writability probe is intentionally local-filesystem scoped. It
+verifies that the daemon can create and remove a file under the resolved audit
+root before dispatch begins. That catches ordinary permission and path errors
+early, but it does not validate network-filesystem behavior beyond the probe;
+NFS and similar targets can still fail later with semantics the probe does not
+model.
+
+Session ids are 16 lowercase hex characters generated from `getrandom`, giving
+roughly `2^64` possible values per profile and a birthday bound near `2^32`
+sessions before collisions become materially likely. On collision,
+`create_dir_all` would silently reuse the existing directory tree and merge two
+records. That is not an operational concern at current scale, but operators
+planning very long-lived or very high-volume deployments should understand the
+risk envelope.
 
 ## 6. Credential Flow
 

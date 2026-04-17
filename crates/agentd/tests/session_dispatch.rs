@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::{fs, panic};
 
 use agentd::config::{Config, ConfigError};
 use agentd::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
@@ -11,6 +12,17 @@ use agentd_runner::{
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after the unix epoch")
+            .as_nanos()
+    ))
 }
 
 struct RecordingExecutor {
@@ -61,6 +73,27 @@ name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "{repo_token_source}"
+
+command = ["site-builder", "exec"]
+
+[[profiles.credentials]]
+name = "GITHUB_TOKEN"
+source = "AGENTD_GITHUB_TOKEN"
+"#
+    ))
+    .expect("config should parse")
+}
+
+fn config_with_audit_root(audit_root: &str) -> Config {
+    Config::from_str(&format!(
+        r#"
+[daemon]
+audit_root = "{audit_root}"
+
+[[profiles]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
 
 command = ["site-builder", "exec"]
 
@@ -138,6 +171,13 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
             .expect("daemon instance id should resolve")
     );
     assert_eq!(
+        spec.audit_root,
+        config
+            .daemon()
+            .resolve_audit_root()
+            .expect("audit root should resolve")
+    );
+    assert_eq!(
         spec.command,
         vec!["site-builder".to_string(), "exec".to_string()]
     );
@@ -156,6 +196,95 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
         std::env::remove_var("SITE_BUILDER_REPO_TOKEN");
+    }
+}
+
+#[test]
+fn dispatch_run_forwards_resolved_audit_root_into_session_spec() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let audit_root = unique_temp_dir("agentd-dispatch-audit-root");
+    let config = config_with_audit_root(
+        audit_root
+            .to_str()
+            .expect("temporary audit root should be valid utf-8"),
+    );
+    let request = RunRequest {
+        profile: "site-builder".to_string(),
+        repo_url: "https://example.com/repo.git".to_string(),
+        work_unit: None,
+    };
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    let result = panic::catch_unwind(|| {
+        dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
+
+        let state = state.lock().expect("recording state should lock");
+        let spec = state
+            .last_spec
+            .as_ref()
+            .expect("executor should receive spec");
+
+        assert_eq!(spec.audit_root, audit_root);
+    });
+
+    let _ = fs::remove_dir_all(&audit_root);
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+
+    result.expect("dispatch assertions should succeed");
+}
+
+#[test]
+#[cfg(unix)]
+fn dispatch_run_rejects_an_unwritable_audit_root_before_session_execution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let audit_root = unique_temp_dir("agentd-dispatch-unwritable-audit-root");
+    fs::create_dir_all(&audit_root).expect("audit root should be created");
+    fs::set_permissions(&audit_root, fs::Permissions::from_mode(0o555))
+        .expect("audit root should become read-only");
+
+    let config = config_with_audit_root(
+        audit_root
+            .to_str()
+            .expect("temporary audit root should be valid utf-8"),
+    );
+    let request = RunRequest {
+        profile: "site-builder".to_string(),
+        repo_url: "https://example.com/repo.git".to_string(),
+        work_unit: None,
+    };
+    let (executor, _state) =
+        RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    let error = dispatch_run(&config, &request, &executor)
+        .expect_err("unwritable audit root should fail dispatch");
+
+    match error {
+        DispatchError::Config(ConfigError::AuditRootNotWritable { path, .. }) => {
+            assert_eq!(path, audit_root);
+        }
+        other => panic!("expected audit-root config error, got {other:?}"),
+    }
+
+    fs::set_permissions(&audit_root, fs::Permissions::from_mode(0o755))
+        .expect("audit root should become writable again");
+    fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
+
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
     }
 }
 

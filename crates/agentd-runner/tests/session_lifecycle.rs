@@ -21,17 +21,11 @@ const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
 
 fn run_session_with_test_audit_root(
     audit_root: &Path,
-    spec: SessionSpec,
+    mut spec: SessionSpec,
     invocation: SessionInvocation,
 ) -> Result<SessionOutcome, agentd_runner::RunnerError> {
-    unsafe {
-        std::env::set_var("AGENTD_TEST_AUDIT_ROOT", audit_root);
-    }
-    let result = run_session(spec, invocation);
-    unsafe {
-        std::env::remove_var("AGENTD_TEST_AUDIT_ROOT");
-    }
-    result
+    spec.audit_root = audit_root.to_path_buf();
+    run_session(spec, invocation)
 }
 
 #[test]
@@ -53,6 +47,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
             profile_name: "success-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec![
                 "site-builder".to_string(),
@@ -104,6 +99,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
             profile_name: "mixed-env-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -154,6 +150,7 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
             profile_name: "unset-work-unit-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -196,6 +193,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
             profile_name: "failure-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -244,6 +242,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
             profile_name: "failure-run-125".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -293,6 +292,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             profile_name: "comma-methodology-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -350,6 +350,7 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
             profile_name: "readonly-mount-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
                 target: PathBuf::from("/home/readonly-mount-run/.claude"),
@@ -422,6 +423,7 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
             profile_name: "readwrite-mount-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
                 target: PathBuf::from("/home/readwrite-mount-run/.runa"),
@@ -500,6 +502,7 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
             profile_name: "nested-home-mount-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
                 target: PathBuf::from("/home/nested-home-mount-run/.config/claude"),
@@ -549,6 +552,7 @@ fn preserves_session_user_access_to_preexisting_home_content() {
             profile_name: "preexisting-home-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -589,6 +593,7 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
             profile_name: "audit-success-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -679,6 +684,7 @@ fn preserves_failing_audit_trail_for_post_mortem_reconstruction() {
             profile_name: "audit-failure-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -744,6 +750,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
             profile_name: "timeout-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
             mounts: Vec::new(),
             command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -794,6 +801,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                 profile_name: "running-secret-run".to_string(),
                 base_image: image,
                 methodology_dir,
+                audit_root: audit_root.clone(),
                 mounts: Vec::new(),
                 command: vec!["site-builder".to_string(), "exec".to_string()],
                 environment: vec![
