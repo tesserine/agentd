@@ -44,8 +44,8 @@ use lifecycle::{
 };
 use naming::format_container_name;
 use resources::{
-    SessionResources, cleanup_methodology_staging_dir, cleanup_podman_secrets,
-    prepare_session_resources, unique_suffix,
+    ResourceAllocationFailure, SessionResources, cleanup_methodology_staging_dir,
+    cleanup_podman_secrets, prepare_session_resources, unique_suffix,
 };
 use validation::{validate_invocation, validate_spec};
 
@@ -107,9 +107,15 @@ pub fn run_session(
         audit_record.clone(),
     ) {
         Ok(resources) => resources,
-        Err(error) => {
-            let audit_result =
-                finalize_session_audit_record(&audit_record, SessionAuditCompletion::Error);
+        Err(ResourceAllocationFailure {
+            allocation_error,
+            rollback_result,
+        }) => {
+            let audit_result = finalize_session_audit_record_if_cleanup_succeeded(
+                &rollback_result,
+                &audit_record,
+                SessionAuditCompletion::Error,
+            );
             if let Err(audit_error) = &audit_result {
                 log_lifecycle_failure(
                     LifecycleFailureKind::Cleanup,
@@ -123,14 +129,14 @@ pub fn run_session(
                 &session_id,
                 &container_name,
                 "session_resource_allocation",
-                &error,
+                &allocation_error,
             );
             log_session_teardown(
                 &session_id,
                 &container_name,
-                audit_result.as_ref().map(|_| ()),
+                combined_teardown_result(&rollback_result, &audit_result),
             );
-            return Err(error);
+            return Err(allocation_error);
         }
     };
 
@@ -168,9 +174,7 @@ pub fn run_session(
         log_session_teardown(
             &session_id,
             &resources.container_name,
-            combined_teardown_result(cleanup_result, audit_result)
-                .as_ref()
-                .map(|_| ()),
+            combined_teardown_result(&cleanup_result, &audit_result),
         );
         return Err(error);
     }
@@ -207,6 +211,15 @@ pub fn run_session(
             Err(_) => SessionAuditCompletion::Error,
         },
     );
+    if let Err(cleanup_error) = &cleanup_result {
+        log_lifecycle_failure(
+            LifecycleFailureKind::Cleanup,
+            "session execution",
+            &resources.container_name,
+            &session_id,
+            cleanup_error,
+        );
+    }
     if let Err(audit_error) = &audit_result {
         log_lifecycle_failure(
             LifecycleFailureKind::Cleanup,
@@ -216,27 +229,13 @@ pub fn run_session(
             audit_error,
         );
     }
-    let teardown_result = combined_teardown_result(cleanup_result, audit_result);
-    log_session_teardown(
-        &session_id,
-        &resources.container_name,
-        teardown_result.as_ref().map(|_| ()),
-    );
+    let teardown_result = combined_teardown_result(&cleanup_result, &audit_result);
+    log_session_teardown(&session_id, &resources.container_name, teardown_result);
 
-    match (start_result, teardown_result) {
+    match (start_result, cleanup_result) {
         (Ok(outcome), Ok(())) => Ok(outcome),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(cleanup_error)) => {
-            log_lifecycle_failure(
-                LifecycleFailureKind::Cleanup,
-                "session execution",
-                &resources.container_name,
-                &session_id,
-                &cleanup_error,
-            );
-            Err(error)
-        }
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), _) => Err(error),
     }
 }
 
@@ -263,10 +262,10 @@ fn finalize_session_audit_record_if_cleanup_succeeded(
     finalize_session_audit_record(record, completion)
 }
 
-fn combined_teardown_result(
-    cleanup_result: Result<(), RunnerError>,
-    audit_result: Result<(), RunnerError>,
-) -> Result<(), RunnerError> {
+fn combined_teardown_result<'a>(
+    cleanup_result: &'a Result<(), RunnerError>,
+    audit_result: &'a Result<(), RunnerError>,
+) -> Result<(), &'a RunnerError> {
     match (cleanup_result, audit_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -285,6 +284,8 @@ mod tests {
     use serde_json::Value;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn only_session_record_dir(audit_root: &Path, profile_name: &str) -> PathBuf {
         let profile_root = audit_root.join(profile_name);
@@ -393,7 +394,8 @@ mod tests {
     }
 
     #[test]
-    fn run_session_marks_teardown_skipped_when_allocation_rollback_logs_failure() {
+    fn run_session_leaves_audit_record_incomplete_and_reports_teardown_error_when_allocation_rollback_fails()
+     {
         let _guard = fake_podman_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -417,6 +419,8 @@ mod tests {
                 )),
         );
         let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let audit_root = unique_temp_dir("runner-audit-allocation-rollback-failure");
+        fs::create_dir_all(&audit_root).expect("audit root should be created");
 
         let events = capture_tracing_events(|| {
             let error = fixture
@@ -424,6 +428,7 @@ mod tests {
                     run_session(
                         SessionSpec {
                             methodology_dir,
+                            audit_root: audit_root.clone(),
                             environment: vec![
                                 ResolvedEnvironmentVariable {
                                     name: "GITHUB_TOKEN".to_string(),
@@ -459,7 +464,32 @@ mod tests {
         assert_eq!(events[2]["fields"]["event"], "runner.session_error");
         assert_eq!(events[2]["fields"]["stage"], "session_resource_allocation");
         assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
-        assert_eq!(events[3]["fields"]["result"], "ok");
+        assert_eq!(events[3]["fields"]["result"], "error");
+
+        let record_dir = only_session_record_dir(&audit_root, "site-builder");
+        let metadata = read_session_metadata(&record_dir);
+        assert!(
+            metadata.get("end_timestamp").is_none(),
+            "allocation rollback failure must not finalize end_timestamp"
+        );
+        assert!(
+            metadata.get("outcome").is_none(),
+            "allocation rollback failure must not finalize outcome"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let runa_mode = fs::metadata(record_dir.join("runa"))
+            .expect("runa dir metadata should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            runa_mode, 0o777,
+            "allocation rollback failure must leave the top-level runa dir in its active writable mode"
+        );
+
+        fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 
     #[test]
@@ -635,6 +665,137 @@ mod tests {
         );
 
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn run_session_preserves_session_outcome_when_audit_finalization_fails_after_successful_cleanup()
+     {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new().with_start(CommandBehavior::from_outcome(
+                CommandOutcome::new()
+                    .touch_file("start-blocked")
+                    .wait_for_file(
+                        "release-start",
+                        Duration::from_secs(5),
+                        "timed out waiting to release start",
+                        91,
+                    ),
+            )),
+        );
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let audit_root = unique_temp_dir("runner-audit-finalization-failure");
+        fs::create_dir_all(&audit_root).expect("audit root should be created");
+        let helper_audit_root = audit_root.clone();
+
+        let events = fixture.run_with_fake_podman_env(|| {
+            let log_dir = PathBuf::from(
+                std::env::var("AGENTD_FAKE_PODMAN_LOG_DIR")
+                    .expect("fake podman log dir should be configured"),
+            );
+            let helper = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline && !log_dir.join("start-blocked").exists() {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                assert!(
+                    log_dir.join("start-blocked").exists(),
+                    "fake podman start should block before audit finalization"
+                );
+
+                let record_dir =
+                    wait_for_only_session_record_dir(&helper_audit_root, "site-builder", deadline);
+                let agentd_dir = record_dir.join("agentd");
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&agentd_dir, fs::Permissions::from_mode(0o555))
+                    .expect("agentd dir should become read-only");
+                fs::write(log_dir.join("release-start"), b"release\n")
+                    .expect("start should be released");
+            });
+
+            let events = capture_tracing_events(|| {
+                let outcome = run_session(
+                    SessionSpec {
+                        methodology_dir,
+                        audit_root: audit_root.clone(),
+                        ..test_session_spec()
+                    },
+                    SessionInvocation {
+                        repo_url: "https://example.com/agentd.git".to_string(),
+                        repo_token: None,
+                        work_unit: None,
+                        timeout: None,
+                    },
+                )
+                .expect("session outcome should survive audit finalization failure");
+
+                assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+            });
+
+            helper
+                .join()
+                .expect("audit-finalization helper thread should complete");
+            events
+        });
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0]["fields"]["event"], "runner.session_started");
+        assert_eq!(events[1]["fields"]["event"], "runner.session_outcome");
+        assert_eq!(events[1]["fields"]["outcome"], "success");
+        assert_eq!(events[2]["fields"]["event"], "runner.lifecycle_failure");
+        assert_eq!(events[2]["fields"]["stage"], "session audit finalization");
+        assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
+        assert_eq!(events[3]["fields"]["result"], "error");
+
+        let record_dir = only_session_record_dir(&audit_root, "site-builder");
+        let metadata = read_session_metadata(&record_dir);
+        assert!(
+            metadata.get("end_timestamp").is_none(),
+            "audit finalization failure must leave end_timestamp incomplete"
+        );
+        assert!(
+            metadata.get("outcome").is_none(),
+            "audit finalization failure must leave outcome incomplete"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(record_dir.join("agentd"), fs::Permissions::from_mode(0o755))
+            .expect("agentd dir should become removable for test cleanup");
+        fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
+    }
+
+    fn wait_for_only_session_record_dir(
+        audit_root: &Path,
+        profile_name: &str,
+        deadline: Instant,
+    ) -> PathBuf {
+        loop {
+            let profile_root = audit_root.join(profile_name);
+            if let Ok(entries) = fs::read_dir(&profile_root) {
+                let entries = entries
+                    .map(|entry| {
+                        entry
+                            .expect("session record entry should be readable")
+                            .path()
+                    })
+                    .filter(|path| path.is_dir())
+                    .collect::<Vec<_>>();
+                if entries.len() == 1 {
+                    return entries[0].clone();
+                }
+            }
+
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for session record under {}",
+                profile_root.display()
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     #[test]

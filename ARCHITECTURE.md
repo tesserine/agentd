@@ -146,11 +146,19 @@ container workspace still disappears, but the host audit record remains at
 `{audit_root}/{profile}/{session_id}/`.
 
 If agentd is interrupted after writing start metadata but before finalization,
-or if teardown cleanup fails before finalization can begin, the session record
-remains **incomplete**: `agentd/session.json` has `start_timestamp` but no
-`end_timestamp` or `outcome`. Operators should read that state as "the daemon
-stopped before closeout completed" or "teardown cleanup did not complete," not
-as a successful or failed terminal outcome.
+if teardown cleanup fails before finalization can begin, or if audit
+finalization attempts closeout and fails, the session record remains
+**incomplete**: `agentd/session.json` has `start_timestamp` but no
+`end_timestamp` or `outcome`, and `runa/` stays unsealed. The filesystem alone
+does not distinguish "cleanup never completed" from "finalization attempted
+and failed." Operators should use tracing to disambiguate when it matters:
+`runner.lifecycle_failure` reports the failing stage (`"session resource allocation"`,
+`"container creation"`, `"session execution"`, or `"session audit finalization"`),
+while `runner.session_outcome`, `runner.session_error`, and
+`runner.session_teardown` provide the semantic outcome and teardown status.
+On disk, all of those failure paths intentionally preserve the same
+incomplete-record signal rather than inventing multiple partially-finalized
+states.
 
 ## 5. Container Isolation Model
 

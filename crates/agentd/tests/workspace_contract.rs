@@ -151,6 +151,11 @@ fn workspace_docs_describe_persistent_audit_record_contract() {
         "architecture should explain incomplete session records"
     );
     assert!(
+        architecture.contains("runner.lifecycle_failure")
+            && architecture.contains("session audit finalization"),
+        "architecture should explain tracing-based disambiguation for incomplete session records"
+    );
+    assert!(
         architecture.contains("must not contain a `.runa` entry"),
         "architecture should describe the repo-root .runa contract"
     );

@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Session teardown now skips audit finalization and sealing when cleanup fails, leaving `agentd/session.json` intentionally incomplete instead of marking a session complete while its audit bind mount may still be live.
+- Completed session outcomes now remain caller-visible when only audit finalization fails after teardown cleanup succeeds.
+- Audit sealing now refuses multi-linked entries before rewriting metadata, preventing host file mode changes through hard-linked audit aliases.
+- Allocation rollback failure now preserves the incomplete audit-record signal instead of finalizing `agentd/session.json` after leaked cleanup state.
 
 ## [0.1.0] — 2026-04-10
 

@@ -57,6 +57,21 @@ impl SessionResources {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ResourceAllocationFailure {
+    pub(crate) allocation_error: RunnerError,
+    pub(crate) rollback_result: Result<(), RunnerError>,
+}
+
+impl ResourceAllocationFailure {
+    fn without_rollback_failure(error: RunnerError) -> Self {
+        Self {
+            allocation_error: error,
+            rollback_result: Ok(()),
+        }
+    }
+}
+
 pub(crate) fn unique_suffix() -> Result<String, RunnerError> {
     unique_suffix_with(|bytes| fill_random_bytes(bytes).map_err(std::io::Error::other))
 }
@@ -67,21 +82,23 @@ pub(crate) fn prepare_session_resources(
     invocation: &SessionInvocation,
     session_id: &str,
     audit_record: SessionAuditRecord,
-) -> Result<SessionResources, RunnerError> {
+) -> Result<SessionResources, ResourceAllocationFailure> {
     let manifest_path = spec.methodology_dir.join("manifest.toml");
     if !manifest_path.is_file() {
-        return Err(RunnerError::MissingMethodologyManifest {
-            path: manifest_path,
-        });
+        return Err(ResourceAllocationFailure::without_rollback_failure(
+            RunnerError::MissingMethodologyManifest {
+                path: manifest_path,
+            },
+        ));
     }
 
-    let methodology_staging_dir =
-        create_methodology_staging_dir(&spec.methodology_dir, session_id)?;
+    let methodology_staging_dir = create_methodology_staging_dir(&spec.methodology_dir, session_id)
+        .map_err(ResourceAllocationFailure::without_rollback_failure)?;
     let audit_mount = match create_audit_mount(&audit_record, spec, &methodology_staging_dir) {
         Ok(mount) => mount,
         Err(error) => {
             let _ = fs::remove_dir_all(&methodology_staging_dir);
-            return Err(error);
+            return Err(ResourceAllocationFailure::without_rollback_failure(error));
         }
     };
     let methodology_mount_source = methodology_staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
@@ -89,7 +106,7 @@ pub(crate) fn prepare_session_resources(
         Ok(mounts) => mounts,
         Err(error) => {
             let _ = fs::remove_dir_all(&methodology_staging_dir);
-            return Err(error);
+            return Err(ResourceAllocationFailure::without_rollback_failure(error));
         }
     };
     let mut resources = SessionResources {
@@ -145,7 +162,9 @@ fn rollback_failed_resource_allocation(
     resources: &SessionResources,
     session_id: &str,
     error: RunnerError,
-) -> RunnerError {
+) -> ResourceAllocationFailure {
+    let mut rollback_error = None;
+
     if let Err(cleanup_error) = cleanup_podman_secrets(&resources.all_secret_bindings()) {
         log_lifecycle_failure(
             LifecycleFailureKind::Cleanup,
@@ -154,6 +173,7 @@ fn rollback_failed_resource_allocation(
             session_id,
             &cleanup_error,
         );
+        rollback_error = Some(cleanup_error);
     }
     if let Err(cleanup_error) = cleanup_methodology_staging_dir(&resources.methodology_staging_dir)
     {
@@ -164,9 +184,13 @@ fn rollback_failed_resource_allocation(
             session_id,
             &cleanup_error,
         );
+        rollback_error.get_or_insert(cleanup_error);
     }
 
-    error
+    ResourceAllocationFailure {
+        allocation_error: error,
+        rollback_result: rollback_error.map_or(Ok(()), Err),
+    }
 }
 
 pub(crate) fn cleanup_podman_secrets(secret_bindings: &[SecretBinding]) -> Result<(), RunnerError> {
@@ -471,7 +495,10 @@ mod tests {
             )
         });
 
-        match result.expect_err("second secret create should fail") {
+        match result
+            .expect_err("second secret create should fail")
+            .allocation_error
+        {
             RunnerError::PodmanCommandFailed {
                 args,
                 status,
@@ -544,7 +571,10 @@ mod tests {
             )
         });
 
-        match result.expect_err("repo token secret create should fail") {
+        match result
+            .expect_err("repo token secret create should fail")
+            .allocation_error
+        {
             RunnerError::PodmanCommandFailed {
                 args,
                 status,
@@ -607,7 +637,10 @@ mod tests {
             test_audit_record(&session_id),
         );
 
-        match result.expect_err("missing mount sources should be rejected") {
+        match result
+            .expect_err("missing mount sources should be rejected")
+            .allocation_error
+        {
             RunnerError::MissingMountSource { path } => {
                 assert_eq!(path, missing_mount_source);
             }

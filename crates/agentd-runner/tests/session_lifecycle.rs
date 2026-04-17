@@ -28,6 +28,37 @@ fn run_session_with_test_audit_root(
     run_session(spec, invocation)
 }
 
+fn wait_for_session_record_dir(
+    audit_root: &Path,
+    profile_name: &str,
+    timeout: Duration,
+) -> PathBuf {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let profile_root = audit_root.join(profile_name);
+        if let Ok(entries) = fs::read_dir(&profile_root) {
+            let entries = entries
+                .map(|entry| {
+                    entry
+                        .expect("session record entry should be readable")
+                        .path()
+                })
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            if entries.len() == 1 {
+                return entries[0].clone();
+            }
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for session record under {}",
+            profile_root.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[test]
 fn succeeds_without_timeout_and_cleans_up_container() {
     if skip_if_podman_unavailable("succeeds_without_timeout_and_cleans_up_container") {
@@ -714,6 +745,109 @@ fn preserves_host_readability_for_restrictive_container_written_audit_entries_af
     assert_eq!(runa_mode, 0o555);
     assert_eq!(workspace_mode, 0o555);
     assert_eq!(artifact_mode, 0o444);
+
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn refuses_hard_linked_audit_entries_without_mutating_operator_mount_file_modes() {
+    if skip_if_podman_unavailable(
+        "refuses_hard_linked_audit_entries_without_mutating_operator_mount_file_modes",
+    ) {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("audit-hard-link-run");
+    let image = fixture.build_image();
+    let host_mount = fixture.root.join("host-hard-link");
+    fs::create_dir_all(&host_mount).expect("hard-link host mount should be created");
+    fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
+        .expect("hard-link host mount should permit container writes");
+    let operator_file = host_mount.join("operator-state.txt");
+    fs::write(&operator_file, "operator managed\n").expect("operator file should be written");
+    fs::set_permissions(&operator_file, fs::Permissions::from_mode(0o666))
+        .expect("operator file should be writable");
+
+    let audit_root = fixture.audit_root();
+    let helper_audit_root = audit_root.clone();
+    let helper_operator_file = operator_file.clone();
+    let helper = thread::spawn(move || {
+        let record_dir = wait_for_session_record_dir(
+            &helper_audit_root,
+            "audit-hard-link-run",
+            Duration::from_secs(5),
+        );
+        fs::hard_link(
+            &helper_operator_file,
+            record_dir.join("runa/escaped-hard-link.txt"),
+        )
+        .expect("host should be able to plant a hard-linked audit entry");
+    });
+
+    let outcome = run_session_with_test_audit_root(
+        &audit_root,
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "audit-hard-link-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: audit_root.clone(),
+            mounts: vec![BindMount {
+                source: host_mount.clone(),
+                target: PathBuf::from("/home/audit-hard-link-run/shared"),
+                read_only: false,
+            }],
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "sleep-short".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            timeout: None,
+        },
+    )
+    .expect("session outcome should survive hard-link audit refusal");
+
+    helper.join().expect("hard-link helper should complete");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+
+    let operator_mode = fs::metadata(&operator_file)
+        .expect("operator file metadata should exist")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(operator_mode, 0o666);
+
+    let record_dir = fixture.only_session_record_dir();
+    let metadata: Value = serde_json::from_str(
+        &fs::read_to_string(record_dir.join("agentd/session.json"))
+            .expect("session metadata should persist"),
+    )
+    .expect("session metadata should be valid json");
+    assert!(
+        metadata.get("end_timestamp").is_none(),
+        "hard-link refusal must leave end_timestamp incomplete"
+    );
+    assert!(
+        metadata.get("outcome").is_none(),
+        "hard-link refusal must leave outcome incomplete"
+    );
+
+    let runa_mode = fs::metadata(record_dir.join("runa"))
+        .expect("runa dir metadata should exist")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(runa_mode, 0o777);
 
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();

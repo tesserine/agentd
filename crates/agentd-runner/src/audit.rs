@@ -3,7 +3,7 @@ use crate::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -87,6 +87,13 @@ pub(crate) fn finalize_session_audit_record(
     record: &SessionAuditRecord,
     completion: SessionAuditCompletion<'_>,
 ) -> Result<(), RunnerError> {
+    match preflight_validate_sealable_tree(&record.record_dir) {
+        Ok(()) => {}
+        Err(RunnerError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            validate_sealable_tree_with_podman_unshare(&record.record_dir)?;
+        }
+        Err(error) => return Err(error),
+    }
     let (outcome, exit_code) = match completion {
         SessionAuditCompletion::Outcome(outcome) => (Some(outcome.label()), outcome.exit_code()),
         SessionAuditCompletion::Error => (Some("error"), None),
@@ -140,6 +147,30 @@ fn seal_session_audit_record(record: &SessionAuditRecord) -> Result<(), RunnerEr
         }
         Err(error) => Err(error),
     }
+}
+
+fn preflight_validate_sealable_tree(path: &Path) -> Result<(), RunnerError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            preflight_validate_sealable_tree(&entry.path())?;
+        }
+        return Ok(());
+    }
+
+    if metadata.nlink() > 1 {
+        return Err(RunnerError::Io(std::io::Error::other(format!(
+            "refusing to seal multi-linked audit entry {}",
+            path.display()
+        ))));
+    }
+
+    Ok(())
 }
 
 fn seal_path_recursive(path: &Path) -> Result<(), RunnerError> {
@@ -196,6 +227,32 @@ fn seal_with_podman_unshare(path: &Path) -> Result<(), RunnerError> {
         "+".to_string(),
     ])
     .map(|_| ())
+}
+
+fn validate_sealable_tree_with_podman_unshare(path: &Path) -> Result<(), RunnerError> {
+    let output = run_podman_command(vec![
+        "unshare".to_string(),
+        "find".to_string(),
+        "-P".to_string(),
+        path.display().to_string(),
+        "!".to_string(),
+        "-type".to_string(),
+        "d".to_string(),
+        "!".to_string(),
+        "-type".to_string(),
+        "l".to_string(),
+        "-links".to_string(),
+        "+1".to_string(),
+        "-print".to_string(),
+    ])?;
+
+    if let Some(first_path) = output.lines().find(|line| !line.trim().is_empty()) {
+        return Err(RunnerError::Io(std::io::Error::other(format!(
+            "refusing to seal multi-linked audit entry {first_path}"
+        ))));
+    }
+
+    Ok(())
 }
 
 fn write_atomic(path: &Path, payload: &[u8]) -> Result<(), RunnerError> {
@@ -389,6 +446,63 @@ mod tests {
 
         make_tree_writable(&root);
         fs::remove_file(&outside_target).expect("outside target should be removed");
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_audit_record_refuses_hard_linked_entries_before_metadata_rewrite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_test_dir("agentd-audit-hard-link");
+        let outside_target = root.join("outside-target.txt");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "9999000011112222",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+
+        fs::write(&outside_target, "outside\n").expect("outside target should be writable");
+        fs::set_permissions(&outside_target, fs::Permissions::from_mode(0o666))
+            .expect("outside target mode should be writable");
+        fs::hard_link(&outside_target, record.runa_dir.join("escaped-hard-link"))
+            .expect("hard link should be created");
+
+        let error = super::finalize_session_audit_record(
+            &record,
+            SessionAuditCompletion::Outcome(&SessionOutcome::Success { exit_code: 0 }),
+        )
+        .expect_err("hard-linked audit entries should be rejected before sealing");
+        assert!(
+            matches!(error, crate::RunnerError::Io(_)),
+            "expected io error for unsafe hard-linked entry, got {error:?}"
+        );
+
+        let payload = fs::read_to_string(&record.metadata_path)
+            .expect("initial session metadata should remain readable");
+        let json: Value = serde_json::from_str(&payload).expect("metadata should be valid json");
+        assert!(
+            json.get("end_timestamp").is_none(),
+            "hard-link refusal must leave end_timestamp incomplete"
+        );
+        assert!(
+            json.get("outcome").is_none(),
+            "hard-link refusal must leave outcome incomplete"
+        );
+
+        let outside_mode = fs::metadata(&outside_target)
+            .expect("outside target metadata should exist")
+            .permissions()
+            .mode();
+        assert_eq!(outside_mode & 0o777, 0o666);
+
+        make_tree_writable(&root);
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
     }
 
