@@ -15,8 +15,24 @@ use agentd_runner::{
     BindMount, ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec,
     run_session,
 };
+use serde_json::Value;
 
 const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
+
+fn run_session_with_test_audit_root(
+    audit_root: &Path,
+    spec: SessionSpec,
+    invocation: SessionInvocation,
+) -> Result<SessionOutcome, agentd_runner::RunnerError> {
+    unsafe {
+        std::env::set_var("AGENTD_TEST_AUDIT_ROOT", audit_root);
+    }
+    let result = run_session(spec, invocation);
+    unsafe {
+        std::env::remove_var("AGENTD_TEST_AUDIT_ROOT");
+    }
+    result
+}
 
 #[test]
 fn succeeds_without_timeout_and_cleans_up_container() {
@@ -30,7 +46,8 @@ fn succeeds_without_timeout_and_cleans_up_container() {
     let fixture = SessionFixture::new("success-run");
     let image = fixture.build_image();
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "success-run".to_string(),
@@ -80,7 +97,8 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
     let fixture = SessionFixture::new("mixed-env-run");
     let image = fixture.build_image();
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "mixed-env-run".to_string(),
@@ -129,7 +147,8 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
     let fixture = SessionFixture::new("unset-work-unit-run");
     let image = fixture.build_image_with_agentd_work_unit("stale-from-image");
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "unset-work-unit-run".to_string(),
@@ -170,7 +189,8 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
     let fixture = SessionFixture::new("failure-run");
     let image = fixture.build_image();
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "failure-run".to_string(),
@@ -217,7 +237,8 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
     let fixture = SessionFixture::new("failure-run-125");
     let image = fixture.build_image();
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "failure-run-125".to_string(),
@@ -265,7 +286,8 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
     );
     let image = fixture.build_image();
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "comma-methodology-run".to_string(),
@@ -321,7 +343,8 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
     )
     .expect("read-only host sentinel file should be written");
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "readonly-mount-run".to_string(),
@@ -392,7 +415,8 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
             .expect("read-write host mount should permit container writes");
     }
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "readwrite-mount-run".to_string(),
@@ -469,7 +493,8 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
             .expect("nested host mount should permit container writes");
     }
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "nested-home-mount-run".to_string(),
@@ -517,7 +542,8 @@ fn preserves_session_user_access_to_preexisting_home_content() {
     let fixture = SessionFixture::new("preexisting-home-run");
     let image = fixture.build_image_with_preexisting_home_file();
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "preexisting-home-run".to_string(),
@@ -545,6 +571,161 @@ fn preserves_session_user_access_to_preexisting_home_content() {
 }
 
 #[test]
+fn preserves_host_audit_record_after_successful_session_teardown() {
+    if skip_if_podman_unavailable("preserves_host_audit_record_after_successful_session_teardown") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("audit-success-run");
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "audit-success-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-repo-audit-state".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: Some("issue-76".to_string()),
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+
+    let record_dir = fixture.only_session_record_dir();
+    assert_eq!(
+        fs::read_to_string(record_dir.join("runa/workspace/session-artifact.txt"))
+            .expect("workspace artifact should persist"),
+        "persisted through repo bridge\n"
+    );
+    assert_eq!(
+        fs::read_to_string(record_dir.join("runa/store/executions/0001.json"))
+            .expect("execution record should persist"),
+        "{\"protocols\":[\"begin\"],\"postconditions\":[\"passed\"]}\n"
+    );
+
+    let metadata: Value = serde_json::from_str(
+        &fs::read_to_string(record_dir.join("agentd/session.json"))
+            .expect("session metadata should persist"),
+    )
+    .expect("session metadata should be valid json");
+    assert_eq!(metadata["profile"], "audit-success-run");
+    assert_eq!(metadata["repo_url"], fixture.repo_url());
+    assert_eq!(metadata["work_unit"], "issue-76");
+    assert_eq!(metadata["outcome"], "success");
+    assert_eq!(metadata["exit_code"], 0);
+    assert!(metadata["start_timestamp"].is_string());
+    assert!(metadata["end_timestamp"].is_string());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let runa_mode = fs::metadata(record_dir.join("runa"))
+            .expect("runa dir metadata should exist")
+            .permissions()
+            .mode();
+        let metadata_mode = fs::metadata(record_dir.join("agentd/session.json"))
+            .expect("session metadata permissions should exist")
+            .permissions()
+            .mode();
+        assert_eq!(
+            runa_mode & 0o222,
+            0,
+            "completed runa dir should be read-only"
+        );
+        assert_eq!(
+            metadata_mode & 0o222,
+            0,
+            "completed metadata file should be read-only"
+        );
+    }
+
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn preserves_failing_audit_trail_for_post_mortem_reconstruction() {
+    if skip_if_podman_unavailable("preserves_failing_audit_trail_for_post_mortem_reconstruction") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("audit-failure-run");
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "audit-failure-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            mounts: Vec::new(),
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-failing-audit-trail".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: Some("issue-76".to_string()),
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::WorkFailed { exit_code: 5 });
+
+    let record_dir = fixture.only_session_record_dir();
+    let execution_record = fs::read_to_string(record_dir.join("runa/store/executions/0001.json"))
+        .expect("execution record should persist");
+    assert!(execution_record.contains("\"protocol\":\"begin\""));
+    assert!(execution_record.contains("\"protocol\":\"decompose\""));
+    assert!(execution_record.contains("\"postcondition\":\"passed\""));
+    assert!(execution_record.contains("\"postcondition\":\"failed\""));
+    assert!(execution_record.contains("\"artifact\":\"claim.md\""));
+    assert!(execution_record.contains("\"artifact\":\"plan.md\""));
+    assert_eq!(
+        fs::read_to_string(record_dir.join("runa/workspace/decompose/plan.md"))
+            .expect("workspace artifact should persist"),
+        "draft plan\n"
+    );
+
+    let metadata: Value = serde_json::from_str(
+        &fs::read_to_string(record_dir.join("agentd/session.json"))
+            .expect("session metadata should persist"),
+    )
+    .expect("session metadata should be valid json");
+    assert_eq!(metadata["outcome"], "work_failed");
+    assert_eq!(metadata["exit_code"], 5);
+    assert!(metadata["end_timestamp"].is_string());
+
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
 fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
     if skip_if_podman_unavailable("times_out_when_a_timeout_is_provided_and_cleans_up_container") {
         return;
@@ -556,7 +737,8 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
     let fixture = SessionFixture::new("timeout-run");
     let image = fixture.build_image();
 
-    let outcome = run_session(
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
             profile_name: "timeout-run".to_string(),
@@ -600,11 +782,13 @@ fn releases_session_secret_after_container_reaches_running_state() {
 
     let fixture = SessionFixture::new("running-secret-run");
     let image = fixture.build_image();
+    let audit_root = fixture.audit_root();
     let methodology_dir = fixture.methodology_dir();
     let repo_url = fixture.repo_url();
 
     let session = thread::spawn(move || {
-        run_session(
+        run_session_with_test_audit_root(
+            &audit_root,
             SessionSpec {
                 daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
                 profile_name: "running-secret-run".to_string(),
@@ -687,6 +871,30 @@ impl SessionFixture {
 
     fn methodology_dir(&self) -> PathBuf {
         self.root.join("methodology")
+    }
+
+    fn audit_root(&self) -> PathBuf {
+        self.root.join("audit-root")
+    }
+
+    fn only_session_record_dir(&self) -> PathBuf {
+        let profile_root = self.audit_root().join(&self.profile_name);
+        let entries = fs::read_dir(&profile_root)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", profile_root.display()))
+            .map(|entry| {
+                entry
+                    .expect("session record entry should be readable")
+                    .path()
+            })
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one session record under {}",
+            profile_root.display()
+        );
+        entries[0].clone()
     }
 
     fn repo_url(&self) -> String {
@@ -1185,6 +1393,25 @@ case "$command_name" in
             printf 'session write succeeded\n' > "${HOME}/.preexisting"
             [ "$(cat "${HOME}/.preexisting")" = "session write succeeded" ]
             exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-repo-audit-state" ]; then
+            [ -L "${HOME}/repo/.runa" ]
+            [ "$(readlink "${HOME}/repo/.runa")" = "${HOME}/.agentd/audit/runa" ]
+            mkdir -p "${HOME}/repo/.runa/workspace" "${HOME}/repo/.runa/store/executions"
+            printf 'persisted through repo bridge\n' > "${HOME}/repo/.runa/workspace/session-artifact.txt"
+            printf '{"protocols":["begin"],"postconditions":["passed"]}\n' > "${HOME}/repo/.runa/store/executions/0001.json"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-failing-audit-trail" ]; then
+            [ -L "${HOME}/repo/.runa" ]
+            mkdir -p "${HOME}/repo/.runa/workspace/decompose" "${HOME}/repo/.runa/store/executions"
+            printf 'draft plan\n' > "${HOME}/repo/.runa/workspace/decompose/plan.md"
+            cat > "${HOME}/repo/.runa/store/executions/0001.json" <<'EOF'
+{"events":[{"protocol":"begin","artifact":"claim.md","postcondition":"passed"},{"protocol":"decompose","artifact":"plan.md","postcondition":"failed"}]}
+EOF
+            exit 5
         fi
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "fail" ]; then

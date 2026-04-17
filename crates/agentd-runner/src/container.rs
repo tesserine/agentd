@@ -11,7 +11,10 @@
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::podman::{run_podman_command, run_podman_command_until};
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
-use crate::session_paths::{session_home_dir, session_repo_dir};
+use crate::session_paths::{
+    session_home_dir, session_internal_audit_dir, session_internal_audit_runa_dir,
+    session_repo_dir, session_repo_runa_dir,
+};
 use crate::types::{BindMount, RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
 use std::collections::VecDeque;
@@ -147,18 +150,27 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     let username = &spec.profile_name;
     let home_dir_path = session_home_dir(username);
     let home_dir = home_dir_path.display().to_string();
+    let internal_audit_dir_path = session_internal_audit_dir(username);
+    let internal_audit_dir = internal_audit_dir_path.display().to_string();
+    let internal_audit_runa_dir_path = session_internal_audit_runa_dir(username);
+    let internal_audit_runa_dir = internal_audit_runa_dir_path.display().to_string();
     let repo_dir_path = session_repo_dir(username);
     let repo_dir = repo_dir_path.display().to_string();
+    let repo_runa_dir = session_repo_runa_dir(username).display().to_string();
     let user_group = format!("{username}:{username}");
     let mut script = String::from("set -eu\nuseradd --create-home --home-dir ");
     script.push_str(&shell_quote(&home_dir));
     script.push_str(" --shell /bin/sh --user-group ");
     script.push_str(&shell_quote(username));
     script.push('\n');
+    script.push_str("mkdir -p ");
+    script.push_str(&shell_quote(&internal_audit_dir));
+    script.push('\n');
     script.push_str(&build_home_ownership_command(
         &home_dir_path,
         &repo_dir_path,
         &spec.mounts,
+        &internal_audit_runa_dir_path,
         &user_group,
     ));
     script.push_str("\nrm -rf ");
@@ -171,6 +183,19 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script.push_str(&shell_quote(&user_group));
     script.push(' ');
     script.push_str(&shell_quote(&repo_dir));
+    script.push_str("\nif [ -e ");
+    script.push_str(&shell_quote(&repo_runa_dir));
+    script.push_str(" ] || [ -L ");
+    script.push_str(&shell_quote(&repo_runa_dir));
+    script.push_str(" ]; then\n");
+    script.push_str("echo ");
+    script.push_str(&shell_quote(
+        "repo root .runa is reserved by agentd for persistent audit state",
+    ));
+    script.push_str(" >&2\nexit 6\nfi\nln -s ");
+    script.push_str(&shell_quote(&internal_audit_runa_dir));
+    script.push(' ');
+    script.push_str(&shell_quote(&repo_runa_dir));
     script.push_str("\nexport HOME=");
     script.push_str(&shell_quote(&home_dir));
     if let Some(work_unit) = &invocation.work_unit {
@@ -191,12 +216,14 @@ fn build_home_ownership_command(
     home_dir: &Path,
     repo_dir: &Path,
     mounts: &[BindMount],
+    internal_audit_runa_dir: &Path,
     user_group: &str,
 ) -> String {
     let mut prune_targets = mounts
         .iter()
         .filter_map(|mount| home_descendant_mount_target(home_dir, &mount.target))
         .collect::<Vec<_>>();
+    prune_targets.push(internal_audit_runa_dir.display().to_string());
     prune_targets.push(repo_dir.display().to_string());
 
     let mut command = String::from("find ");
@@ -278,14 +305,26 @@ fn build_create_container_args(
         ),
     ];
 
+    args.push("--mount".to_string());
+    args.push(format!(
+        "type=bind,src={},target={},ro={},relabel=shared",
+        resources.audit_mount.source.display(),
+        resources.audit_mount.target.display(),
+        resources.audit_mount.read_only
+    ));
+
     for mount in &resources.additional_mounts {
         args.push("--mount".to_string());
-        args.push(format!(
+        let mut mount_value = format!(
             "type=bind,src={},target={},ro={}",
             mount.source.display(),
             mount.target.display(),
             mount.read_only
-        ));
+        );
+        if mount.relabel_shared {
+            mount_value.push_str(",relabel=shared");
+        }
+        args.push(mount_value);
     }
 
     let mut secret_bindings = resources.environment_secret_bindings.iter();

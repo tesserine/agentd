@@ -32,7 +32,8 @@ Profiles may now declare a default repository and an optional cron schedule.
 Manual runs still flow through `agentd run`, and scheduled runs dispatch
 through the same daemon socket intake without introducing a separate job type.
 Profiles may also declare additional bind mounts for host-managed state such as
-subscription auth directories or persistent audit storage.
+subscription auth directories. Independently of profile mounts, agentd now
+persists each session's audit record under `/var/lib/tesserine/audit/`.
 
 ## Configuration
 
@@ -129,7 +130,8 @@ environment — export them before starting the daemon. Additional `mounts`
 entries are bind mounts: `source` must be an absolute existing host path,
 `target` must be an absolute container path, targets must be unique within the
 profile, and runner-managed targets are reserved: `/agentd/methodology`,
-`/home/{profile}`, and `/home/{profile}/repo` plus its descendants. Other
+`/home/{profile}`, `/home/{profile}/.agentd`, and `/home/{profile}/repo` plus
+their descendants. Other
 targets under `/home/{profile}` remain supported, including read-only auth
 mounts such as `/home/site-builder/.claude`. Additional mounts are not
 relabelled; on SELinux-enabled hosts, operators must ensure each host path
@@ -178,14 +180,16 @@ the container, the agent sees:
 
 - An unprivileged user with `$HOME` at `/home/site-builder`
 - A fresh clone of the repository at `/home/site-builder/repo`
+- Repo-root `.runa` bridged to persistent audit storage
 - Read-only methodology mount at `/agentd/methodology`
 - Any operator-declared additional bind mounts, read-only or read-write per profile
 - Credentials injected as environment variables
 - `AGENTD_WORK_UNIT` when the invocation includes one
 - The configured session command executing from the repo directory
 
-The container is force-removed on completion. No session state persists on the
-host.
+The container is force-removed on completion. The session's audit record
+persists on the host under `/var/lib/tesserine/audit/<profile>/<session_id>/`,
+with runa state in `runa/` and agentd metadata in `agentd/session.json`.
 
 ## Scheduled Runs
 

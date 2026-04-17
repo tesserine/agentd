@@ -9,6 +9,7 @@ license.workspace = true
 getrandom = "0.4.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+time = { version = "0.3.44", features = ["formatting"] }
 tracing = "0.1.41"
 
 [dev-dependencies]

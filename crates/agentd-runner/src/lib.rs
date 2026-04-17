@@ -11,6 +11,7 @@
 //! See `ARCHITECTURE.md` section "Session Lifecycle" for the design-level
 //! treatment of these phases.
 
+mod audit;
 mod container;
 mod lifecycle;
 mod naming;
@@ -35,6 +36,7 @@ pub use validation::{
     validate_profile_name, validate_repo_url,
 };
 
+use audit::{SessionAuditCompletion, finalize_session_audit_record, prepare_session_audit_record};
 use container::{create_container, run_container_to_completion, run_container_with_timeout};
 use lifecycle::{
     LifecycleFailureKind, log_lifecycle_failure, log_session_error, log_session_outcome,
@@ -77,29 +79,65 @@ pub fn run_session(
         invocation.timeout,
     );
 
-    let resources =
-        match prepare_session_resources(&container_name, &spec, &invocation, &session_id) {
-            Ok(resources) => resources,
-            Err(error) => {
-                log_session_error(
-                    &session_id,
+    let audit_record = match prepare_session_audit_record(&session_id, &spec, &invocation) {
+        Ok(record) => record,
+        Err(error) => {
+            log_session_error(
+                &session_id,
+                &container_name,
+                "session_audit_allocation",
+                &error,
+            );
+            tracing::info!(
+                event = "runner.session_teardown",
+                session_id = session_id,
+                container_name = container_name,
+                result = "skipped",
+                "runner session teardown skipped"
+            );
+            return Err(error);
+        }
+    };
+
+    let resources = match prepare_session_resources(
+        &container_name,
+        &spec,
+        &invocation,
+        &session_id,
+        audit_record.clone(),
+    ) {
+        Ok(resources) => resources,
+        Err(error) => {
+            let audit_result =
+                finalize_session_audit_record(&audit_record, SessionAuditCompletion::Error);
+            if let Err(audit_error) = &audit_result {
+                log_lifecycle_failure(
+                    LifecycleFailureKind::Cleanup,
+                    "session audit finalization",
                     &container_name,
-                    "session_resource_allocation",
-                    &error,
+                    &session_id,
+                    audit_error,
                 );
-                tracing::info!(
-                    event = "runner.session_teardown",
-                    session_id = session_id,
-                    container_name = container_name,
-                    result = "skipped",
-                    "runner session teardown skipped"
-                );
-                return Err(error);
             }
-        };
+            log_session_error(
+                &session_id,
+                &container_name,
+                "session_resource_allocation",
+                &error,
+            );
+            log_session_teardown(
+                &session_id,
+                &container_name,
+                audit_result.as_ref().map(|_| ()),
+            );
+            return Err(error);
+        }
+    };
 
     if let Err(error) = create_container(&resources, &spec, &invocation) {
         let cleanup_result = cleanup_session_resources(&resources);
+        let audit_result =
+            finalize_session_audit_record(&resources.audit_record, SessionAuditCompletion::Error);
         if let Err(cleanup_error) = &cleanup_result {
             log_lifecycle_failure(
                 LifecycleFailureKind::Cleanup,
@@ -107,6 +145,15 @@ pub fn run_session(
                 &resources.container_name,
                 &session_id,
                 cleanup_error,
+            );
+        }
+        if let Err(audit_error) = &audit_result {
+            log_lifecycle_failure(
+                LifecycleFailureKind::Cleanup,
+                "session audit finalization",
+                &resources.container_name,
+                &session_id,
+                audit_error,
             );
         }
         log_session_error(
@@ -118,7 +165,9 @@ pub fn run_session(
         log_session_teardown(
             &session_id,
             &resources.container_name,
-            cleanup_result.as_ref().map(|_| ()),
+            combined_teardown_result(cleanup_result, audit_result)
+                .as_ref()
+                .map(|_| ()),
         );
         return Err(error);
     }
@@ -147,13 +196,30 @@ pub fn run_session(
     }
 
     let cleanup_result = cleanup_session_resources(&resources);
+    let audit_result = finalize_session_audit_record(
+        &resources.audit_record,
+        match &start_result {
+            Ok(outcome) => SessionAuditCompletion::Outcome(outcome),
+            Err(_) => SessionAuditCompletion::Error,
+        },
+    );
+    if let Err(audit_error) = &audit_result {
+        log_lifecycle_failure(
+            LifecycleFailureKind::Cleanup,
+            "session audit finalization",
+            &resources.container_name,
+            &session_id,
+            audit_error,
+        );
+    }
+    let teardown_result = combined_teardown_result(cleanup_result, audit_result);
     log_session_teardown(
         &session_id,
         &resources.container_name,
-        cleanup_result.as_ref().map(|_| ()),
+        teardown_result.as_ref().map(|_| ()),
     );
 
-    match (start_result, cleanup_result) {
+    match (start_result, teardown_result) {
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
@@ -179,6 +245,17 @@ fn cleanup_session_resources(resources: &SessionResources) -> Result<(), RunnerE
     container_result?;
     secret_result?;
     staging_result
+}
+
+fn combined_teardown_result(
+    cleanup_result: Result<(), RunnerError>,
+    audit_result: Result<(), RunnerError>,
+) -> Result<(), RunnerError> {
+    match (cleanup_result, audit_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(_)) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -228,28 +305,34 @@ mod tests {
 
     #[test]
     fn run_session_emits_teardown_after_resource_allocation_failure() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
         let methodology_dir = unique_temp_dir("runner-missing-manifest");
         fs::create_dir_all(&methodology_dir).expect("methodology directory should be created");
 
-        let events = capture_tracing_events(|| {
-            let error = run_session(
-                SessionSpec {
-                    methodology_dir: methodology_dir.clone(),
-                    ..test_session_spec()
-                },
-                SessionInvocation {
-                    repo_url: "https://example.com/agentd.git".to_string(),
-                    repo_token: None,
-                    work_unit: None,
-                    timeout: None,
-                },
-            )
-            .expect_err("session should fail during resource allocation");
+        let events = fixture.run_with_fake_podman_env(|| {
+            capture_tracing_events(|| {
+                let error = run_session(
+                    SessionSpec {
+                        methodology_dir: methodology_dir.clone(),
+                        ..test_session_spec()
+                    },
+                    SessionInvocation {
+                        repo_url: "https://example.com/agentd.git".to_string(),
+                        repo_token: None,
+                        work_unit: None,
+                        timeout: None,
+                    },
+                )
+                .expect_err("session should fail during resource allocation");
 
-            assert!(
-                matches!(error, RunnerError::MissingMethodologyManifest { .. }),
-                "expected missing manifest error, got {error:?}"
-            );
+                assert!(
+                    matches!(error, RunnerError::MissingMethodologyManifest { .. }),
+                    "expected missing manifest error, got {error:?}"
+                );
+            })
         });
 
         fs::remove_dir_all(&methodology_dir)
@@ -260,7 +343,7 @@ mod tests {
         assert_eq!(events[1]["fields"]["event"], "runner.session_error");
         assert_eq!(events[1]["fields"]["stage"], "session_resource_allocation");
         assert_eq!(events[2]["fields"]["event"], "runner.session_teardown");
-        assert_eq!(events[2]["fields"]["result"], "skipped");
+        assert_eq!(events[2]["fields"]["result"], "ok");
     }
 
     #[test]
@@ -330,7 +413,7 @@ mod tests {
         assert_eq!(events[2]["fields"]["event"], "runner.session_error");
         assert_eq!(events[2]["fields"]["stage"], "session_resource_allocation");
         assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
-        assert_eq!(events[3]["fields"]["result"], "skipped");
+        assert_eq!(events[3]["fields"]["result"], "ok");
     }
 
     #[test]

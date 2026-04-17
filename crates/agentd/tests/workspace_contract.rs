@@ -120,3 +120,38 @@ fn workspace_docs_declare_same_build_socket_policy() {
         "architecture should declare the same-build daemon/CLI requirement"
     );
 }
+
+#[test]
+fn workspace_docs_describe_persistent_audit_record_contract() {
+    let readme = read_workspace_file("README.md");
+    let architecture = read_workspace_file("ARCHITECTURE.md");
+
+    assert!(
+        readme.contains("/var/lib/tesserine/audit"),
+        "README should describe the persistent audit record root"
+    );
+    assert!(
+        architecture.contains("/var/lib/tesserine/audit"),
+        "architecture should describe the persistent audit record root"
+    );
+    assert!(
+        architecture.contains("artifacts_dir"),
+        "architecture should document the artifacts_dir audit scope boundary"
+    );
+    assert!(
+        architecture.contains("accumulate") && architecture.contains("indefinitely"),
+        "architecture should document the lack of retention policy"
+    );
+    assert!(
+        architecture.contains("single-tenant"),
+        "architecture should document the host security assumption"
+    );
+    assert!(
+        architecture.contains("incomplete"),
+        "architecture should explain incomplete session records"
+    );
+    assert!(
+        architecture.contains("must not contain a `.runa` entry"),
+        "architecture should describe the repo-root .runa contract"
+    );
+}

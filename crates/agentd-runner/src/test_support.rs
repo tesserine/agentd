@@ -491,6 +491,7 @@ impl FakePodmanFixture {
         unsafe {
             env::set_var("PATH", &fake_path);
             env::set_var("AGENTD_FAKE_PODMAN_LOG_DIR", &self.log_dir);
+            env::set_var("AGENTD_TEST_AUDIT_ROOT", self.root.join("audit-root"));
         }
 
         let result = run();
@@ -498,6 +499,7 @@ impl FakePodmanFixture {
         unsafe {
             env::set_var("PATH", original_path);
             env::remove_var("AGENTD_FAKE_PODMAN_LOG_DIR");
+            env::remove_var("AGENTD_TEST_AUDIT_ROOT");
         }
 
         result
