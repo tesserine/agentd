@@ -70,6 +70,16 @@ impl ResourceAllocationFailure {
             rollback_result: Ok(()),
         }
     }
+
+    fn with_rollback_result(
+        allocation_error: RunnerError,
+        rollback_result: Result<(), RunnerError>,
+    ) -> Self {
+        Self {
+            allocation_error,
+            rollback_result,
+        }
+    }
 }
 
 pub(crate) fn unique_suffix() -> Result<String, RunnerError> {
@@ -97,16 +107,24 @@ pub(crate) fn prepare_session_resources(
     let audit_mount = match create_audit_mount(&audit_record, spec, &methodology_staging_dir) {
         Ok(mount) => mount,
         Err(error) => {
-            let _ = fs::remove_dir_all(&methodology_staging_dir);
-            return Err(ResourceAllocationFailure::without_rollback_failure(error));
+            return Err(rollback_failed_staging_dir_allocation(
+                container_name,
+                session_id,
+                &methodology_staging_dir,
+                error,
+            ));
         }
     };
     let methodology_mount_source = methodology_staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
     let additional_mounts = match create_additional_mounts(&spec.mounts, &methodology_staging_dir) {
         Ok(mounts) => mounts,
         Err(error) => {
-            let _ = fs::remove_dir_all(&methodology_staging_dir);
-            return Err(ResourceAllocationFailure::without_rollback_failure(error));
+            return Err(rollback_failed_staging_dir_allocation(
+                container_name,
+                session_id,
+                &methodology_staging_dir,
+                error,
+            ));
         }
     };
     let mut resources = SessionResources {
@@ -187,10 +205,27 @@ fn rollback_failed_resource_allocation(
         rollback_error.get_or_insert(cleanup_error);
     }
 
-    ResourceAllocationFailure {
-        allocation_error: error,
-        rollback_result: rollback_error.map_or(Ok(()), Err),
+    ResourceAllocationFailure::with_rollback_result(error, rollback_error.map_or(Ok(()), Err))
+}
+
+fn rollback_failed_staging_dir_allocation(
+    container_name: &str,
+    session_id: &str,
+    staging_dir: &Path,
+    error: RunnerError,
+) -> ResourceAllocationFailure {
+    let rollback_result = cleanup_methodology_staging_dir(staging_dir);
+    if let Err(cleanup_error) = &rollback_result {
+        log_lifecycle_failure(
+            LifecycleFailureKind::Cleanup,
+            "session resource allocation",
+            container_name,
+            session_id,
+            cleanup_error,
+        );
     }
+
+    ResourceAllocationFailure::with_rollback_result(error, rollback_result)
 }
 
 pub(crate) fn cleanup_podman_secrets(secret_bindings: &[SecretBinding]) -> Result<(), RunnerError> {
@@ -356,13 +391,18 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_session_resources, unique_suffix_with};
+    use super::{
+        prepare_session_resources, rollback_failed_staging_dir_allocation, unique_suffix_with,
+    };
     use crate::audit::SessionAuditRecord;
     use crate::test_support::{
         CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
         capture_tracing_events, fake_podman_lock, test_session_spec,
     };
     use crate::{BindMount, ResolvedEnvironmentVariable, RunnerError, SessionInvocation};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     fn test_audit_record(session_id: &str) -> SessionAuditRecord {
@@ -389,6 +429,17 @@ mod tests {
         }
     }
 
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after the unix epoch")
+                .as_nanos()
+        ))
+    }
+
     #[test]
     fn unique_suffix_with_encodes_eight_random_bytes_as_sixteen_lower_hex_characters() {
         let suffix = unique_suffix_with(|bytes| {
@@ -405,6 +456,90 @@ mod tests {
                 .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
             "session suffix should be lowercase hex: {suffix}"
         );
+    }
+
+    #[test]
+    fn rollback_failed_staging_dir_allocation_returns_ok_rollback_when_cleanup_succeeds() {
+        let root = unique_test_dir("agentd-staging-rollback-ok");
+        let staging_dir = root.join("staging");
+        fs::create_dir_all(&staging_dir).expect("staging dir should be created");
+        fs::write(staging_dir.join("mounted"), "test\n").expect("staging child should be created");
+
+        let failure = rollback_failed_staging_dir_allocation(
+            "agentd-agent-session",
+            "session-ok",
+            &staging_dir,
+            RunnerError::MissingMountSource {
+                path: PathBuf::from("/missing"),
+            },
+        );
+
+        assert!(
+            matches!(
+                failure.allocation_error,
+                RunnerError::MissingMountSource { ref path } if path == &PathBuf::from("/missing")
+            ),
+            "original allocation error should be preserved: {:?}",
+            failure.allocation_error
+        );
+        assert!(
+            failure.rollback_result.is_ok(),
+            "successful rollback should report Ok(()): {:?}",
+            failure.rollback_result
+        );
+        assert!(
+            !staging_dir.exists(),
+            "successful rollback should remove the staging dir"
+        );
+
+        fs::remove_dir_all(&root).expect("temporary rollback root should be removed");
+    }
+
+    #[test]
+    fn rollback_failed_staging_dir_allocation_returns_cleanup_error_and_logs_failure() {
+        let root = unique_test_dir("agentd-staging-rollback-error");
+        let staging_dir = root.join("staging");
+        fs::create_dir_all(&staging_dir).expect("staging dir should be created");
+        fs::write(staging_dir.join("mounted"), "test\n").expect("staging child should be created");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555))
+            .expect("rollback parent should become read-only");
+
+        let failure = RefCell::new(None);
+        let events = capture_tracing_events(|| {
+            failure.replace(Some(rollback_failed_staging_dir_allocation(
+                "agentd-agent-session",
+                "session-error",
+                &staging_dir,
+                RunnerError::MissingMountSource {
+                    path: PathBuf::from("/missing"),
+                },
+            )));
+        });
+
+        let failure = failure
+            .into_inner()
+            .expect("staging rollback failure should be captured");
+        assert!(
+            matches!(
+                failure.allocation_error,
+                RunnerError::MissingMountSource { ref path } if path == &PathBuf::from("/missing")
+            ),
+            "original allocation error should be preserved: {:?}",
+            failure.allocation_error
+        );
+        match failure.rollback_result {
+            Err(RunnerError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected permission denied rollback failure, got {other:?}"),
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["fields"]["event"], "runner.lifecycle_failure");
+        assert_eq!(events[0]["fields"]["stage"], "session resource allocation");
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+            .expect("rollback parent should become writable for cleanup");
+        fs::remove_dir_all(&root).expect("temporary rollback root should be removed");
     }
 
     #[test]

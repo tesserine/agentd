@@ -67,22 +67,25 @@ fn prepare_session_audit_record_at(
 
     fs::create_dir_all(&runa_dir)?;
     fs::create_dir_all(&agentd_dir)?;
-    set_active_runa_permissions(&runa_dir)?;
 
-    let start_timestamp = current_timestamp()?;
-    let record = SessionAuditRecord {
-        record_dir,
-        runa_dir,
-        metadata_path,
-        session_id: session_id.to_string(),
-        profile: spec.profile_name.clone(),
-        repo_url: invocation.repo_url.clone(),
-        work_unit: invocation.work_unit.clone(),
-        start_timestamp,
-    };
+    rollback_record_dir_on_error(&record_dir, || {
+        set_active_runa_permissions(&runa_dir)?;
 
-    write_session_audit_metadata(&record, None, None, None)?;
-    Ok(record)
+        let start_timestamp = current_timestamp()?;
+        let record = SessionAuditRecord {
+            record_dir: record_dir.clone(),
+            runa_dir: runa_dir.clone(),
+            metadata_path: metadata_path.clone(),
+            session_id: session_id.to_string(),
+            profile: spec.profile_name.clone(),
+            repo_url: invocation.repo_url.clone(),
+            work_unit: invocation.work_unit.clone(),
+            start_timestamp,
+        };
+
+        write_session_audit_metadata(&record, None, None, None)?;
+        Ok(record)
+    })
 }
 
 pub(crate) fn finalize_session_audit_record(
@@ -159,6 +162,19 @@ fn current_timestamp() -> Result<String, RunnerError> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| RunnerError::Io(std::io::Error::other(error)))
+}
+
+fn rollback_record_dir_on_error<T, F>(record_dir: &Path, init: F) -> Result<T, RunnerError>
+where
+    F: FnOnce() -> Result<T, RunnerError>,
+{
+    match init() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let _ = fs::remove_dir_all(record_dir);
+            Err(error)
+        }
+    }
 }
 
 fn set_active_runa_permissions(path: &Path) -> Result<(), RunnerError> {
@@ -354,9 +370,12 @@ fn sync_parent_dir(path: &Path) -> Result<(), RunnerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionAuditCompletion, current_timestamp, prepare_session_audit_record_at};
+    use super::{
+        SessionAuditCompletion, current_timestamp, prepare_session_audit_record_at,
+        rollback_record_dir_on_error,
+    };
     use crate::test_support::test_session_spec;
-    use crate::{SessionInvocation, SessionOutcome};
+    use crate::{RunnerError, SessionInvocation, SessionOutcome};
     use serde_json::Value;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -421,6 +440,119 @@ mod tests {
         assert!(json.get("exit_code").is_none());
 
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn rollback_record_dir_on_error_returns_value_without_removing_record_dir_when_init_succeeds() {
+        let root = unique_test_dir("agentd-audit-rollback-ok");
+        let record_dir = root.join("record");
+        fs::create_dir_all(&record_dir).expect("record dir should be created");
+
+        let value = rollback_record_dir_on_error(&record_dir, || Ok::<_, RunnerError>(42))
+            .expect("rollback wrapper should return success values");
+
+        assert_eq!(value, 42);
+        assert!(
+            record_dir.exists(),
+            "successful initialization should keep the record dir"
+        );
+
+        fs::remove_dir_all(&root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn rollback_record_dir_on_error_removes_record_dir_and_returns_original_error() {
+        let root = unique_test_dir("agentd-audit-rollback-error");
+        let record_dir = root.join("record");
+        fs::create_dir_all(&record_dir).expect("record dir should be created");
+        fs::write(record_dir.join("partial"), "stale\n").expect("partial state should be created");
+
+        let error = rollback_record_dir_on_error(&record_dir, || {
+            Err::<(), _>(RunnerError::Io(std::io::Error::other(
+                "initial metadata write failed",
+            )))
+        })
+        .expect_err("rollback wrapper should return the original initialization error");
+
+        match error {
+            RunnerError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                assert_eq!(error.to_string(), "initial metadata write failed");
+            }
+            other => panic!("expected original io error, got {other:?}"),
+        }
+        assert!(
+            !record_dir.exists(),
+            "failed initialization should remove the record dir"
+        );
+
+        fs::remove_dir_all(&root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn rollback_record_dir_on_error_ignores_cleanup_failure_and_returns_original_error() {
+        let root = unique_test_dir("agentd-audit-rollback-best-effort");
+        let record_dir = root.join("record");
+        fs::create_dir_all(&record_dir).expect("record dir should be created");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555))
+            .expect("record dir parent should become read-only");
+
+        let error = rollback_record_dir_on_error(&record_dir, || {
+            Err::<(), _>(RunnerError::Io(std::io::Error::other(
+                "initial metadata write failed",
+            )))
+        })
+        .expect_err("rollback wrapper should return the original initialization error");
+
+        match error {
+            RunnerError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                assert_eq!(error.to_string(), "initial metadata write failed");
+            }
+            other => panic!("expected original io error, got {other:?}"),
+        }
+        assert!(
+            record_dir.exists(),
+            "best-effort rollback should not replace the original error when cleanup fails"
+        );
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+            .expect("record dir parent should become writable for cleanup");
+        fs::remove_dir_all(&root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn prepare_session_audit_record_removes_record_dir_when_initial_metadata_write_fails() {
+        let root = unique_test_dir("agentd-audit-initial-write-failure");
+        let record_dir = root.join("site-builder").join("write-failure");
+        fs::create_dir_all(record_dir.join("agentd/session.json"))
+            .expect("conflicting metadata path directory should be created");
+
+        let error = prepare_session_audit_record_at(
+            &root,
+            "write-failure",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                timeout: None,
+            },
+        )
+        .expect_err("initial metadata write should fail when session.json is a directory");
+
+        assert!(
+            matches!(error, RunnerError::Io(_)),
+            "expected metadata write failure, got {error:?}"
+        );
+        assert!(
+            !record_dir.exists(),
+            "metadata write failure should remove the partially-created record dir"
+        );
+
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("temporary audit root should be removed");
+        }
     }
 
     #[test]
