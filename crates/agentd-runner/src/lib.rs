@@ -351,6 +351,61 @@ mod tests {
     }
 
     #[test]
+    fn run_session_emits_a_durability_warning_without_reporting_audit_finalization_failure() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(&FakePodmanScenario::new());
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let audit_root = unique_temp_dir("runner-audit-post-rename-sync-warning");
+        fs::create_dir_all(&audit_root).expect("audit root should be created");
+
+        let events = capture_tracing_events(|| {
+            let outcome = audit::with_sync_parent_dir_failure_on_call_for_tests(2, || {
+                fixture.run_with_fake_podman(SessionSpec {
+                    audit_root: audit_root.clone(),
+                    methodology_dir,
+                    ..test_session_spec()
+                })
+            });
+
+            assert_eq!(
+                outcome.expect("session should succeed despite durability warning"),
+                SessionOutcome::Success { exit_code: 0 }
+            );
+        });
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0]["fields"]["event"], "runner.session_started");
+        assert_eq!(events[1]["fields"]["event"], "runner.session_outcome");
+        assert_eq!(events[1]["fields"]["outcome"], "success");
+        assert_eq!(events[2]["fields"]["event"], "runner.audit_warning");
+        assert_eq!(
+            events[2]["fields"]["warning_kind"],
+            "post_rename_parent_sync"
+        );
+        assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
+        assert_eq!(events[3]["fields"]["result"], "ok");
+        assert!(
+            events
+                .iter()
+                .all(|event| event["fields"]["event"] != "runner.lifecycle_failure"),
+            "post-rename parent sync failures must not be reported as lifecycle failures"
+        );
+
+        let record_dir = only_session_record_dir(&audit_root, "site-builder");
+        let metadata = read_session_metadata(&record_dir);
+        assert!(
+            metadata["end_timestamp"].is_string(),
+            "durability warnings must still leave finalized metadata on disk"
+        );
+        assert_eq!(metadata["outcome"], "success");
+
+        fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
     fn run_session_emits_teardown_after_resource_allocation_failure() {
         let _guard = fake_podman_lock()
             .lock()
