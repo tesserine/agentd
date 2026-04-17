@@ -141,17 +141,20 @@ The runner drops privileges with `gosu` and launches the profile's configured se
 When the session ends or times out, the runner first force-removes the
 container. Only after cleanup succeeds does it finalize `agentd/session.json`
 with end timestamp and outcome through an atomic same-directory temp-file
-rename and seal the session record read-only on the host. The ephemeral
-container workspace still disappears, but the host audit record remains at
+rename. Before that publish step it seals persisted non-metadata audit entries
+read-only on the host, then publishes a read-only `session.json` as the final
+commit point. Ancestor directories remain writable because the atomic replace
+requires a writable parent directory. The ephemeral container workspace still
+disappears, but the host audit record remains at
 `{audit_root}/{profile}/{session_id}/`.
 
 If agentd is interrupted after writing start metadata but before finalization,
 if teardown cleanup fails before finalization can begin, or if audit
 finalization attempts closeout and fails, the session record remains
 **incomplete**: `agentd/session.json` has `start_timestamp` but no
-`end_timestamp` or `outcome`, and `runa/` stays unsealed. The filesystem alone
-does not distinguish "cleanup never completed" from "finalization attempted
-and failed." Operators should use tracing to disambiguate when it matters:
+`end_timestamp` or `outcome`. The filesystem alone does not distinguish
+"cleanup never completed" from "finalization attempted and failed." Operators
+should use tracing to disambiguate when it matters:
 `runner.lifecycle_failure` reports the failing stage (`"session resource allocation"`,
 `"container creation"`, `"session execution"`, or `"session audit finalization"`),
 while `runner.session_outcome`, `runner.session_error`, and

@@ -768,6 +768,121 @@ mod tests {
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 
+    #[test]
+    fn run_session_leaves_metadata_incomplete_when_podman_unshare_sealing_fails_after_preflight() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_start(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .touch_file("start-blocked")
+                        .wait_for_file(
+                            "release-start",
+                            Duration::from_secs(5),
+                            "timed out waiting to release start",
+                            91,
+                        ),
+                ))
+                .with_unshare(CommandBehavior::sequence(vec![
+                    CommandOutcome::new(),
+                    CommandOutcome::new(),
+                    CommandOutcome::new()
+                        .stderr("podman unshare file chmod failed")
+                        .exit_code(61),
+                ])),
+        );
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let audit_root = unique_temp_dir("runner-audit-unshare-finalization-failure");
+        fs::create_dir_all(&audit_root).expect("audit root should be created");
+        let helper_audit_root = audit_root.clone();
+
+        let events = fixture.run_with_fake_podman_env(|| {
+            let log_dir = PathBuf::from(
+                std::env::var("AGENTD_FAKE_PODMAN_LOG_DIR")
+                    .expect("fake podman log dir should be configured"),
+            );
+            let helper = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline && !log_dir.join("start-blocked").exists() {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                assert!(
+                    log_dir.join("start-blocked").exists(),
+                    "fake podman start should block before audit finalization"
+                );
+
+                let record_dir =
+                    wait_for_only_session_record_dir(&helper_audit_root, "site-builder", deadline);
+                let sealed_by_unshare_dir = record_dir.join("runa/unshare-private");
+                fs::create_dir_all(&sealed_by_unshare_dir)
+                    .expect("fallback-private audit dir should be created");
+                fs::write(sealed_by_unshare_dir.join("artifact.txt"), "persisted\n")
+                    .expect("fallback-private audit file should be created");
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&sealed_by_unshare_dir, fs::Permissions::from_mode(0o111))
+                    .expect("fallback-private audit dir should become unreadable to the host");
+                fs::write(log_dir.join("release-start"), b"release\n")
+                    .expect("start should be released");
+            });
+
+            let events = capture_tracing_events(|| {
+                let outcome = run_session(
+                    SessionSpec {
+                        methodology_dir,
+                        audit_root: audit_root.clone(),
+                        ..test_session_spec()
+                    },
+                    SessionInvocation {
+                        repo_url: "https://example.com/agentd.git".to_string(),
+                        repo_token: None,
+                        work_unit: None,
+                        timeout: None,
+                    },
+                )
+                .expect("session outcome should survive audit finalization failure");
+
+                assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+            });
+
+            helper
+                .join()
+                .expect("audit-finalization helper thread should complete");
+            events
+        });
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0]["fields"]["event"], "runner.session_started");
+        assert_eq!(events[1]["fields"]["event"], "runner.session_outcome");
+        assert_eq!(events[1]["fields"]["outcome"], "success");
+        assert_eq!(events[2]["fields"]["event"], "runner.lifecycle_failure");
+        assert_eq!(events[2]["fields"]["stage"], "session audit finalization");
+        assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
+        assert_eq!(events[3]["fields"]["result"], "error");
+
+        let record_dir = only_session_record_dir(&audit_root, "site-builder");
+        let metadata = read_session_metadata(&record_dir);
+        assert!(
+            metadata.get("end_timestamp").is_none(),
+            "audit finalization failure must leave end_timestamp incomplete"
+        );
+        assert!(
+            metadata.get("outcome").is_none(),
+            "audit finalization failure must leave outcome incomplete"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(
+            record_dir.join("runa/unshare-private"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("fallback-private dir should become removable for test cleanup");
+        fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
+    }
+
     fn wait_for_only_session_record_dir(
         audit_root: &Path,
         profile_name: &str,

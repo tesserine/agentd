@@ -211,10 +211,14 @@ persists on the host under the resolved audit root
 `<audit_root>/<profile>/<session_id>/`, with runa state in `runa/` and agentd
 metadata in `agentd/session.json`. If teardown cleanup fails, or if audit
 finalization attempts closeout and fails, that metadata remains intentionally
-incomplete with no `end_timestamp` or `outcome`. The on-disk record does not
-encode which path occurred; operators should use `runner.lifecycle_failure`
-plus the surrounding `runner.session_outcome`, `runner.session_error`, and
-`runner.session_teardown` events to disambiguate cause.
+incomplete with no `end_timestamp` or `outcome`. On successful finalization,
+agentd seals persisted runa entries read-only and publishes a read-only
+`session.json` as the final commit point. Ancestor directories remain writable
+so the final same-directory atomic replace can occur. The on-disk metadata does
+not encode which incomplete path occurred; operators should use
+`runner.lifecycle_failure` plus the surrounding `runner.session_outcome`,
+`runner.session_error`, and `runner.session_teardown` events to disambiguate
+cause.
 
 ## Scheduled Runs
 

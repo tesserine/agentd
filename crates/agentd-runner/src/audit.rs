@@ -9,6 +9,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 const METADATA_SCHEMA_VERSION: u32 = 1;
+const SEALED_FILE_MODE: u32 = 0o444;
+const SEALED_DIRECTORY_MODE: u32 = 0o555;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionAuditRecord {
@@ -100,8 +102,8 @@ pub(crate) fn finalize_session_audit_record(
     };
     let end_timestamp = current_timestamp()?;
 
-    write_session_audit_metadata(record, Some(&end_timestamp), outcome, exit_code)?;
-    seal_session_audit_record(record)
+    seal_session_audit_record(record)?;
+    write_finalized_session_audit_metadata(record, &end_timestamp, outcome, exit_code)
 }
 
 fn write_session_audit_metadata(
@@ -109,6 +111,31 @@ fn write_session_audit_metadata(
     end_timestamp: Option<&str>,
     outcome: Option<&str>,
     exit_code: Option<i32>,
+) -> Result<(), RunnerError> {
+    write_session_audit_metadata_with_mode(record, end_timestamp, outcome, exit_code, None)
+}
+
+fn write_finalized_session_audit_metadata(
+    record: &SessionAuditRecord,
+    end_timestamp: &str,
+    outcome: Option<&str>,
+    exit_code: Option<i32>,
+) -> Result<(), RunnerError> {
+    write_session_audit_metadata_with_mode(
+        record,
+        Some(end_timestamp),
+        outcome,
+        exit_code,
+        Some(SEALED_FILE_MODE),
+    )
+}
+
+fn write_session_audit_metadata_with_mode(
+    record: &SessionAuditRecord,
+    end_timestamp: Option<&str>,
+    outcome: Option<&str>,
+    exit_code: Option<i32>,
+    file_mode: Option<u32>,
 ) -> Result<(), RunnerError> {
     let metadata = SessionAuditMetadata {
         schema_version: METADATA_SCHEMA_VERSION,
@@ -124,7 +151,7 @@ fn write_session_audit_metadata(
     let mut payload = serde_json::to_vec_pretty(&metadata)
         .map_err(|error| RunnerError::Io(std::io::Error::other(error)))?;
     payload.push(b'\n');
-    write_atomic(&record.metadata_path, &payload)?;
+    write_atomic(&record.metadata_path, &payload, file_mode)?;
     Ok(())
 }
 
@@ -140,10 +167,10 @@ fn set_active_runa_permissions(path: &Path) -> Result<(), RunnerError> {
 }
 
 fn seal_session_audit_record(record: &SessionAuditRecord) -> Result<(), RunnerError> {
-    match seal_path_recursive(&record.record_dir) {
+    match seal_path_recursive(record, &record.record_dir) {
         Ok(()) => Ok(()),
         Err(RunnerError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            seal_with_podman_unshare(&record.record_dir)
+            seal_with_podman_unshare(record)
         }
         Err(error) => Err(error),
     }
@@ -173,7 +200,7 @@ fn preflight_validate_sealable_tree(path: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
-fn seal_path_recursive(path: &Path) -> Result<(), RunnerError> {
+fn seal_path_recursive(record: &SessionAuditRecord, path: &Path) -> Result<(), RunnerError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
         return Ok(());
@@ -182,30 +209,61 @@ fn seal_path_recursive(path: &Path) -> Result<(), RunnerError> {
     if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            seal_path_recursive(&entry.path())?;
+            seal_path_recursive(record, &entry.path())?;
         }
+    }
+
+    if should_skip_sealing_path(record, path) {
+        return Ok(());
     }
 
     seal_path(path, metadata.is_dir())
 }
 
 fn seal_path(path: &Path, is_dir: bool) -> Result<(), RunnerError> {
-    let sealed_mode = if is_dir { 0o555 } else { 0o444 };
+    let sealed_mode = if is_dir {
+        SEALED_DIRECTORY_MODE
+    } else {
+        SEALED_FILE_MODE
+    };
     fs::set_permissions(path, fs::Permissions::from_mode(sealed_mode))?;
     Ok(())
 }
 
-fn seal_with_podman_unshare(path: &Path) -> Result<(), RunnerError> {
+fn should_skip_sealing_path(record: &SessionAuditRecord, path: &Path) -> bool {
+    path == record.record_dir
+        || path == record.metadata_path
+        || record
+            .metadata_path
+            .parent()
+            .is_some_and(|metadata_dir| path == metadata_dir)
+}
+
+fn seal_with_podman_unshare(record: &SessionAuditRecord) -> Result<(), RunnerError> {
+    let record_root = record.record_dir.display().to_string();
+    let metadata_dir = record
+        .metadata_path
+        .parent()
+        .expect("metadata path should have a parent directory")
+        .display()
+        .to_string();
+    let metadata_path = record.metadata_path.display().to_string();
+
     run_podman_command(vec![
         "unshare".to_string(),
         "find".to_string(),
         "-P".to_string(),
-        path.display().to_string(),
+        record_root.clone(),
+        "-mindepth".to_string(),
+        "1".to_string(),
         "-type".to_string(),
         "d".to_string(),
+        "!".to_string(),
+        "-path".to_string(),
+        metadata_dir,
         "-exec".to_string(),
         "chmod".to_string(),
-        "0555".to_string(),
+        SEALED_DIRECTORY_MODE.to_string(),
         "{}".to_string(),
         "+".to_string(),
     ])?;
@@ -213,16 +271,19 @@ fn seal_with_podman_unshare(path: &Path) -> Result<(), RunnerError> {
         "unshare".to_string(),
         "find".to_string(),
         "-P".to_string(),
-        path.display().to_string(),
+        record_root,
         "!".to_string(),
         "-type".to_string(),
         "d".to_string(),
         "!".to_string(),
         "-type".to_string(),
         "l".to_string(),
+        "!".to_string(),
+        "-path".to_string(),
+        metadata_path,
         "-exec".to_string(),
         "chmod".to_string(),
-        "0444".to_string(),
+        SEALED_FILE_MODE.to_string(),
         "{}".to_string(),
         "+".to_string(),
     ])
@@ -255,7 +316,7 @@ fn validate_sealable_tree_with_podman_unshare(path: &Path) -> Result<(), RunnerE
     Ok(())
 }
 
-fn write_atomic(path: &Path, payload: &[u8]) -> Result<(), RunnerError> {
+fn write_atomic(path: &Path, payload: &[u8], file_mode: Option<u32>) -> Result<(), RunnerError> {
     let temp_path = path.with_extension("json.tmp");
     let parent = path.parent().ok_or_else(|| {
         RunnerError::Io(std::io::Error::other(
@@ -269,6 +330,9 @@ fn write_atomic(path: &Path, payload: &[u8]) -> Result<(), RunnerError> {
             .truncate(true)
             .open(&temp_path)?;
         temp_file.write_all(payload)?;
+        if let Some(file_mode) = file_mode {
+            temp_file.set_permissions(fs::Permissions::from_mode(file_mode))?;
+        }
         temp_file.sync_all()?;
         drop(temp_file);
         fs::rename(&temp_path, path)?;
