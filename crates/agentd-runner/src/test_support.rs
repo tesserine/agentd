@@ -444,17 +444,14 @@ impl FakePodmanFixture {
         fs::write(&script_path, scenario.render_script())
             .expect("fake podman script should be written");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt;
 
-            let mut permissions = fs::metadata(&script_path)
-                .expect("fake podman script metadata should be available")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&script_path, permissions)
-                .expect("fake podman script should be executable");
-        }
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake podman script metadata should be available")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions)
+            .expect("fake podman script should be executable");
     }
 
     pub(crate) fn create_methodology_dir(&self, name: &str) -> PathBuf {
@@ -741,21 +738,11 @@ pub(crate) fn unique_temp_dir(prefix: &str) -> PathBuf {
     ))
 }
 
-#[cfg(unix)]
 pub(crate) fn exit_status(code: i32) -> ExitStatus {
     use std::os::unix::process::ExitStatusExt;
 
     ExitStatusExt::from_raw(code << 8)
 }
-
-#[cfg(windows)]
-pub(crate) fn exit_status(code: i32) -> ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
-
-    ExitStatusExt::from_raw(code as u32)
-}
-
-#[cfg(unix)]
 pub(crate) fn assert_process_is_reaped(pid: u32) {
     let output = Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])

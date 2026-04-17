@@ -136,8 +136,11 @@ pub fn run_session(
 
     if let Err(error) = create_container(&resources, &spec, &invocation) {
         let cleanup_result = cleanup_session_resources(&resources);
-        let audit_result =
-            finalize_session_audit_record(&resources.audit_record, SessionAuditCompletion::Error);
+        let audit_result = finalize_session_audit_record_if_cleanup_succeeded(
+            &cleanup_result,
+            &resources.audit_record,
+            SessionAuditCompletion::Error,
+        );
         if let Err(cleanup_error) = &cleanup_result {
             log_lifecycle_failure(
                 LifecycleFailureKind::Cleanup,
@@ -196,7 +199,8 @@ pub fn run_session(
     }
 
     let cleanup_result = cleanup_session_resources(&resources);
-    let audit_result = finalize_session_audit_record(
+    let audit_result = finalize_session_audit_record_if_cleanup_succeeded(
+        &cleanup_result,
         &resources.audit_record,
         match &start_result {
             Ok(outcome) => SessionAuditCompletion::Outcome(outcome),
@@ -247,6 +251,18 @@ fn cleanup_session_resources(resources: &SessionResources) -> Result<(), RunnerE
     staging_result
 }
 
+fn finalize_session_audit_record_if_cleanup_succeeded(
+    cleanup_result: &Result<(), RunnerError>,
+    record: &audit::SessionAuditRecord,
+    completion: SessionAuditCompletion<'_>,
+) -> Result<(), RunnerError> {
+    if cleanup_result.is_err() {
+        return Ok(());
+    }
+
+    finalize_session_audit_record(record, completion)
+}
+
 fn combined_teardown_result(
     cleanup_result: Result<(), RunnerError>,
     audit_result: Result<(), RunnerError>,
@@ -266,7 +282,37 @@ mod tests {
         capture_tracing_events, fake_podman_lock, fake_podman_ps_json, test_session_spec,
         unique_temp_dir,
     };
+    use serde_json::Value;
     use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn only_session_record_dir(audit_root: &Path, profile_name: &str) -> PathBuf {
+        let profile_root = audit_root.join(profile_name);
+        let entries = fs::read_dir(&profile_root)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", profile_root.display()))
+            .map(|entry| {
+                entry
+                    .expect("session record entry should be readable")
+                    .path()
+            })
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one session record under {}",
+            profile_root.display()
+        );
+        entries[0].clone()
+    }
+
+    fn read_session_metadata(record_dir: &Path) -> Value {
+        serde_json::from_str(
+            &fs::read_to_string(record_dir.join("agentd/session.json"))
+                .expect("session metadata should be readable"),
+        )
+        .expect("session metadata should be valid json")
+    }
 
     const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
 
@@ -414,6 +460,181 @@ mod tests {
         assert_eq!(events[2]["fields"]["stage"], "session_resource_allocation");
         assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
         assert_eq!(events[3]["fields"]["result"], "ok");
+    }
+
+    #[test]
+    fn run_session_leaves_audit_record_incomplete_and_unsealed_when_container_creation_cleanup_fails()
+     {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new()
+                .with_create(CommandBehavior::from_outcome(
+                    CommandOutcome::new().stderr("create failed").exit_code(42),
+                ))
+                .with_rm(CommandBehavior::from_outcome(
+                    CommandOutcome::new()
+                        .append_args_with_prefix("rm-commands.log", "rm")
+                        .stderr("rm failed")
+                        .exit_code(51),
+                )),
+        );
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let audit_root = unique_temp_dir("runner-audit-create-cleanup-failure");
+        fs::create_dir_all(&audit_root).expect("audit root should be created");
+
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_session(
+                    SessionSpec {
+                        methodology_dir,
+                        audit_root: audit_root.clone(),
+                        ..test_session_spec()
+                    },
+                    SessionInvocation {
+                        repo_url: "https://example.com/agentd.git".to_string(),
+                        repo_token: None,
+                        work_unit: None,
+                        timeout: None,
+                    },
+                )
+            })
+            .expect_err("session should fail during container creation");
+
+        match error {
+            RunnerError::PodmanCommandFailed {
+                args,
+                status,
+                stderr,
+            } => {
+                assert_eq!(args[0], "create");
+                assert_eq!(status.code(), Some(42));
+                assert_eq!(stderr.trim(), "create failed");
+            }
+            other => panic!("expected create failure, got {other:?}"),
+        }
+
+        let record_dir = only_session_record_dir(&audit_root, "site-builder");
+        let metadata = read_session_metadata(&record_dir);
+        assert!(
+            metadata.get("end_timestamp").is_none(),
+            "cleanup failure must not finalize end_timestamp"
+        );
+        assert!(
+            metadata.get("outcome").is_none(),
+            "cleanup failure must not finalize outcome"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let runa_mode = fs::metadata(record_dir.join("runa"))
+            .expect("runa dir metadata should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            runa_mode, 0o777,
+            "cleanup failure must leave the top-level runa dir in its active writable mode"
+        );
+        assert_ne!(
+            runa_mode, 0o555,
+            "cleanup failure must not seal the top-level runa dir"
+        );
+
+        fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn run_session_leaves_audit_record_incomplete_and_unsealed_when_post_execution_cleanup_fails() {
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new().with_rm(CommandBehavior::from_outcome(
+                CommandOutcome::new()
+                    .append_args_with_prefix("rm-commands.log", "rm")
+                    .stderr("rm failed")
+                    .exit_code(51),
+            )),
+        );
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        let audit_root = unique_temp_dir("runner-audit-post-cleanup-failure");
+        fs::create_dir_all(&audit_root).expect("audit root should be created");
+
+        let error = fixture
+            .run_with_fake_podman_env(|| {
+                run_session(
+                    SessionSpec {
+                        methodology_dir,
+                        audit_root: audit_root.clone(),
+                        ..test_session_spec()
+                    },
+                    SessionInvocation {
+                        repo_url: "https://example.com/agentd.git".to_string(),
+                        repo_token: None,
+                        work_unit: None,
+                        timeout: None,
+                    },
+                )
+            })
+            .expect_err("cleanup failure should surface as a session error");
+
+        match error {
+            RunnerError::PodmanCommandFailed {
+                args,
+                status,
+                stderr,
+            } => {
+                assert_eq!(
+                    args.len(),
+                    4,
+                    "cleanup failure should come from podman rm --force --ignore <container>"
+                );
+                assert_eq!(args[0], "rm");
+                assert_eq!(args[1], "--force");
+                assert_eq!(args[2], "--ignore");
+                assert!(
+                    args[3].starts_with("agentd-1a2b3c4d-site-builder-"),
+                    "unexpected cleanup target: {}",
+                    args[3]
+                );
+                assert_eq!(status.code(), Some(51));
+                assert_eq!(stderr.trim(), "rm failed");
+            }
+            other => panic!("expected cleanup failure, got {other:?}"),
+        }
+
+        let record_dir = only_session_record_dir(&audit_root, "site-builder");
+        let metadata = read_session_metadata(&record_dir);
+        assert!(
+            metadata.get("end_timestamp").is_none(),
+            "cleanup failure must not finalize end_timestamp"
+        );
+        assert!(
+            metadata.get("outcome").is_none(),
+            "cleanup failure must not finalize outcome"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let runa_mode = fs::metadata(record_dir.join("runa"))
+            .expect("runa dir metadata should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            runa_mode, 0o777,
+            "cleanup failure must leave the top-level runa dir in its active writable mode"
+        );
+        assert_ne!(
+            runa_mode, 0o555,
+            "cleanup failure must not seal the top-level runa dir"
+        );
+
+        fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 
     #[test]

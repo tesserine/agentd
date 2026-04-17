@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -405,16 +405,10 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
     fs::create_dir_all(&host_mount).expect("read-write host mount should be created");
     fs::write(host_mount.join("sentinel.txt"), "host sentinel\n")
         .expect("read-write host sentinel should be written");
-    #[cfg(unix)]
     let sentinel_metadata_before =
         fs::metadata(host_mount.join("sentinel.txt")).expect("sentinel metadata should exist");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
-            .expect("read-write host mount should permit container writes");
-    }
+    fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
+        .expect("read-write host mount should permit container writes");
 
     let outcome = run_session_with_test_audit_root(
         &fixture.audit_root(),
@@ -455,21 +449,18 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
             .expect("read-write host sentinel should remain readable"),
         "host sentinel\n"
     );
-    #[cfg(unix)]
-    {
-        let sentinel_metadata_after =
-            fs::metadata(host_mount.join("sentinel.txt")).expect("sentinel metadata should exist");
-        assert_eq!(
-            sentinel_metadata_after.uid(),
-            sentinel_metadata_before.uid(),
-            "runner setup must not re-own host-backed files under home mounts"
-        );
-        assert_eq!(
-            sentinel_metadata_after.gid(),
-            sentinel_metadata_before.gid(),
-            "runner setup must not re-own host-backed files under home mounts"
-        );
-    }
+    let sentinel_metadata_after =
+        fs::metadata(host_mount.join("sentinel.txt")).expect("sentinel metadata should exist");
+    assert_eq!(
+        sentinel_metadata_after.uid(),
+        sentinel_metadata_before.uid(),
+        "runner setup must not re-own host-backed files under home mounts"
+    );
+    assert_eq!(
+        sentinel_metadata_after.gid(),
+        sentinel_metadata_before.gid(),
+        "runner setup must not re-own host-backed files under home mounts"
+    );
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -487,13 +478,8 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
     let image = fixture.build_image();
     let host_mount = fixture.root.join("host-nested-claude");
     fs::create_dir_all(&host_mount).expect("nested host mount should be created");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
-            .expect("nested host mount should permit container writes");
-    }
+    fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
+        .expect("nested host mount should permit container writes");
 
     let outcome = run_session_with_test_audit_root(
         &fixture.audit_root(),
@@ -637,29 +623,97 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
     assert!(metadata["start_timestamp"].is_string());
     assert!(metadata["end_timestamp"].is_string());
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+    let runa_mode = fs::metadata(record_dir.join("runa"))
+        .expect("runa dir metadata should exist")
+        .permissions()
+        .mode();
+    let metadata_mode = fs::metadata(record_dir.join("agentd/session.json"))
+        .expect("session metadata permissions should exist")
+        .permissions()
+        .mode();
+    assert_eq!(
+        runa_mode & 0o222,
+        0,
+        "completed runa dir should be read-only"
+    );
+    assert_eq!(
+        metadata_mode & 0o222,
+        0,
+        "completed metadata file should be read-only"
+    );
 
-        let runa_mode = fs::metadata(record_dir.join("runa"))
-            .expect("runa dir metadata should exist")
-            .permissions()
-            .mode();
-        let metadata_mode = fs::metadata(record_dir.join("agentd/session.json"))
-            .expect("session metadata permissions should exist")
-            .permissions()
-            .mode();
-        assert_eq!(
-            runa_mode & 0o222,
-            0,
-            "completed runa dir should be read-only"
-        );
-        assert_eq!(
-            metadata_mode & 0o222,
-            0,
-            "completed metadata file should be read-only"
-        );
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn preserves_host_readability_for_restrictive_container_written_audit_entries_after_teardown() {
+    if skip_if_podman_unavailable(
+        "preserves_host_readability_for_restrictive_container_written_audit_entries_after_teardown",
+    ) {
+        return;
     }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("audit-restrictive-modes-run");
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "audit-restrictive-modes-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: Vec::new(),
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "write-restrictive-repo-audit-state".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: Some("issue-76".to_string()),
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+
+    let record_dir = fixture.only_session_record_dir();
+    let artifact_path = record_dir.join("runa/workspace/private/session-artifact.txt");
+    assert_eq!(
+        fs::read_to_string(&artifact_path)
+            .expect("container-written restrictive audit artifact should remain host-readable"),
+        "host should still read this after teardown\n"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+
+    let runa_mode = fs::metadata(record_dir.join("runa"))
+        .expect("runa dir metadata should exist")
+        .permissions()
+        .mode()
+        & 0o777;
+    let workspace_mode = fs::metadata(record_dir.join("runa/workspace/private"))
+        .expect("workspace dir metadata should exist")
+        .permissions()
+        .mode()
+        & 0o777;
+    let artifact_mode = fs::metadata(&artifact_path)
+        .expect("artifact metadata should exist")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(runa_mode, 0o555);
+    assert_eq!(workspace_mode, 0o555);
+    assert_eq!(artifact_mode, 0o444);
 
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
@@ -1409,6 +1463,17 @@ case "$command_name" in
             mkdir -p "${HOME}/repo/.runa/workspace" "${HOME}/repo/.runa/store/executions"
             printf 'persisted through repo bridge\n' > "${HOME}/repo/.runa/workspace/session-artifact.txt"
             printf '{"protocols":["begin"],"postconditions":["passed"]}\n' > "${HOME}/repo/.runa/store/executions/0001.json"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-restrictive-repo-audit-state" ]; then
+            [ -L "${HOME}/repo/.runa" ]
+            mkdir -p "${HOME}/repo/.runa/workspace/private" "${HOME}/repo/.runa/store/executions"
+            chmod 0700 "${HOME}/repo/.runa/workspace/private" "${HOME}/repo/.runa/store" "${HOME}/repo/.runa/store/executions"
+            printf 'host should still read this after teardown\n' > "${HOME}/repo/.runa/workspace/private/session-artifact.txt"
+            chmod 0600 "${HOME}/repo/.runa/workspace/private/session-artifact.txt"
+            printf '{"protocols":["begin"],"postconditions":["passed"]}\n' > "${HOME}/repo/.runa/store/executions/0001.json"
+            chmod 0600 "${HOME}/repo/.runa/store/executions/0001.json"
             exit 0
         fi
 

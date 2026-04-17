@@ -3,6 +3,7 @@ use crate::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -127,21 +128,8 @@ fn current_timestamp() -> Result<String, RunnerError> {
 }
 
 fn set_active_runa_permissions(path: &Path) -> Result<(), RunnerError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(path, fs::Permissions::from_mode(0o777))?;
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(path, permissions)?;
-        Ok(())
-    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o777))?;
+    Ok(())
 }
 
 fn seal_session_audit_record(record: &SessionAuditRecord) -> Result<(), RunnerError> {
@@ -171,22 +159,9 @@ fn seal_path_recursive(path: &Path) -> Result<(), RunnerError> {
 }
 
 fn seal_path(path: &Path, is_dir: bool) -> Result<(), RunnerError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let sealed_mode = if is_dir { 0o555 } else { 0o444 };
-        fs::set_permissions(path, fs::Permissions::from_mode(sealed_mode))?;
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let mut sealed = permissions;
-        sealed.set_readonly(true);
-        fs::set_permissions(path, sealed)?;
-        Ok(())
-    }
+    let sealed_mode = if is_dir { 0o555 } else { 0o444 };
+    fs::set_permissions(path, fs::Permissions::from_mode(sealed_mode))?;
+    Ok(())
 }
 
 fn seal_with_podman_unshare(path: &Path) -> Result<(), RunnerError> {
@@ -252,11 +227,7 @@ fn write_atomic(path: &Path, payload: &[u8]) -> Result<(), RunnerError> {
 }
 
 fn sync_parent_dir(path: &Path) -> Result<(), RunnerError> {
-    #[cfg(unix)]
-    {
-        File::open(path)?.sync_all()?;
-    }
-
+    File::open(path)?.sync_all()?;
     Ok(())
 }
 
@@ -267,6 +238,7 @@ mod tests {
     use crate::{SessionInvocation, SessionOutcome};
     use serde_json::Value;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
@@ -280,10 +252,7 @@ mod tests {
         ))
     }
 
-    #[cfg(unix)]
     fn make_tree_writable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
         let metadata = fs::symlink_metadata(path).expect("path metadata should exist");
         if metadata.file_type().is_symlink() {
             return;
@@ -365,30 +334,23 @@ mod tests {
         assert_eq!(json["exit_code"], 5);
         assert!(json["end_timestamp"].is_string());
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
+        let runa_mode = fs::metadata(&record.runa_dir)
+            .expect("runa dir metadata should exist")
+            .permissions()
+            .mode();
+        let metadata_mode = fs::metadata(&record.metadata_path)
+            .expect("metadata file should exist")
+            .permissions()
+            .mode();
+        assert_eq!(runa_mode & 0o777, 0o555);
+        assert_eq!(metadata_mode & 0o777, 0o444);
 
-            let runa_mode = fs::metadata(&record.runa_dir)
-                .expect("runa dir metadata should exist")
-                .permissions()
-                .mode();
-            let metadata_mode = fs::metadata(&record.metadata_path)
-                .expect("metadata file should exist")
-                .permissions()
-                .mode();
-            assert_eq!(runa_mode & 0o777, 0o555);
-            assert_eq!(metadata_mode & 0o777, 0o444);
-        }
-
-        #[cfg(unix)]
         make_tree_writable(&root);
 
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
     }
 
     #[test]
-    #[cfg(unix)]
     fn finalize_session_audit_record_skips_symlinks_when_sealing() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -461,7 +423,6 @@ mod tests {
             "temporary metadata file should not remain after atomic replace"
         );
 
-        #[cfg(unix)]
         make_tree_writable(&root);
 
         fs::remove_dir_all(root).expect("temporary audit root should be removed");

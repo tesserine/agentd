@@ -8,12 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 
+- `agentd-runner` now declares its real platform contract at compile time: the crate targets Linux only, and downstream non-Linux builds now fail explicitly instead of compiling dead fallback code into a non-functional binary.
 - Session outcomes now follow the shared `commons` exit-code convention across `agentd` and `agentd-runner`: outcomes carry semantic labels plus raw exit codes, daemon and CLI surfaces report labels such as `blocked` and `generic_failure`, `agentd run` exits successfully for normal terminal states (`success`, `blocked`, `nothing_ready`), and timeout remains an agentd-layer outcome outside the shared exit-code vocabulary.
 - Additional bind mounts now reserve only runner-owned targets (`/agentd/methodology`, `/home/{profile}`, and `/home/{profile}/repo` plus descendants), allowing supported read-only and read-write mounts elsewhere under `$HOME` without runner setup mutating host-backed data.
 - Profile-declared bind mounts now reject overlapping container targets within the same profile, so nested targets fail validation before startup instead of reaching the container setup script.
 - Persistent audit records now default to `$XDG_STATE_HOME/tesserine/audit/<profile>/<session_id>/`, falling back to `$HOME/.local/state/tesserine/audit/<profile>/<session_id>/` for rootless installs, with `daemon.audit_root` available as an explicit override for root-owned system installs such as `/var/lib/tesserine/audit/`.
 - Completed audit records now seal directories to `0555` and non-symlink entries to `0444`, skip symlinks while sealing, and update `agentd/session.json` through atomic temp-file replacement instead of truncate-and-write.
 - `agentd_runner::SessionSpec` now requires an explicit `audit_root` field, making the audit-record destination part of the runner API instead of an implicit process-environment override.
+
+### Fixed
+
+- Session teardown now skips audit finalization and sealing when cleanup fails, leaving `agentd/session.json` intentionally incomplete instead of marking a session complete while its audit bind mount may still be live.
 
 ## [0.1.0] — 2026-04-10
 

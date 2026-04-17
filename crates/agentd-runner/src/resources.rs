@@ -282,15 +282,7 @@ fn safe_staging_root() -> PathBuf {
         return temp_dir;
     }
 
-    #[cfg(unix)]
-    {
-        PathBuf::from("/tmp")
-    }
-
-    #[cfg(not(unix))]
-    {
-        temp_dir
-    }
+    PathBuf::from("/tmp")
 }
 
 fn path_requires_mount_staging_alias(path: &Path) -> bool {
@@ -310,19 +302,8 @@ fn create_podman_secret(secret_name: &str, value: &str) -> Result<(), RunnerErro
     .map(|_| ())
 }
 
-#[cfg(unix)]
 fn create_path_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
     std::os::unix::fs::symlink(source, destination).map_err(RunnerError::Io)
-}
-
-#[cfg(windows)]
-fn create_path_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
-    let metadata = source.metadata().map_err(RunnerError::Io)?;
-    if metadata.is_dir() {
-        std::os::windows::fs::symlink_dir(source, destination).map_err(RunnerError::Io)
-    } else {
-        std::os::windows::fs::symlink_file(source, destination).map_err(RunnerError::Io)
-    }
 }
 
 // Generates a 16-character hex string from 8 bytes of cryptographic randomness.

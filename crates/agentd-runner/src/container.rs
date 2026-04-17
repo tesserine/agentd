@@ -19,7 +19,6 @@ use crate::types::{BindMount, RunnerError, SessionInvocation, SessionOutcome, Se
 use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -541,7 +540,6 @@ where
 }
 
 fn container_status_to_outcome(status: ExitStatus) -> SessionOutcome {
-    #[cfg(unix)]
     if let Some(signal) = status.signal() {
         return SessionOutcome::TerminatedBySignal {
             exit_code: 128 + signal,

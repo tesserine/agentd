@@ -7,6 +7,10 @@ clone, and read-only methodology context — supervised from setup through
 teardown. agentd prepares and supervises these environments; model inference and
 MCP transport belong to the agent runtime inside the container.
 
+The project targets Linux hosts. Non-Linux builds fail intentionally because
+the runner depends on Linux runtime primitives including rootless Podman,
+systemd user services, and SELinux-aware filesystem handling.
+
 ## Why
 
 Running autonomous agents requires infrastructure: isolated environments,
@@ -156,8 +160,10 @@ fires are not backfilled after downtime. Persistent audit records default to
 
 ## Running a Session
 
-Build from source with `cargo build --release`. Requires rootless Podman for
-container execution.
+Build from source with `cargo build --release`. agentd targets Linux and
+requires rootless Podman for container execution. Operational deployments also
+assume systemd user services and the SELinux considerations described in
+`ARCHITECTURE.md`.
 
 Start the daemon:
 
@@ -203,7 +209,8 @@ the container, the agent sees:
 The container is force-removed on completion. The session's audit record
 persists on the host under the resolved audit root
 `<audit_root>/<profile>/<session_id>/`, with runa state in `runa/` and agentd
-metadata in `agentd/session.json`.
+metadata in `agentd/session.json`. If teardown cleanup fails, that metadata
+remains intentionally incomplete with no `end_timestamp` or `outcome`.
 
 ## Scheduled Runs
 

@@ -17,6 +17,11 @@ agentd is not:
 
 The key architectural consequence is simple: agentd may configure tool availability for a runtime, but it does not proxy the MCP wire protocol or ship domain-specific MCP servers inside this repository.
 
+Platform contract: `agentd-runner` targets Linux only. Non-Linux compilation
+failure is intentional and matches the runtime contract: rootless Podman,
+systemd user services, SELinux-aware host filesystem handling, and Linux UID
+mapping semantics are all part of the supported execution model.
+
 ### Terminology
 
 - **Profile**: a named, reusable environment specification in the daemon config — base image, methodology, optional default repo, optional schedule, credentials, and command. What the operator declares.
@@ -133,9 +138,19 @@ The runner drops privileges with `gosu` and launches the profile's configured se
 
 ### Phase 4: Teardown (`agentd-runner`)
 
-When the session ends or times out, the runner force-removes the container, finalizes `agentd/session.json` with end timestamp and outcome through an atomic same-directory temp-file rename, and seals the session record read-only on the host. The ephemeral container workspace still disappears, but the host audit record remains at `{audit_root}/{profile}/{session_id}/`.
+When the session ends or times out, the runner first force-removes the
+container. Only after cleanup succeeds does it finalize `agentd/session.json`
+with end timestamp and outcome through an atomic same-directory temp-file
+rename and seal the session record read-only on the host. The ephemeral
+container workspace still disappears, but the host audit record remains at
+`{audit_root}/{profile}/{session_id}/`.
 
-If agentd is interrupted after writing start metadata but before finalization, the session record remains **incomplete**: `agentd/session.json` has `start_timestamp` but no `end_timestamp` or `outcome`. Operators should read that state as "the daemon stopped before closeout completed," not as a successful or failed terminal outcome.
+If agentd is interrupted after writing start metadata but before finalization,
+or if teardown cleanup fails before finalization can begin, the session record
+remains **incomplete**: `agentd/session.json` has `start_timestamp` but no
+`end_timestamp` or `outcome`. Operators should read that state as "the daemon
+stopped before closeout completed" or "teardown cleanup did not complete," not
+as a successful or failed terminal outcome.
 
 ## 5. Container Isolation Model
 
@@ -217,7 +232,8 @@ verifies that the daemon can create and remove a file under the resolved audit
 root before dispatch begins. That catches ordinary permission and path errors
 early, but it does not validate network-filesystem behavior beyond the probe;
 NFS and similar targets can still fail later with semantics the probe does not
-model.
+model. If probe-file creation succeeds but probe-file removal fails, the audit
+root can retain that uniquely named probe file as leftover cruft.
 
 Session ids are 16 lowercase hex characters generated from `getrandom`, giving
 roughly `2^64` possible values per profile and a birthday bound near `2^32`

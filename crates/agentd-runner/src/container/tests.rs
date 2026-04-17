@@ -413,7 +413,6 @@ fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
     assert!(script.contains("\nexec gosu 'myprofile:myprofile' 'site-builder' 'exec'"));
 }
 
-#[cfg(unix)]
 #[test]
 fn clone_command_passes_repo_token_to_git_via_environment_not_argv() {
     let root = unique_test_dir("agentd-runner-clone-auth");
@@ -461,7 +460,6 @@ fn clone_command_passes_repo_token_to_git_via_environment_not_argv() {
     assert!(!git_env.contains(&format!("{REPO_TOKEN_ENV}=test-token")));
 }
 
-#[cfg(unix)]
 #[test]
 fn clone_command_omits_git_auth_environment_when_repo_token_is_absent() {
     let root = unique_test_dir("agentd-runner-clone-public");
@@ -674,7 +672,6 @@ fn attached_start_classifies_signal_exit_as_signal_termination() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn attached_start_classifies_real_process_signals_as_signal_termination() {
     use std::os::unix::process::ExitStatusExt;
@@ -1452,7 +1449,6 @@ fn unique_test_dir(prefix: &str) -> PathBuf {
     ))
 }
 
-#[cfg(unix)]
 fn install_fake_git(bin_dir: &Path, log_dir: &Path) {
     let script_path = bin_dir.join("git");
     fs::write(

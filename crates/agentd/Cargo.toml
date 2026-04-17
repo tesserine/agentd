@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Linux-only build enforcement lives in crates/agentd-runner/build.rs.
 agentd-runner.workspace = true
 agentd-scheduler.workspace = true
 clap = { version = "4.5", features = ["derive"] }
