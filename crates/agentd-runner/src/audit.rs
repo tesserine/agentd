@@ -255,6 +255,10 @@ fn should_skip_sealing_path(record: &SessionAuditRecord, path: &Path) -> bool {
             .is_some_and(|metadata_dir| path == metadata_dir)
 }
 
+fn chmod_mode_arg(mode: u32) -> String {
+    format!("{mode:o}")
+}
+
 fn seal_with_podman_unshare(record: &SessionAuditRecord) -> Result<(), RunnerError> {
     let record_root = record.record_dir.display().to_string();
     let metadata_dir = record
@@ -279,7 +283,7 @@ fn seal_with_podman_unshare(record: &SessionAuditRecord) -> Result<(), RunnerErr
         metadata_dir,
         "-exec".to_string(),
         "chmod".to_string(),
-        SEALED_DIRECTORY_MODE.to_string(),
+        chmod_mode_arg(SEALED_DIRECTORY_MODE),
         "{}".to_string(),
         "+".to_string(),
     ])?;
@@ -299,7 +303,7 @@ fn seal_with_podman_unshare(record: &SessionAuditRecord) -> Result<(), RunnerErr
         metadata_path,
         "-exec".to_string(),
         "chmod".to_string(),
-        SEALED_FILE_MODE.to_string(),
+        chmod_mode_arg(SEALED_FILE_MODE),
         "{}".to_string(),
         "+".to_string(),
     ])

@@ -787,9 +787,11 @@ mod tests {
                         ),
                 ))
                 .with_unshare(CommandBehavior::sequence(vec![
-                    CommandOutcome::new(),
-                    CommandOutcome::new(),
                     CommandOutcome::new()
+                        .append_args_with_prefix("unshare-commands.log", "validate"),
+                    CommandOutcome::new().append_args_with_prefix("unshare-commands.log", "dir"),
+                    CommandOutcome::new()
+                        .append_args_with_prefix("unshare-commands.log", "file")
                         .stderr("podman unshare file chmod failed")
                         .exit_code(61),
                 ])),
@@ -864,6 +866,18 @@ mod tests {
 
         let record_dir = only_session_record_dir(&audit_root, "site-builder");
         let metadata = read_session_metadata(&record_dir);
+        assert_eq!(
+            fixture.read_log("unshare-commands.log"),
+            format!(
+                "validate find -P {root} ! -type d ! -type l -links +1 -print\n\
+dir find -P {root} -mindepth 1 -type d ! -path {metadata_dir} -exec chmod 555 {{}} +\n\
+file find -P {root} ! -type d ! -type l ! -path {metadata_path} -exec chmod 444 {{}} +\n",
+                root = record_dir.display(),
+                metadata_dir = record_dir.join("agentd").display(),
+                metadata_path = record_dir.join("agentd/session.json").display(),
+            ),
+            "podman unshare fallback must invoke chmod with octal mode arguments"
+        );
         assert!(
             metadata.get("end_timestamp").is_none(),
             "audit finalization failure must leave end_timestamp incomplete"
