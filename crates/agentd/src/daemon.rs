@@ -16,6 +16,7 @@ use agentd_runner::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::audit_root::prepare_audit_root;
 use crate::config::{Config, ConfigError, DaemonConfig};
 use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
 use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
@@ -246,6 +247,7 @@ pub fn run_daemon_until_shutdown(
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), DaemonError> {
     let daemon_instance_id = config.daemon().daemon_instance_id()?;
+    let _audit_root = prepare_audit_root(config.daemon())?;
     run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
         reconcile_startup_resources(&daemon_instance_id)
     })

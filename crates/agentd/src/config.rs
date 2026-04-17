@@ -410,6 +410,7 @@ impl CredentialConfig {
 pub struct DaemonConfig {
     socket_path: PathBuf,
     pid_file: PathBuf,
+    audit_root: Option<PathBuf>,
 }
 
 impl DaemonConfig {
@@ -433,6 +434,41 @@ impl DaemonConfig {
     /// Filesystem path for the daemon's PID file and advisory lock.
     pub fn pid_file(&self) -> &Path {
         &self.pid_file
+    }
+
+    /// Resolved host-side root for persistent session audit records.
+    ///
+    /// When `daemon.audit_root` is configured, that value is used. Otherwise
+    /// agentd defaults to `$XDG_STATE_HOME/tesserine/audit`, falling back to
+    /// `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset.
+    pub fn resolve_audit_root(&self) -> Result<PathBuf, ConfigError> {
+        if let Some(path) = &self.audit_root {
+            if path.is_absolute() {
+                return Ok(path.clone());
+            }
+
+            return Err(ConfigError::RelativeDaemonAuditRootPath { path: path.clone() });
+        }
+
+        if let Some(path) = std::env::var_os("XDG_STATE_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        {
+            if path.is_absolute() {
+                return Ok(path.join("tesserine/audit"));
+            }
+        }
+
+        if let Some(path) = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        {
+            if path.is_absolute() {
+                return Ok(path.join(".local/state/tesserine/audit"));
+            }
+        }
+
+        Err(ConfigError::MissingDaemonAuditRootDefault)
     }
 
     /// Stable daemon-instance identifier derived from the configured runtime
@@ -464,6 +500,10 @@ impl DaemonConfig {
         Ok(Self {
             socket_path: resolve_config_path(base_dir, &raw.socket_path),
             pid_file: resolve_config_path(base_dir, &raw.pid_file),
+            audit_root: raw
+                .audit_root
+                .as_deref()
+                .map(|path| resolve_config_path(base_dir, path)),
         })
     }
 
@@ -507,6 +547,15 @@ pub enum ConfigError {
     },
     /// Deriving the daemon instance id requires absolute daemon runtime paths.
     RelativeDaemonRuntimePath { field: &'static str, path: PathBuf },
+    /// Resolving the daemon audit root requires an absolute configured path.
+    RelativeDaemonAuditRootPath { path: PathBuf },
+    /// No usable default audit-root environment was available.
+    MissingDaemonAuditRootDefault,
+    /// The resolved daemon audit root could not be created or probed.
+    AuditRootNotWritable {
+        path: PathBuf,
+        error: std::io::Error,
+    },
     /// The `command` array is empty for a profile.
     EmptyCommand { profile: String },
     /// A profile declares a default repository URL the runner would reject.
@@ -602,6 +651,24 @@ impl fmt::Display for ConfigError {
                     path.display()
                 )
             }
+            ConfigError::RelativeDaemonAuditRootPath { path } => {
+                write!(
+                    f,
+                    "daemon audit root must be absolute before use: {}",
+                    path.display()
+                )
+            }
+            ConfigError::MissingDaemonAuditRootDefault => write!(
+                f,
+                "daemon audit root could not be resolved; set absolute XDG_STATE_HOME, set absolute HOME, or configure daemon.audit_root explicitly"
+            ),
+            ConfigError::AuditRootNotWritable { path, error } => {
+                write!(
+                    f,
+                    "daemon audit root is not writable: {} ({error})",
+                    path.display()
+                )
+            }
             ConfigError::EmptyCommand { profile } => {
                 write!(f, "profile '{profile}' must define a non-empty command")
             }
@@ -661,6 +728,7 @@ impl std::error::Error for ConfigError {
         match self {
             ConfigError::Io(error) => Some(error),
             ConfigError::Parse(error) => Some(error),
+            ConfigError::AuditRootNotWritable { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -703,6 +771,7 @@ struct RawDaemonConfig {
     socket_path: String,
     #[serde(default = "default_daemon_pid_file")]
     pid_file: String,
+    audit_root: Option<String>,
 }
 
 impl Default for RawDaemonConfig {
@@ -710,6 +779,7 @@ impl Default for RawDaemonConfig {
         Self {
             socket_path: default_daemon_socket_path(),
             pid_file: default_daemon_pid_file(),
+            audit_root: None,
         }
     }
 }

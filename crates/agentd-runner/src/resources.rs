@@ -5,9 +5,11 @@
 //! completes. Partial-failure cleanup during allocation ensures no leaked
 //! secrets or stale staging directories when resource creation fails midway.
 
+use crate::audit::SessionAuditRecord;
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::naming::{SESSION_ID_LEN, format_secret_name};
 use crate::podman::run_podman_command_with_input;
+use crate::session_paths::session_internal_audit_runa_dir;
 use crate::types::{RunnerError, SessionInvocation, SessionSpec};
 use crate::validation::REPO_TOKEN_ENV;
 use getrandom::fill as fill_random_bytes;
@@ -15,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
+const AUDIT_RUNA_STAGE_LINK_NAME: &str = "audit-runa";
 const ADDITIONAL_MOUNT_STAGE_PREFIX: &str = "mount-";
 const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
 
@@ -29,6 +32,7 @@ pub(crate) struct PreparedBindMount {
     pub(crate) source: PathBuf,
     pub(crate) target: PathBuf,
     pub(crate) read_only: bool,
+    pub(crate) relabel_shared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +40,8 @@ pub(crate) struct SessionResources {
     pub(crate) container_name: String,
     pub(crate) methodology_staging_dir: PathBuf,
     pub(crate) methodology_mount_source: PathBuf,
+    pub(crate) audit_record: SessionAuditRecord,
+    pub(crate) audit_mount: PreparedBindMount,
     pub(crate) additional_mounts: Vec<PreparedBindMount>,
     pub(crate) environment_secret_bindings: Vec<SecretBinding>,
     pub(crate) repo_token_secret_binding: Option<SecretBinding>,
@@ -51,6 +57,31 @@ impl SessionResources {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ResourceAllocationFailure {
+    pub(crate) allocation_error: RunnerError,
+    pub(crate) rollback_result: Result<(), RunnerError>,
+}
+
+impl ResourceAllocationFailure {
+    fn without_rollback_failure(error: RunnerError) -> Self {
+        Self {
+            allocation_error: error,
+            rollback_result: Ok(()),
+        }
+    }
+
+    fn with_rollback_result(
+        allocation_error: RunnerError,
+        rollback_result: Result<(), RunnerError>,
+    ) -> Self {
+        Self {
+            allocation_error,
+            rollback_result,
+        }
+    }
+}
+
 pub(crate) fn unique_suffix() -> Result<String, RunnerError> {
     unique_suffix_with(|bytes| fill_random_bytes(bytes).map_err(std::io::Error::other))
 }
@@ -60,28 +91,48 @@ pub(crate) fn prepare_session_resources(
     spec: &SessionSpec,
     invocation: &SessionInvocation,
     session_id: &str,
-) -> Result<SessionResources, RunnerError> {
+    audit_record: SessionAuditRecord,
+) -> Result<SessionResources, ResourceAllocationFailure> {
     let manifest_path = spec.methodology_dir.join("manifest.toml");
     if !manifest_path.is_file() {
-        return Err(RunnerError::MissingMethodologyManifest {
-            path: manifest_path,
-        });
+        return Err(ResourceAllocationFailure::without_rollback_failure(
+            RunnerError::MissingMethodologyManifest {
+                path: manifest_path,
+            },
+        ));
     }
 
-    let methodology_staging_dir =
-        create_methodology_staging_dir(&spec.methodology_dir, session_id)?;
+    let methodology_staging_dir = create_methodology_staging_dir(&spec.methodology_dir, session_id)
+        .map_err(ResourceAllocationFailure::without_rollback_failure)?;
+    let audit_mount = match create_audit_mount(&audit_record, spec, &methodology_staging_dir) {
+        Ok(mount) => mount,
+        Err(error) => {
+            return Err(rollback_failed_staging_dir_allocation(
+                container_name,
+                session_id,
+                &methodology_staging_dir,
+                error,
+            ));
+        }
+    };
     let methodology_mount_source = methodology_staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
     let additional_mounts = match create_additional_mounts(&spec.mounts, &methodology_staging_dir) {
         Ok(mounts) => mounts,
         Err(error) => {
-            let _ = fs::remove_dir_all(&methodology_staging_dir);
-            return Err(error);
+            return Err(rollback_failed_staging_dir_allocation(
+                container_name,
+                session_id,
+                &methodology_staging_dir,
+                error,
+            ));
         }
     };
     let mut resources = SessionResources {
         container_name: container_name.to_string(),
         methodology_staging_dir,
         methodology_mount_source,
+        audit_record,
+        audit_mount,
         additional_mounts,
         environment_secret_bindings: Vec::new(),
         repo_token_secret_binding: None,
@@ -129,7 +180,9 @@ fn rollback_failed_resource_allocation(
     resources: &SessionResources,
     session_id: &str,
     error: RunnerError,
-) -> RunnerError {
+) -> ResourceAllocationFailure {
+    let mut rollback_error = None;
+
     if let Err(cleanup_error) = cleanup_podman_secrets(&resources.all_secret_bindings()) {
         log_lifecycle_failure(
             LifecycleFailureKind::Cleanup,
@@ -138,6 +191,7 @@ fn rollback_failed_resource_allocation(
             session_id,
             &cleanup_error,
         );
+        rollback_error = Some(cleanup_error);
     }
     if let Err(cleanup_error) = cleanup_methodology_staging_dir(&resources.methodology_staging_dir)
     {
@@ -148,9 +202,30 @@ fn rollback_failed_resource_allocation(
             session_id,
             &cleanup_error,
         );
+        rollback_error.get_or_insert(cleanup_error);
     }
 
-    error
+    ResourceAllocationFailure::with_rollback_result(error, rollback_error.map_or(Ok(()), Err))
+}
+
+fn rollback_failed_staging_dir_allocation(
+    container_name: &str,
+    session_id: &str,
+    staging_dir: &Path,
+    error: RunnerError,
+) -> ResourceAllocationFailure {
+    let rollback_result = cleanup_methodology_staging_dir(staging_dir);
+    if let Err(cleanup_error) = &rollback_result {
+        log_lifecycle_failure(
+            LifecycleFailureKind::Cleanup,
+            "session resource allocation",
+            container_name,
+            session_id,
+            cleanup_error,
+        );
+    }
+
+    ResourceAllocationFailure::with_rollback_result(error, rollback_result)
 }
 
 pub(crate) fn cleanup_podman_secrets(secret_bindings: &[SecretBinding]) -> Result<(), RunnerError> {
@@ -207,25 +282,52 @@ fn create_additional_mounts(
     let mut prepared_mounts = Vec::with_capacity(mounts.len());
 
     for (index, mount) in mounts.iter().enumerate() {
-        let canonical_source = mount
-            .source
-            .canonicalize()
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => RunnerError::MissingMountSource {
-                    path: mount.source.clone(),
-                },
-                _ => RunnerError::Io(error),
-            })?;
-        let staged_source = staging_dir.join(format!("{ADDITIONAL_MOUNT_STAGE_PREFIX}{index}"));
-        create_path_symlink(&canonical_source, &staged_source)?;
-        prepared_mounts.push(PreparedBindMount {
-            source: staged_source,
-            target: mount.target.clone(),
-            read_only: mount.read_only,
-        });
+        prepared_mounts.push(create_prepared_bind_mount(
+            &mount.source,
+            staging_dir.join(format!("{ADDITIONAL_MOUNT_STAGE_PREFIX}{index}")),
+            mount.target.clone(),
+            mount.read_only,
+            false,
+        )?);
     }
 
     Ok(prepared_mounts)
+}
+
+fn create_audit_mount(
+    audit_record: &SessionAuditRecord,
+    spec: &SessionSpec,
+    staging_dir: &Path,
+) -> Result<PreparedBindMount, RunnerError> {
+    create_prepared_bind_mount(
+        &audit_record.runa_dir,
+        staging_dir.join(AUDIT_RUNA_STAGE_LINK_NAME),
+        session_internal_audit_runa_dir(&spec.profile_name),
+        false,
+        true,
+    )
+}
+
+fn create_prepared_bind_mount(
+    source: &Path,
+    staged_source: PathBuf,
+    target: PathBuf,
+    read_only: bool,
+    relabel_shared: bool,
+) -> Result<PreparedBindMount, RunnerError> {
+    let canonical_source = source.canonicalize().map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => RunnerError::MissingMountSource {
+            path: source.to_path_buf(),
+        },
+        _ => RunnerError::Io(error),
+    })?;
+    create_path_symlink(&canonical_source, &staged_source)?;
+    Ok(PreparedBindMount {
+        source: staged_source,
+        target,
+        read_only,
+        relabel_shared,
+    })
 }
 
 // Returns a base directory for session staging that is safe for podman
@@ -239,15 +341,7 @@ fn safe_staging_root() -> PathBuf {
         return temp_dir;
     }
 
-    #[cfg(unix)]
-    {
-        PathBuf::from("/tmp")
-    }
-
-    #[cfg(not(unix))]
-    {
-        temp_dir
-    }
+    PathBuf::from("/tmp")
 }
 
 fn path_requires_mount_staging_alias(path: &Path) -> bool {
@@ -267,19 +361,8 @@ fn create_podman_secret(secret_name: &str, value: &str) -> Result<(), RunnerErro
     .map(|_| ())
 }
 
-#[cfg(unix)]
 fn create_path_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
     std::os::unix::fs::symlink(source, destination).map_err(RunnerError::Io)
-}
-
-#[cfg(windows)]
-fn create_path_symlink(source: &Path, destination: &Path) -> Result<(), RunnerError> {
-    let metadata = source.metadata().map_err(RunnerError::Io)?;
-    if metadata.is_dir() {
-        std::os::windows::fs::symlink_dir(source, destination).map_err(RunnerError::Io)
-    } else {
-        std::os::windows::fs::symlink_file(source, destination).map_err(RunnerError::Io)
-    }
 }
 
 // Generates a 16-character hex string from 8 bytes of cryptographic randomness.
@@ -308,13 +391,54 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_session_resources, unique_suffix_with};
+    use super::{
+        prepare_session_resources, rollback_failed_staging_dir_allocation, unique_suffix_with,
+    };
+    use crate::audit::SessionAuditRecord;
     use crate::test_support::{
         CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
         capture_tracing_events, fake_podman_lock, test_session_spec,
     };
     use crate::{BindMount, ResolvedEnvironmentVariable, RunnerError, SessionInvocation};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+
+    fn test_audit_record(session_id: &str) -> SessionAuditRecord {
+        let record_dir = std::env::temp_dir().join(format!("agentd-audit-record-{session_id}"));
+        let runa_dir = record_dir.join("runa");
+        let metadata_path = record_dir.join("agentd/session.json");
+        std::fs::create_dir_all(&runa_dir).expect("test runa dir should be created");
+        std::fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata path should have a parent"),
+        )
+        .expect("test metadata dir should be created");
+
+        SessionAuditRecord {
+            record_dir,
+            runa_dir,
+            metadata_path,
+            session_id: session_id.to_string(),
+            profile: "site-builder".to_string(),
+            repo_url: "https://example.com/repo.git".to_string(),
+            work_unit: None,
+            start_timestamp: "2026-04-16T00:00:00Z".to_string(),
+        }
+    }
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after the unix epoch")
+                .as_nanos()
+        ))
+    }
 
     #[test]
     fn unique_suffix_with_encodes_eight_random_bytes_as_sixteen_lower_hex_characters() {
@@ -332,6 +456,90 @@ mod tests {
                 .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
             "session suffix should be lowercase hex: {suffix}"
         );
+    }
+
+    #[test]
+    fn rollback_failed_staging_dir_allocation_returns_ok_rollback_when_cleanup_succeeds() {
+        let root = unique_test_dir("agentd-staging-rollback-ok");
+        let staging_dir = root.join("staging");
+        fs::create_dir_all(&staging_dir).expect("staging dir should be created");
+        fs::write(staging_dir.join("mounted"), "test\n").expect("staging child should be created");
+
+        let failure = rollback_failed_staging_dir_allocation(
+            "agentd-agent-session",
+            "session-ok",
+            &staging_dir,
+            RunnerError::MissingMountSource {
+                path: PathBuf::from("/missing"),
+            },
+        );
+
+        assert!(
+            matches!(
+                failure.allocation_error,
+                RunnerError::MissingMountSource { ref path } if path == &PathBuf::from("/missing")
+            ),
+            "original allocation error should be preserved: {:?}",
+            failure.allocation_error
+        );
+        assert!(
+            failure.rollback_result.is_ok(),
+            "successful rollback should report Ok(()): {:?}",
+            failure.rollback_result
+        );
+        assert!(
+            !staging_dir.exists(),
+            "successful rollback should remove the staging dir"
+        );
+
+        fs::remove_dir_all(&root).expect("temporary rollback root should be removed");
+    }
+
+    #[test]
+    fn rollback_failed_staging_dir_allocation_returns_cleanup_error_and_logs_failure() {
+        let root = unique_test_dir("agentd-staging-rollback-error");
+        let staging_dir = root.join("staging");
+        fs::create_dir_all(&staging_dir).expect("staging dir should be created");
+        fs::write(staging_dir.join("mounted"), "test\n").expect("staging child should be created");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555))
+            .expect("rollback parent should become read-only");
+
+        let failure = RefCell::new(None);
+        let events = capture_tracing_events(|| {
+            failure.replace(Some(rollback_failed_staging_dir_allocation(
+                "agentd-agent-session",
+                "session-error",
+                &staging_dir,
+                RunnerError::MissingMountSource {
+                    path: PathBuf::from("/missing"),
+                },
+            )));
+        });
+
+        let failure = failure
+            .into_inner()
+            .expect("staging rollback failure should be captured");
+        assert!(
+            matches!(
+                failure.allocation_error,
+                RunnerError::MissingMountSource { ref path } if path == &PathBuf::from("/missing")
+            ),
+            "original allocation error should be preserved: {:?}",
+            failure.allocation_error
+        );
+        match failure.rollback_result {
+            Err(RunnerError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected permission denied rollback failure, got {other:?}"),
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["fields"]["event"], "runner.lifecycle_failure");
+        assert_eq!(events[0]["fields"]["stage"], "session resource allocation");
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+            .expect("rollback parent should become writable for cleanup");
+        fs::remove_dir_all(&root).expect("temporary rollback root should be removed");
     }
 
     #[test]
@@ -418,10 +626,14 @@ mod tests {
                     timeout: None,
                 },
                 &session_id,
+                test_audit_record(&session_id),
             )
         });
 
-        match result.expect_err("second secret create should fail") {
+        match result
+            .expect_err("second secret create should fail")
+            .allocation_error
+        {
             RunnerError::PodmanCommandFailed {
                 args,
                 status,
@@ -490,10 +702,14 @@ mod tests {
                     timeout: None,
                 },
                 &session_id,
+                test_audit_record(&session_id),
             )
         });
 
-        match result.expect_err("repo token secret create should fail") {
+        match result
+            .expect_err("repo token secret create should fail")
+            .allocation_error
+        {
             RunnerError::PodmanCommandFailed {
                 args,
                 status,
@@ -553,9 +769,13 @@ mod tests {
                 timeout: None,
             },
             &session_id,
+            test_audit_record(&session_id),
         );
 
-        match result.expect_err("missing mount sources should be rejected") {
+        match result
+            .expect_err("missing mount sources should be rejected")
+            .allocation_error
+        {
             RunnerError::MissingMountSource { path } => {
                 assert_eq!(path, missing_mount_source);
             }

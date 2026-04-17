@@ -193,7 +193,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn podman_commands_with_input_reap_failed_children_before_returning() {
         let _guard = fake_podman_lock()
@@ -236,7 +235,6 @@ mod tests {
         assert_eq!(exit_status(17).code(), Some(17));
     }
 
-    #[cfg(unix)]
     #[test]
     fn podman_commands_with_input_until_reap_failed_children_before_returning() {
         let _guard = fake_podman_lock()

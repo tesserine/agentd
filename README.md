@@ -7,6 +7,10 @@ clone, and read-only methodology context — supervised from setup through
 teardown. agentd prepares and supervises these environments; model inference and
 MCP transport belong to the agent runtime inside the container.
 
+The project targets Linux hosts. Non-Linux builds fail intentionally because
+the runner depends on Linux runtime primitives including rootless Podman,
+systemd user services, and SELinux-aware filesystem handling.
+
 ## Why
 
 Running autonomous agents requires infrastructure: isolated environments,
@@ -32,7 +36,11 @@ Profiles may now declare a default repository and an optional cron schedule.
 Manual runs still flow through `agentd run`, and scheduled runs dispatch
 through the same daemon socket intake without introducing a separate job type.
 Profiles may also declare additional bind mounts for host-managed state such as
-subscription auth directories or persistent audit storage.
+subscription auth directories. Independently of profile mounts, agentd now
+persists each session's audit record under the rootless default
+`$XDG_STATE_HOME/tesserine/audit/`, falling back to
+`$HOME/.local/state/tesserine/audit/`, with `daemon.audit_root` available as an
+explicit override for root-owned installs such as `/var/lib/tesserine/audit/`.
 
 ## Configuration
 
@@ -45,6 +53,14 @@ config file — start from
 ```toml
 # Static profile registry for agentd.
 # A profile can carry its own default repo and optional schedule.
+
+#[daemon]
+# Optional explicit host path for persistent audit records. Rootless installs
+# default to $XDG_STATE_HOME/tesserine/audit, falling back to
+# $HOME/.local/state/tesserine/audit when XDG_STATE_HOME is unset.
+# Root-owned system installs should typically point this at
+# /var/lib/tesserine/audit.
+#audit_root = "/var/lib/tesserine/audit"
 
 [[profiles]]
 # Stable operator-facing profile name used for lookup and container identity.
@@ -129,7 +145,8 @@ environment — export them before starting the daemon. Additional `mounts`
 entries are bind mounts: `source` must be an absolute existing host path,
 `target` must be an absolute container path, targets must be unique within the
 profile, and runner-managed targets are reserved: `/agentd/methodology`,
-`/home/{profile}`, and `/home/{profile}/repo` plus its descendants. Other
+`/home/{profile}`, `/home/{profile}/.agentd`, and `/home/{profile}/repo` plus
+their descendants. Other
 targets under `/home/{profile}` remain supported, including read-only auth
 mounts such as `/home/site-builder/.claude`. Additional mounts are not
 relabelled; on SELinux-enabled hosts, operators must ensure each host path
@@ -137,12 +154,16 @@ already has a container-compatible label. The base image must provide
 `/bin/sh`, `find`, `git`, `useradd`, `gosu`, and whatever binaries the
 configured session command uses. When a profile declares `schedule`, it must
 also declare `repo`. Schedules are evaluated in daemon-local time and missed
-fires are not backfilled after downtime.
+fires are not backfilled after downtime. Persistent audit records default to
+`$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set
+`daemon.audit_root` to override that for system installations.
 
 ## Running a Session
 
-Build from source with `cargo build --release`. Requires rootless Podman for
-container execution.
+Build from source with `cargo build --release`. agentd targets Linux and
+requires rootless Podman for container execution. Operational deployments also
+assume systemd user services and the SELinux considerations described in
+`ARCHITECTURE.md`.
 
 Start the daemon:
 
@@ -178,14 +199,26 @@ the container, the agent sees:
 
 - An unprivileged user with `$HOME` at `/home/site-builder`
 - A fresh clone of the repository at `/home/site-builder/repo`
+- Repo-root `.runa` bridged to persistent audit storage
 - Read-only methodology mount at `/agentd/methodology`
 - Any operator-declared additional bind mounts, read-only or read-write per profile
 - Credentials injected as environment variables
 - `AGENTD_WORK_UNIT` when the invocation includes one
 - The configured session command executing from the repo directory
 
-The container is force-removed on completion. No session state persists on the
-host.
+The container is force-removed on completion. The session's audit record
+persists on the host under the resolved audit root
+`<audit_root>/<profile>/<session_id>/`, with runa state in `runa/` and agentd
+metadata in `agentd/session.json`. If teardown cleanup fails, or if audit
+finalization attempts closeout and fails, that metadata remains intentionally
+incomplete with no `end_timestamp` or `outcome`. On successful finalization,
+agentd seals persisted runa entries read-only and publishes a read-only
+`session.json` as the final commit point. Ancestor directories remain writable
+so the final same-directory atomic replace can occur. The on-disk metadata does
+not encode which incomplete path occurred; operators should use
+`runner.lifecycle_failure` plus the surrounding `runner.session_outcome`,
+`runner.session_error`, and `runner.session_teardown` events to disambiguate
+cause.
 
 ## Scheduled Runs
 

@@ -17,6 +17,7 @@ pub(crate) fn test_session_spec() -> SessionSpec {
         profile_name: "site-builder".to_string(),
         base_image: "image".to_string(),
         methodology_dir: PathBuf::from("/tmp/methodology"),
+        audit_root: std::env::temp_dir().join("agentd-runner-test-audit-root"),
         mounts: Vec::new(),
         command: vec!["site-builder".to_string(), "exec".to_string()],
         environment: Vec::new(),
@@ -112,6 +113,7 @@ impl Write for SharedBufferWriter {
 pub(crate) struct FakePodmanScenario {
     create: CommandBehavior,
     ps: CommandBehavior,
+    unshare: CommandBehavior,
     start: CommandBehavior,
     remove: CommandBehavior,
     secret_create: CommandBehavior,
@@ -129,6 +131,7 @@ impl FakePodmanScenario {
                     .set_container_state("created"),
             ),
             ps: CommandBehavior::from_outcome(CommandOutcome::new()),
+            unshare: CommandBehavior::from_outcome(CommandOutcome::new()),
             start: CommandBehavior::from_outcome(
                 CommandOutcome::new().set_container_state("running"),
             ),
@@ -158,6 +161,11 @@ impl FakePodmanScenario {
 
     pub(crate) fn with_start(mut self, behavior: CommandBehavior) -> Self {
         self.start = behavior;
+        self
+    }
+
+    pub(crate) fn with_unshare(mut self, behavior: CommandBehavior) -> Self {
+        self.unshare = behavior;
         self
     }
 
@@ -216,6 +224,7 @@ impl FakePodmanScenario {
 
         script.push_str(&render_command_branch("create", &self.create));
         script.push_str(&render_command_branch("ps", &self.ps));
+        script.push_str(&render_command_branch("unshare", &self.unshare));
         script.push_str(
             "    secret)\n\
                  subcommand=\"$1\"\n\
@@ -443,17 +452,14 @@ impl FakePodmanFixture {
         fs::write(&script_path, scenario.render_script())
             .expect("fake podman script should be written");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt;
 
-            let mut permissions = fs::metadata(&script_path)
-                .expect("fake podman script metadata should be available")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&script_path, permissions)
-                .expect("fake podman script should be executable");
-        }
+        let mut permissions = fs::metadata(&script_path)
+            .expect("fake podman script metadata should be available")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions)
+            .expect("fake podman script should be executable");
     }
 
     pub(crate) fn create_methodology_dir(&self, name: &str) -> PathBuf {
@@ -740,21 +746,11 @@ pub(crate) fn unique_temp_dir(prefix: &str) -> PathBuf {
     ))
 }
 
-#[cfg(unix)]
 pub(crate) fn exit_status(code: i32) -> ExitStatus {
     use std::os::unix::process::ExitStatusExt;
 
     ExitStatusExt::from_raw(code << 8)
 }
-
-#[cfg(windows)]
-pub(crate) fn exit_status(code: i32) -> ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
-
-    ExitStatusExt::from_raw(code as u32)
-}
-
-#[cfg(unix)]
 pub(crate) fn assert_process_is_reaped(pid: u32) {
     let output = Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])

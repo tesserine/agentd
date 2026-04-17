@@ -5,6 +5,7 @@ use agentd_runner::{
     run_session,
 };
 
+use crate::audit_root::prepare_audit_root;
 use crate::config::{Config, ConfigError};
 
 /// Parameters for a daemon run request.
@@ -106,6 +107,7 @@ pub fn dispatch_run(
                 profile: request.profile.clone(),
             })?;
     let daemon_instance_id = config.daemon().daemon_instance_id()?;
+    let audit_root = prepare_audit_root(config.daemon())?;
 
     let environment = profile
         .credentials()
@@ -138,6 +140,7 @@ pub fn dispatch_run(
                 profile_name: profile.name().to_string(),
                 base_image: profile.base_image().to_string(),
                 methodology_dir: profile.methodology_dir().to_path_buf(),
+                audit_root,
                 mounts: profile
                     .mounts()
                     .iter()

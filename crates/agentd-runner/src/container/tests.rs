@@ -1,4 +1,5 @@
 use super::*;
+use crate::audit::SessionAuditRecord;
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::resources::{PreparedBindMount, SessionResources};
 use crate::test_support::{
@@ -14,6 +15,21 @@ use std::time::{Duration, Instant, SystemTime};
 
 const VALID_REMOTE_REPO_URL: &str = "https://example.com/agentd.git";
 
+fn test_audit_record() -> SessionAuditRecord {
+    SessionAuditRecord {
+        record_dir: PathBuf::from("/tmp/audit/site-builder/0123456789abcdef"),
+        runa_dir: PathBuf::from("/tmp/audit/site-builder/0123456789abcdef/runa"),
+        metadata_path: PathBuf::from(
+            "/tmp/audit/site-builder/0123456789abcdef/agentd/session.json",
+        ),
+        session_id: "0123456789abcdef".to_string(),
+        profile: "site-builder".to_string(),
+        repo_url: VALID_REMOTE_REPO_URL.to_string(),
+        work_unit: None,
+        start_timestamp: "2026-04-16T00:00:00Z".to_string(),
+    }
+}
+
 #[test]
 fn create_container_args_include_shared_relabel_for_methodology_mount() {
     let args = build_create_container_args(
@@ -21,6 +37,13 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            audit_record: test_audit_record(),
+            audit_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/audit-runa"),
+                target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
             additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
@@ -50,6 +73,13 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            audit_record: test_audit_record(),
+            audit_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/audit-runa"),
+                target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
             additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
@@ -98,6 +128,13 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            audit_record: test_audit_record(),
+            audit_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/audit-runa"),
+                target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
             additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
@@ -125,16 +162,25 @@ fn create_container_args_include_configured_additional_mounts_after_methodology_
             container_name: "agentd-agent-session".to_string(),
             methodology_staging_dir: PathBuf::from("/tmp/staging"),
             methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            audit_record: test_audit_record(),
+            audit_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/audit-runa"),
+                target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
             additional_mounts: vec![
                 PreparedBindMount {
                     source: PathBuf::from("/tmp/staging/mount-0"),
                     target: PathBuf::from("/home/site-builder/.claude"),
                     read_only: true,
+                    relabel_shared: false,
                 },
                 PreparedBindMount {
                     source: PathBuf::from("/tmp/staging/mount-1"),
                     target: PathBuf::from("/home/site-builder/.runa"),
                     read_only: false,
+                    relabel_shared: false,
                 },
             ],
             environment_secret_bindings: Vec::new(),
@@ -150,23 +196,27 @@ fn create_container_args_include_configured_additional_mounts_after_methodology_
     );
 
     let mount_values = argument_values(&args, "--mount");
-    assert_eq!(mount_values.len(), 3);
+    assert_eq!(mount_values.len(), 4);
     assert!(mount_values[0].contains("src=/tmp/staging/methodology"));
-    assert!(mount_values[1].contains("src=/tmp/staging/mount-0"));
-    assert!(mount_values[1].contains("target=/home/site-builder/.claude"));
-    assert!(mount_values[1].contains("ro=true"));
-    assert!(
-        !mount_values[1].contains("relabel="),
-        "operator-declared mounts should not mutate host SELinux labels: {}",
-        mount_values[1]
-    );
-    assert!(mount_values[2].contains("src=/tmp/staging/mount-1"));
-    assert!(mount_values[2].contains("target=/home/site-builder/.runa"));
-    assert!(mount_values[2].contains("ro=false"));
+    assert!(mount_values[1].contains("src=/tmp/staging/audit-runa"));
+    assert!(mount_values[1].contains("target=/home/site-builder/.agentd/audit/runa"));
+    assert!(mount_values[1].contains("ro=false"));
+    assert!(mount_values[1].contains("relabel=shared"));
+    assert!(mount_values[2].contains("src=/tmp/staging/mount-0"));
+    assert!(mount_values[2].contains("target=/home/site-builder/.claude"));
+    assert!(mount_values[2].contains("ro=true"));
     assert!(
         !mount_values[2].contains("relabel="),
         "operator-declared mounts should not mutate host SELinux labels: {}",
         mount_values[2]
+    );
+    assert!(mount_values[3].contains("src=/tmp/staging/mount-1"));
+    assert!(mount_values[3].contains("target=/home/site-builder/.runa"));
+    assert!(mount_values[3].contains("ro=false"));
+    assert!(
+        !mount_values[3].contains("relabel="),
+        "operator-declared mounts should not mutate host SELinux labels: {}",
+        mount_values[3]
     );
 }
 
@@ -217,14 +267,26 @@ fn build_container_script_creates_home_workspace_and_execs_profile_command_from_
     );
 
     assert!(script.contains("useradd --create-home --home-dir '/home/myprofile' --shell /bin/sh --user-group 'myprofile'"));
+    assert!(script.contains("\nmkdir -p '/home/myprofile/.agentd/audit'\n"));
     assert!(script.contains(
-        "\nfind '/home/myprofile' -mindepth 0 \\( -path '/home/myprofile/repo' \\) -prune -o -exec chown 'myprofile:myprofile' {} +\n"
+        "\nfind '/home/myprofile' -mindepth 0 \\( -path '/home/myprofile/.agentd/audit/runa' -o -path '/home/myprofile/repo' \\) -prune -o -exec chown 'myprofile:myprofile' {} +\n"
     ));
     assert!(script.contains(
         "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/myprofile/repo'"
     ));
     assert!(script.contains("\ncd '/home/myprofile/repo'\n"));
     assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile/repo'\n"));
+    assert!(
+        script.contains(
+            "if [ -e '/home/myprofile/repo/.runa' ] || [ -L '/home/myprofile/repo/.runa' ]; then"
+        ),
+        "{script}"
+    );
+    assert!(
+        script.contains(
+            "\nln -s '/home/myprofile/.agentd/audit/runa' '/home/myprofile/repo/.runa'\n"
+        )
+    );
     assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile'\n"));
     assert!(!script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
     assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
@@ -279,7 +341,7 @@ fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_t
 
     assert!(
         script.contains(
-            "\nfind '/home/myprofile' -mindepth 0 \\( -path '/home/myprofile/.claude' -o -path '/home/myprofile/.config/claude workspace' -o -path '/home/myprofile/.config/git (session)' -o -path '/home/myprofile/a/b/c' -o -path '/home/myprofile/repo' \\) -prune -o -exec chown 'myprofile:myprofile' {} +\n"
+            "\nfind '/home/myprofile' -mindepth 0 \\( -path '/home/myprofile/.claude' -o -path '/home/myprofile/.config/claude workspace' -o -path '/home/myprofile/.config/git (session)' -o -path '/home/myprofile/a/b/c' -o -path '/home/myprofile/.agentd/audit/runa' -o -path '/home/myprofile/repo' \\) -prune -o -exec chown 'myprofile:myprofile' {} +\n"
         ),
         "home ownership should be repaired with one find traversal that prunes mounts and the repo: {script}"
     );
@@ -351,7 +413,6 @@ fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
     assert!(script.contains("\nexec gosu 'myprofile:myprofile' 'site-builder' 'exec'"));
 }
 
-#[cfg(unix)]
 #[test]
 fn clone_command_passes_repo_token_to_git_via_environment_not_argv() {
     let root = unique_test_dir("agentd-runner-clone-auth");
@@ -399,7 +460,6 @@ fn clone_command_passes_repo_token_to_git_via_environment_not_argv() {
     assert!(!git_env.contains(&format!("{REPO_TOKEN_ENV}=test-token")));
 }
 
-#[cfg(unix)]
 #[test]
 fn clone_command_omits_git_auth_environment_when_repo_token_is_absent() {
     let root = unique_test_dir("agentd-runner-clone-public");
@@ -612,7 +672,6 @@ fn attached_start_classifies_signal_exit_as_signal_termination() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn attached_start_classifies_real_process_signals_as_signal_termination() {
     use std::os::unix::process::ExitStatusExt;
@@ -1061,7 +1120,7 @@ fn wait_for_container_exit_returns_timeout_when_secret_release_fails() {
     );
 
     let mut child = Command::new("sh")
-        .args(["-c", "sleep 0.3"])
+        .args(["-c", "sleep 1"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1078,14 +1137,14 @@ fn wait_for_container_exit_returns_timeout_when_secret_release_fails() {
                     secret_name: "secret".to_string(),
                     target_name: "GITHUB_TOKEN".to_string(),
                 }],
-                Some(Duration::from_millis(50)),
+                Some(Duration::from_millis(500)),
             )
         })
         .expect("secret release failure should not surface as a runner error");
     let elapsed = started_at.elapsed();
 
     assert_eq!(outcome, None);
-    assert!(elapsed < Duration::from_millis(250));
+    assert!(elapsed < Duration::from_millis(900));
     assert_eq!(
         fixture
             .secret_commands()
@@ -1390,7 +1449,6 @@ fn unique_test_dir(prefix: &str) -> PathBuf {
     ))
 }
 
-#[cfg(unix)]
 fn install_fake_git(bin_dir: &Path, log_dir: &Path) {
     let script_path = bin_dir.join("git");
     fs::write(

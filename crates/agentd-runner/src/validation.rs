@@ -7,7 +7,7 @@
 //! configuration layer in the `agentd` crate.
 
 use crate::naming::is_daemon_instance_id;
-use crate::session_paths::{session_home_dir, session_repo_dir};
+use crate::session_paths::{session_home_dir, session_internal_agentd_dir, session_repo_dir};
 use crate::types::{
     BindMount, EnvironmentNameValidationError, MountOverlapError, MountTargetValidationError,
     ProfileNameValidationError, RunnerError, SessionInvocation, SessionSpec,
@@ -32,6 +32,11 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     }
     if spec.base_image.trim().is_empty() || spec.base_image != spec.base_image.trim() {
         return Err(RunnerError::InvalidBaseImage);
+    }
+    if !spec.audit_root.is_absolute() {
+        return Err(RunnerError::InvalidAuditRoot {
+            path: spec.audit_root.clone(),
+        });
     }
     if spec.command.is_empty() || spec.command.iter().any(|arg| arg.is_empty()) {
         return Err(RunnerError::InvalidCommand);
@@ -279,6 +284,7 @@ fn is_reserved_profile_name(name: &str) -> bool {
 
 fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
     let home_dir = session_home_dir(profile_name);
+    let internal_agentd_dir = session_internal_agentd_dir(profile_name);
     let repo_dir = session_repo_dir(profile_name);
     let methodology_dir = Path::new(METHODOLOGY_MOUNT_PATH);
 
@@ -298,6 +304,14 @@ fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
     // valid while reserving `/home/{profile}/repo`, its descendants, and its
     // ancestors.
     if target.starts_with(&repo_dir) || repo_dir.starts_with(target) {
+        return true;
+    }
+
+    // agentd's internal audit bridge under HOME is runner-owned. This keeps
+    // operator-declared mounts from colliding with the reserved `.agentd`
+    // subtree while still permitting other supported descendants like
+    // `.claude`.
+    if target.starts_with(&internal_agentd_dir) || internal_agentd_dir.starts_with(target) {
         return true;
     }
 
@@ -442,6 +456,22 @@ mod tests {
                 matches!(error, RunnerError::InvalidBaseImage),
                 "expected InvalidBaseImage for {base_image:?}, got {error:?}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_relative_audit_roots() {
+        let error = validate_spec(&SessionSpec {
+            audit_root: PathBuf::from("relative/audit-root"),
+            ..test_session_spec()
+        })
+        .expect_err("relative audit roots should be rejected");
+
+        match error {
+            RunnerError::InvalidAuditRoot { path } => {
+                assert_eq!(path, PathBuf::from("relative/audit-root"));
+            }
+            other => panic!("expected InvalidAuditRoot, got {other:?}"),
         }
     }
 
@@ -804,6 +834,26 @@ mod tests {
             ..test_session_spec()
         })
         .expect("mount targets under home outside runner-managed paths should be accepted");
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_under_internal_agentd_tree() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/var/lib/tesserine/audit"),
+                target: PathBuf::from("/home/site-builder/.agentd/audit"),
+                read_only: false,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets under the internal .agentd tree should be reserved");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/home/site-builder/.agentd/audit"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
     }
 
     #[test]

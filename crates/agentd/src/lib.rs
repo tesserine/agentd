@@ -4,6 +4,7 @@
 //! binary crate (`main.rs`) assembles runner and scheduler from the parsed
 //! configuration and starts the daemon.
 
+mod audit_root;
 pub mod config;
 pub mod daemon;
 pub mod dispatch;

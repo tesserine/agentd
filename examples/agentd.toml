@@ -1,6 +1,14 @@
 # Static profile registry for agentd.
 # A profile can carry its own default repo and optional schedule.
 
+#[daemon]
+# Optional explicit host path for persistent audit records. Rootless installs
+# default to $XDG_STATE_HOME/tesserine/audit, falling back to
+# $HOME/.local/state/tesserine/audit when XDG_STATE_HOME is unset.
+# Root-owned system installs should typically point this at
+# /var/lib/tesserine/audit.
+#audit_root = "/var/lib/tesserine/audit"
+
 [[profiles]]
 # Stable operator-facing profile name used for lookup and container identity.
 name = "site-builder"

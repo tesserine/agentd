@@ -33,6 +33,9 @@ pub struct SessionSpec {
     /// Host-side path to the methodology directory. Mounted read-only into
     /// the container at `/agentd/methodology`. Must contain `manifest.toml`.
     pub methodology_dir: PathBuf,
+    /// Host-side root where persistent audit records are created. The runner
+    /// stores each session under `<audit_root>/<profile>/<session_id>/`.
+    pub audit_root: PathBuf,
     /// Additional host bind mounts declared by the selected profile.
     pub mounts: Vec<BindMount>,
     /// Command array executed directly from the cloned repository after
@@ -299,6 +302,9 @@ pub enum RunnerError {
     /// The base image string is empty or has surrounding whitespace. Produced
     /// during spec validation.
     InvalidBaseImage,
+    /// The configured audit root path is not absolute. Produced during spec
+    /// validation.
+    InvalidAuditRoot { path: PathBuf },
     /// The repository URL is not a supported remote form (`https://`,
     /// `http://`, `git://`), embeds credentials, or is paired with
     /// `repo_token` without using `https://`. Produced during invocation
@@ -359,6 +365,9 @@ impl fmt::Display for RunnerError {
                 "profile_name must already be a unix username starting with a lowercase letter, containing only lowercase letters, digits, '_', or '-', be at most 32 characters, and not be one of the reserved system names root, nobody, daemon, bin, sys, man, or mail"
             ),
             RunnerError::InvalidBaseImage => write!(f, "base_image must not be empty"),
+            RunnerError::InvalidAuditRoot { path } => {
+                write!(f, "audit_root must be an absolute path: {}", path.display())
+            }
             RunnerError::InvalidRepoUrl { message } => write!(f, "repo_url {message}"),
             RunnerError::InvalidCommand => {
                 write!(f, "command must contain at least one argument")
