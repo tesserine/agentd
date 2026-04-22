@@ -6,8 +6,10 @@ use std::{fs, panic};
 use agentd::config::{Config, ConfigError};
 use agentd::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 use agentd_runner::{
-    ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
+    InvocationInput, ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome,
+    SessionSpec,
 };
+use serde_json::json;
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -143,6 +145,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
         profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: Some("task-42".to_string()),
+        input: None,
     };
     let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
@@ -217,6 +220,7 @@ fn dispatch_run_forwards_resolved_audit_root_into_session_spec() {
         profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
+        input: None,
     };
     let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
@@ -265,6 +269,7 @@ fn dispatch_run_rejects_an_unwritable_audit_root_before_session_execution() {
         profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
+        input: None,
     };
     let (executor, _state) =
         RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
@@ -302,6 +307,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_missing() {
         profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
+        input: None,
     };
     let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
@@ -334,6 +340,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_empty() {
         profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
+        input: None,
     };
     let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
@@ -367,6 +374,7 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
         profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
+        input: None,
     };
     let (executor, _state) =
         RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
@@ -413,6 +421,7 @@ command = ["site-builder", "exec"]
         profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
+        input: None,
     };
     let (executor, _state) =
         RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
@@ -436,6 +445,7 @@ fn dispatch_run_forwards_profile_mounts_into_session_spec() {
         profile: "site-builder".to_string(),
         repo_url: "https://example.com/repo.git".to_string(),
         work_unit: None,
+        input: None,
     };
     let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
 
@@ -462,4 +472,39 @@ fn dispatch_run_forwards_profile_mounts_into_session_spec() {
             },
         ]
     );
+}
+
+#[test]
+fn dispatch_run_forwards_typed_invocation_input_into_session_invocation() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
+    let request = RunRequest {
+        profile: "site-builder".to_string(),
+        repo_url: "https://example.com/repo.git".to_string(),
+        work_unit: None,
+        input: Some(InvocationInput::Artifact {
+            artifact_type: "claim".to_string(),
+            artifact_id: "claim".to_string(),
+            document: json!({ "summary": "Ship it" }),
+        }),
+    };
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
+
+    let state = state.lock().expect("recording state should lock");
+    let invocation = state
+        .last_invocation
+        .as_ref()
+        .expect("executor should receive invocation");
+    assert_eq!(invocation.input, request.input);
+
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
 }

@@ -6,6 +6,7 @@
 //! [`validate_mount_target`], [`validate_mount_overlap`]) are also used by the
 //! configuration layer in the `agentd` crate.
 
+use crate::input::INVOCATION_INPUT_MOUNT_PATH;
 use crate::naming::is_daemon_instance_id;
 use crate::session_paths::{session_home_dir, session_internal_agentd_dir, session_repo_dir};
 use crate::types::{
@@ -148,6 +149,11 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
     if invocation.repo_token.is_some() && !invocation.repo_url.starts_with("https://") {
         return Err(repo_token_requires_https_error());
     }
+    if invocation.work_unit.is_some() && invocation.input.is_some() {
+        return Err(RunnerError::InvalidInvocationInput {
+            message: "manual invocation must specify at most one of work_unit or input".to_string(),
+        });
+    }
 
     Ok(())
 }
@@ -287,6 +293,7 @@ fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
     let internal_agentd_dir = session_internal_agentd_dir(profile_name);
     let repo_dir = session_repo_dir(profile_name);
     let methodology_dir = Path::new(METHODOLOGY_MOUNT_PATH);
+    let invocation_input_dir = Path::new(INVOCATION_INPUT_MOUNT_PATH);
 
     // Each rule states the invariant for one runner-owned path. Intentional
     // overlap is part of the contract: targets like `/home` or `/` can
@@ -296,6 +303,10 @@ fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
     // Target and runner-owned methodology path must be disjoint by path
     // components: neither may be a prefix of the other.
     if target.starts_with(methodology_dir) || methodology_dir.starts_with(target) {
+        return true;
+    }
+
+    if target.starts_with(invocation_input_dir) || invocation_input_dir.starts_with(target) {
         return true;
     }
 
@@ -365,7 +376,9 @@ fn is_valid_unix_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BindMount, ResolvedEnvironmentVariable, test_support::test_session_spec};
+    use crate::{
+        BindMount, InvocationInput, ResolvedEnvironmentVariable, test_support::test_session_spec,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -577,6 +590,26 @@ mod tests {
         match error {
             RunnerError::ReservedMountTarget { target } => {
                 assert_eq!(target, PathBuf::from("/agentd/methodology/manifest.toml"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_invocation_input_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/invocation-input"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the invocation input mount");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd/invocation-input"));
             }
             other => panic!("expected ReservedMountTarget, got {other:?}"),
         }
@@ -1116,6 +1149,7 @@ mod tests {
                 repo_url: repo_url.to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             })
             .unwrap_or_else(|error| panic!("expected {repo_url} to be accepted, got {error}"));
@@ -1132,6 +1166,7 @@ mod tests {
                 repo_url: repo_url.to_string(),
                 repo_token: Some("repo-token".to_string()),
                 work_unit: None,
+                input: None,
                 timeout: None,
             })
             .unwrap_or_else(|error| panic!("expected {repo_url} to be accepted, got {error}"));
@@ -1148,6 +1183,7 @@ mod tests {
                 repo_url: repo_url.to_string(),
                 repo_token: Some("repo-token".to_string()),
                 work_unit: None,
+                input: None,
                 timeout: None,
             })
             .expect_err("repo_token should be rejected for non-https repo URLs");
@@ -1199,6 +1235,7 @@ mod tests {
                 repo_url: repo_url.to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             })
             .expect_err("non-remote repo URL should be rejected");
@@ -1216,6 +1253,7 @@ mod tests {
             repo_url: "https://user:token@example.com/repo.git".to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         })
         .expect_err("credential-bearing repo URLs should be rejected");
@@ -1242,6 +1280,7 @@ mod tests {
                 repo_url: "/srv/test-repo.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -1264,6 +1303,7 @@ mod tests {
                 repo_url: "https://user:token@example.com/repo.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -1296,6 +1336,7 @@ mod tests {
                     repo_url: repo_url.to_string(),
                     repo_token: Some("repo-token".to_string()),
                     work_unit: None,
+                    input: None,
                     timeout: None,
                 },
             )
@@ -1315,6 +1356,57 @@ mod tests {
     }
 
     #[test]
+    fn validate_invocation_accepts_zero_or_one_manual_intent_surface() {
+        for (work_unit, input) in [
+            (None, None),
+            (Some("issue-42".to_string()), None),
+            (
+                None,
+                Some(InvocationInput::RequestText {
+                    description: "Add a status page".to_string(),
+                }),
+            ),
+        ] {
+            validate_invocation(&SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit,
+                input,
+                timeout: None,
+            })
+            .expect("zero or one manual intent surface should be accepted");
+        }
+    }
+
+    #[test]
+    fn validate_invocation_rejects_conflicting_manual_intent_surfaces() {
+        let error = validate_invocation(&SessionInvocation {
+            repo_url: "https://example.com/agentd.git".to_string(),
+            repo_token: None,
+            work_unit: Some("issue-42".to_string()),
+            input: Some(InvocationInput::RequestText {
+                description: "Add a status page".to_string(),
+            }),
+            timeout: None,
+        })
+        .expect_err("conflicting work_unit and input should be rejected");
+
+        assert!(
+            matches!(error, RunnerError::InvalidInvocationInput { .. }),
+            "expected InvalidInvocationInput, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("work_unit"),
+            "expected work_unit guidance in message, got {message}"
+        );
+        assert!(
+            message.contains("input"),
+            "expected input guidance in message, got {message}"
+        );
+    }
+
+    #[test]
     fn run_session_rejects_reserved_profile_name_before_methodology_validation() {
         let error = crate::run_session(
             SessionSpec {
@@ -1326,6 +1418,7 @@ mod tests {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )

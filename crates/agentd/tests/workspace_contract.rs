@@ -135,8 +135,12 @@ fn workspace_docs_describe_persistent_audit_record_contract() {
         "architecture should describe the persistent audit record root"
     );
     assert!(
-        architecture.contains("artifacts_dir"),
-        "architecture should document the artifacts_dir audit scope boundary"
+        architecture.contains("non-configurable `.runa/store/` and `.runa/workspace/`"),
+        "architecture should document full audit coverage for runa's fixed workspace layout"
+    );
+    assert!(
+        !architecture.contains("artifacts_dir"),
+        "architecture should not describe removed artifacts_dir configurability"
     );
     assert!(
         architecture.contains("accumulate") && architecture.contains("indefinitely"),

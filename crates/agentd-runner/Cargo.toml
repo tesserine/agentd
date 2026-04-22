@@ -8,11 +8,12 @@ build = "build.rs"
 
 [dependencies]
 getrandom = "0.4.2"
+jsonschema = { version = "0.46.2", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 time = { version = "0.3.44", features = ["formatting"] }
+toml = "0.8"
 tracing = "0.1.41"
 
 [dev-dependencies]
-toml = "0.8"
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"] }

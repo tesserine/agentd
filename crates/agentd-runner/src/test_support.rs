@@ -481,6 +481,7 @@ impl FakePodmanFixture {
                     repo_url: VALID_REMOTE_REPO_URL.to_string(),
                     repo_token: None,
                     work_unit: None,
+                    input: None,
                     timeout: None,
                 },
             )

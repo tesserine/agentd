@@ -130,7 +130,9 @@ The runner prepares the execution environment:
 5. Creates an unprivileged unix user whose username is the configured profile name, with home directory `/home/{username}`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the session command starts. Base images that lack `/bin/sh`, `find`, `git`, `useradd`, or `gosu` are not supported.
 6. Resolves the host audit root, creates it if needed, and probes writability before accepting work. The default for rootless deployments is `$XDG_STATE_HOME/tesserine/audit`, falling back to `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset. Operators may override that with `daemon.audit_root`; root-owned system installs should typically point it at `/var/lib/tesserine/audit`. After resolution, the runner allocates a host audit record at `{audit_root}/{profile}/{session_id}/`, writes start metadata to `agentd/session.json`, and bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa` before the runtime initializes runa state.
 7. Recursively transfers ownership of pre-existing content under `/home/{username}` while pruning host-backed bind-mount targets, the runner-owned audit leaf `/home/{username}/.agentd/audit/runa`, and `/home/{username}/repo`, then transfers ownership of `/home/{username}/repo` after the clone, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready. The runner reserves `/home/{username}` itself, `/home/{username}/.agentd` plus its descendants, and `/home/{username}/repo` plus its descendants so host-backed bind mounts cannot collide with runner-managed paths.
-8. Creates `/home/{username}/repo/.runa` as a symlink to `/home/{username}/.agentd/audit/runa`. This is a runner-owned repo contract: cloned repositories must not contain a `.runa` entry at repo root. If the clone already contains one, setup fails explicitly rather than overwriting repository content.
+8. When manual invocation includes operator input, reads the active methodology's `manifest.toml` plus `schemas/<type>.schema.json` on the host, validates the input there, stages the final JSON under a runner-managed bind mount at `/agentd/invocation-input`, and rejects unsupported request canonical versions before any container is created. In `v0.1.x`, request-text input supports canonical request version `1.0.0` only, keyed by `x-tesserine-canonical.version`.
+9. Creates `/home/{username}/repo/.runa` as a symlink to `/home/{username}/.agentd/audit/runa`. This is a runner-owned repo contract: cloned repositories must not contain a `.runa` entry at repo root. If the clone already contains one, setup fails explicitly rather than overwriting repository content.
+10. When staged invocation input is present, copies it into `.runa/workspace/<type>/<id>.json` before dropping privileges and launching the profile command.
 
 ### Phase 3: Execution (`agentd-runner`)
 
@@ -170,6 +172,7 @@ agentd runs sessions in ephemeral Podman containers so agents remain separated f
 | Mount or Injection | Purpose | Need Served |
 |---|---|---|
 | Read-only methodology directory | Expose the configured methodology manifest and protocol assets without allowing mutation | Context |
+| Read-only invocation input mount at `/agentd/invocation-input` | Carry validated operator-supplied JSON into the container so the runner can materialize it in `.runa/workspace` before the profile command starts | Mission |
 | Runner-owned audit bind mount at `/home/{username}/.agentd/audit/runa` | Persist runa state on the host while keeping agentd metadata distinct in the same session record | Context, Mission |
 | Profile-declared bind mounts | Expose host-managed state such as subscription auth or persistent artifact storage with per-mount read-only vs read-write policy | Context, Credentials |
 | Credentials | Authenticate to external systems without baking secrets into images | Credentials |
@@ -179,6 +182,7 @@ From inside the environment, an agent should see:
 - identity-related environment variables
 - `$HOME` set to `/home/{username}`
 - a read-only methodology mount rooted at `manifest.toml`
+- a read-only invocation-input mount at `/agentd/invocation-input` when manual input is supplied
 - a runner-managed audit bridge at `/home/{username}/repo/.runa -> /home/{username}/.agentd/audit/runa`
 - any additional bind mounts declared by the selected profile
 - a fresh writable repository checkout at `/home/{username}/repo`
@@ -195,6 +199,11 @@ consumer of this mechanism; persistent audit storage in `#76` builds on the
 same path with read-write mounts. Additional mounts are not relabelled; on
 SELinux-enabled hosts, operators must pre-label those host paths with a
 container-compatible context.
+
+The invocation-input mount is runner-owned, not operator-owned. Its target
+`/agentd/invocation-input` is reserved alongside `/agentd/methodology`, so
+profile-declared mounts cannot collide with the pre-command input-materialization
+path.
 
 The internal audit mount is different from operator-declared mounts. It is
 runner-owned, not operator-owned, and agentd applies `relabel=shared` to that
@@ -217,10 +226,8 @@ layout:
   directory
 
 Coverage is intentionally scoped to the repo-root `.runa/` tree. That captures
-`runa`'s non-configurable `.runa/store/` and the default `.runa/workspace/`.
-If a methodology sets `artifacts_dir` outside `.runa/` in `.runa/config.toml`,
-that workspace path is outside the audit mount and will not be preserved.
-Groundwork uses the default `.runa/workspace/` layout and is fully covered.
+`runa`'s non-configurable `.runa/store/` and `.runa/workspace/`, so persisted
+runtime state stays inside the audit mount.
 
 Retention is intentionally out of scope here. Audit records accumulate
 indefinitely under the resolved audit root; pruning and retention policy are

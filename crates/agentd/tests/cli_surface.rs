@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use agentd::config::Config;
 use agentd::{SessionExecutor, run_daemon_until_shutdown};
-use agentd_runner::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
+use agentd_runner::{InvocationInput, RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
+use serde_json::json;
 
 type DaemonHandle = thread::JoinHandle<Result<(), agentd::DaemonError>>;
 type RecordedInvocations = Arc<Mutex<Vec<SessionInvocation>>>;
@@ -383,6 +384,225 @@ fn binary_run_command_prefers_explicit_repo_over_profile_default_repo() {
     assert_eq!(
         invocations.lock().expect("invocations should lock")[0].repo_url,
         explicit_repo
+    );
+}
+
+#[test]
+fn binary_run_command_rejects_request_when_work_unit_is_also_supplied() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-request-work-unit-conflict-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-request-work-unit-conflict",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            "https://example.com/repo.git",
+            "--work-unit",
+            "issue-81",
+            "--request",
+            "Add a status page",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        !output.status.success(),
+        "run command should reject conflicting request/work-unit flags"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert!(
+        stderr.contains("--request") && stderr.contains("--work-unit"),
+        "expected clap conflict mentioning both flags, got: {stderr}"
+    );
+}
+
+#[test]
+fn binary_run_command_requires_artifact_type_when_artifact_file_is_supplied() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-artifact-type-required-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-artifact-type-required",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+    let artifact_path = runtime_dir.join("request.json");
+    std::fs::write(
+        &artifact_path,
+        r#"{"description":"Add a status page","source":"operator"}"#,
+    )
+    .expect("artifact file should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            "https://example.com/repo.git",
+            "--artifact-file",
+            artifact_path
+                .to_str()
+                .expect("artifact path should be utf-8"),
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        !output.status.success(),
+        "run command should reject artifact files without an artifact type"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert!(
+        stderr.contains("--artifact-type"),
+        "expected missing-artifact-type error, got: {stderr}"
+    );
+}
+
+#[test]
+fn binary_run_command_forwards_request_text_as_typed_invocation_input() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-request-input-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-request-input",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            "https://example.com/repo.git",
+            "--request",
+            "Add a status page",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "run command should succeed with request input: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocation = invocations.lock().expect("invocations should lock")[0].clone();
+    assert_eq!(
+        invocation.input,
+        Some(InvocationInput::RequestText {
+            description: "Add a status page".to_string(),
+        })
+    );
+}
+
+#[test]
+fn binary_run_command_reads_artifact_file_and_forwards_structured_input() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-artifact-input-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-artifact-input",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+    let artifact_path = runtime_dir.join("request.json");
+    std::fs::write(
+        &artifact_path,
+        r#"{"description":"Add a status page","source":"operator"}"#,
+    )
+    .expect("artifact file should be written");
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            "https://example.com/repo.git",
+            "--artifact-type",
+            "request",
+            "--artifact-file",
+            artifact_path
+                .to_str()
+                .expect("artifact path should be utf-8"),
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "run command should succeed with artifact input: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocation = invocations.lock().expect("invocations should lock")[0].clone();
+    assert_eq!(
+        invocation.input,
+        Some(InvocationInput::Artifact {
+            artifact_type: "request".to_string(),
+            artifact_id: "request".to_string(),
+            document: json!({
+                "description": "Add a status page",
+                "source": "operator",
+            }),
+        })
     );
 }
 

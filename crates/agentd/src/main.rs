@@ -8,6 +8,7 @@ use agentd::config::{Config, DaemonConfig};
 use agentd::{
     RunRequest, RunnerSessionExecutor, configure_tracing, request_run, run_daemon_until_shutdown,
 };
+use agentd_runner::InvocationInput;
 use clap::{Parser, Subcommand};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 
@@ -16,8 +17,26 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
 #[derive(Debug)]
 enum RunCommandError {
     Outcome(agentd_runner::SessionOutcome),
-    UnknownProfile { profile: String },
-    MissingRepo { profile: String },
+    UnknownProfile {
+        profile: String,
+    },
+    MissingRepo {
+        profile: String,
+    },
+    ArtifactFileUnreadable {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+    ArtifactFileNonUtf8 {
+        path: PathBuf,
+    },
+    ArtifactFileInvalidJson {
+        path: PathBuf,
+        error: serde_json::Error,
+    },
+    ArtifactFileMissingStem {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for RunCommandError {
@@ -43,6 +62,34 @@ impl fmt::Display for RunCommandError {
                 f,
                 "profile '{profile}' requires a repo argument or configured profile repo"
             ),
+            Self::ArtifactFileUnreadable { path, error } => {
+                write!(
+                    f,
+                    "failed to read artifact file {}: {error}",
+                    path.display()
+                )
+            }
+            Self::ArtifactFileNonUtf8 { path } => {
+                write!(
+                    f,
+                    "artifact file must be valid UTF-8 JSON: {}",
+                    path.display()
+                )
+            }
+            Self::ArtifactFileInvalidJson { path, error } => {
+                write!(
+                    f,
+                    "artifact file must contain valid JSON {}: {error}",
+                    path.display()
+                )
+            }
+            Self::ArtifactFileMissingStem { path } => {
+                write!(
+                    f,
+                    "artifact file must have a non-empty UTF-8 file stem: {}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -66,8 +113,18 @@ enum Command {
     Run {
         profile: String,
         repo: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["request", "artifact_file"])]
         work_unit: Option<String>,
+        #[arg(long, conflicts_with_all = ["work_unit", "artifact_file"])]
+        request: Option<String>,
+        #[arg(
+                long,
+                requires = "artifact_type",
+                conflicts_with_all = ["work_unit", "request"]
+            )]
+        artifact_file: Option<PathBuf>,
+        #[arg(long, requires = "artifact_file")]
+        artifact_type: Option<String>,
     },
 }
 
@@ -95,7 +152,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             profile,
             repo,
             work_unit,
-        }) => run_client(&cli.config, profile, repo, work_unit),
+            request,
+            artifact_file,
+            artifact_type,
+        }) => run_client(
+            &cli.config,
+            profile,
+            repo,
+            work_unit,
+            request,
+            artifact_file,
+            artifact_type,
+        ),
     }
 }
 
@@ -122,8 +190,12 @@ fn run_client(
     profile: String,
     repo: Option<String>,
     work_unit: Option<String>,
+    request: Option<String>,
+    artifact_file: Option<PathBuf>,
+    artifact_type: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = resolve_run_repo(config_path, &profile, repo)?;
+    let input = resolve_invocation_input(request, artifact_file, artifact_type)?;
     let daemon_config = DaemonConfig::load(config_path)?;
     let outcome = request_run(
         &daemon_config,
@@ -131,6 +203,7 @@ fn run_client(
             profile,
             repo_url: repo,
             work_unit,
+            input,
         },
     )?;
 
@@ -140,6 +213,51 @@ fn run_client(
     } else {
         Err(Box::new(RunCommandError::Outcome(outcome)))
     }
+}
+
+fn resolve_invocation_input(
+    request: Option<String>,
+    artifact_file: Option<PathBuf>,
+    artifact_type: Option<String>,
+) -> Result<Option<InvocationInput>, Box<dyn std::error::Error>> {
+    if let Some(description) = request {
+        return Ok(Some(InvocationInput::RequestText { description }));
+    }
+
+    let Some(path) = artifact_file else {
+        return Ok(None);
+    };
+    let artifact_type = artifact_type.expect("clap should require artifact_type");
+    let bytes = std::fs::read(&path).map_err(|error| {
+        Box::new(RunCommandError::ArtifactFileUnreadable {
+            path: path.clone(),
+            error,
+        }) as Box<dyn std::error::Error>
+    })?;
+    let contents = String::from_utf8(bytes).map_err(|_| {
+        Box::new(RunCommandError::ArtifactFileNonUtf8 { path: path.clone() })
+            as Box<dyn std::error::Error>
+    })?;
+    let document = serde_json::from_str(&contents).map_err(|error| {
+        Box::new(RunCommandError::ArtifactFileInvalidJson {
+            path: path.clone(),
+            error,
+        }) as Box<dyn std::error::Error>
+    })?;
+    let artifact_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| {
+            Box::new(RunCommandError::ArtifactFileMissingStem { path: path.clone() })
+                as Box<dyn std::error::Error>
+        })?;
+
+    Ok(Some(InvocationInput::Artifact {
+        artifact_type,
+        artifact_id: artifact_id.to_string(),
+        document,
+    }))
 }
 
 fn resolve_run_repo(
