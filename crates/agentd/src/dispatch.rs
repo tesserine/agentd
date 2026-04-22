@@ -13,7 +13,9 @@ use crate::config::{Config, ConfigError};
 pub struct RunRequest {
     pub profile: String,
     pub repo_url: String,
+    /// Optional manual work-unit target. Mutually exclusive with `input`.
     pub work_unit: Option<String>,
+    /// Optional manual invocation input. Mutually exclusive with `work_unit`.
     pub input: Option<InvocationInput>,
 }
 

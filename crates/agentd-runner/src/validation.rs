@@ -149,6 +149,11 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
     if invocation.repo_token.is_some() && !invocation.repo_url.starts_with("https://") {
         return Err(repo_token_requires_https_error());
     }
+    if invocation.work_unit.is_some() && invocation.input.is_some() {
+        return Err(RunnerError::InvalidInvocationInput {
+            message: "manual invocation must specify at most one of work_unit or input".to_string(),
+        });
+    }
 
     Ok(())
 }
@@ -371,7 +376,9 @@ fn is_valid_unix_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BindMount, ResolvedEnvironmentVariable, test_support::test_session_spec};
+    use crate::{
+        BindMount, InvocationInput, ResolvedEnvironmentVariable, test_support::test_session_spec,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -1346,6 +1353,57 @@ mod tests {
                 "expected repo_token https-only message for {repo_url}, got {error}"
             );
         }
+    }
+
+    #[test]
+    fn validate_invocation_accepts_zero_or_one_manual_intent_surface() {
+        for (work_unit, input) in [
+            (None, None),
+            (Some("issue-42".to_string()), None),
+            (
+                None,
+                Some(InvocationInput::RequestText {
+                    description: "Add a status page".to_string(),
+                }),
+            ),
+        ] {
+            validate_invocation(&SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit,
+                input,
+                timeout: None,
+            })
+            .expect("zero or one manual intent surface should be accepted");
+        }
+    }
+
+    #[test]
+    fn validate_invocation_rejects_conflicting_manual_intent_surfaces() {
+        let error = validate_invocation(&SessionInvocation {
+            repo_url: "https://example.com/agentd.git".to_string(),
+            repo_token: None,
+            work_unit: Some("issue-42".to_string()),
+            input: Some(InvocationInput::RequestText {
+                description: "Add a status page".to_string(),
+            }),
+            timeout: None,
+        })
+        .expect_err("conflicting work_unit and input should be rejected");
+
+        assert!(
+            matches!(error, RunnerError::InvalidInvocationInput { .. }),
+            "expected InvalidInvocationInput, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("work_unit"),
+            "expected work_unit guidance in message, got {message}"
+        );
+        assert!(
+            message.contains("input"),
+            "expected input guidance in message, got {message}"
+        );
     }
 
     #[test]

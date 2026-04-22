@@ -93,8 +93,9 @@ pub enum InvocationInput {
 /// Per-invocation parameters for a session launch.
 ///
 /// Describes the repository to clone, optional clone-only repository
-/// authentication, an optional work unit, and an optional timeout. Validated
-/// by [`run_session`](crate::run_session) before any resources are allocated.
+/// authentication, at most one manual intent surface (`work_unit` or `input`),
+/// and an optional timeout. Validated by [`run_session`](crate::run_session)
+/// before any resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInvocation {
     /// Remote repository URL cloned into the container workspace. Must use
@@ -108,9 +109,12 @@ pub struct SessionInvocation {
     pub repo_token: Option<String>,
     /// Optional work unit identifier exposed to the session command through
     /// the runner-managed `AGENTD_WORK_UNIT` environment variable when set.
+    /// Mutually exclusive with [`Self::input`].
     pub work_unit: Option<String>,
     /// Optional operator-supplied input to materialize into the repo
-    /// workspace before the session command runs.
+    /// workspace before the session command runs. Artifact names supplied
+    /// through [`InvocationInput::Artifact`] must each be a single path
+    /// segment. Mutually exclusive with [`Self::work_unit`].
     pub input: Option<InvocationInput>,
     /// Optional session timeout. When set, the runner force-removes the
     /// container after this duration and returns

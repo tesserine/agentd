@@ -226,10 +226,8 @@ layout:
   directory
 
 Coverage is intentionally scoped to the repo-root `.runa/` tree. That captures
-`runa`'s non-configurable `.runa/store/` and the default `.runa/workspace/`.
-If a methodology sets `artifacts_dir` outside `.runa/` in `.runa/config.toml`,
-that workspace path is outside the audit mount and will not be preserved.
-Groundwork uses the default `.runa/workspace/` layout and is fully covered.
+`runa`'s non-configurable `.runa/store/` and `.runa/workspace/`, so persisted
+runtime state stays inside the audit mount.
 
 Retention is intentionally out of scope here. Audit records accumulate
 indefinitely under the resolved audit root; pruning and retention policy are

@@ -3,7 +3,7 @@ use jsonschema::validator_for;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub(crate) const INVOCATION_INPUT_MOUNT_PATH: &str = "/agentd/invocation-input";
 const REQUEST_ARTIFACT_TYPE: &str = "request";
@@ -80,15 +80,10 @@ pub(crate) fn resolve_invocation_input(
             artifact_id,
             document,
         } => {
+            ensure_single_path_segment(artifact_type, "artifact type")?;
+            ensure_single_path_segment(artifact_id, "artifact id")?;
             ensure_declared_artifact_type(&manifest, artifact_type)
                 .map_err(|message| RunnerError::InvalidInvocationInput { message })?;
-            if artifact_id.is_empty() {
-                return Err(RunnerError::InvalidInvocationInput {
-                    message: format!(
-                        "artifact input for type '{artifact_type}' must include a non-empty artifact id"
-                    ),
-                });
-            }
 
             let schema = load_schema(&schema_path(methodology_dir, artifact_type))
                 .map_err(|message| RunnerError::InvalidInvocationInput { message })?;
@@ -129,6 +124,24 @@ fn ensure_declared_artifact_type(
     Err(format!(
         "artifact type '{artifact_type}' is not declared in the methodology manifest"
     ))
+}
+
+fn ensure_single_path_segment(value: &str, field_name: &str) -> Result<(), RunnerError> {
+    if value.is_empty() || value.contains('/') || value.contains('\\') || value.contains('\0') {
+        return Err(invalid_single_path_segment_error(field_name));
+    }
+
+    let mut components = Path::new(value).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(invalid_single_path_segment_error(field_name)),
+    }
+}
+
+fn invalid_single_path_segment_error(field_name: &str) -> RunnerError {
+    RunnerError::InvalidInvocationInput {
+        message: format!("{field_name} must be a single path segment"),
+    }
 }
 
 fn schema_path(methodology_dir: &Path, artifact_type: &str) -> PathBuf {
@@ -183,4 +196,130 @@ fn render_document(document: &Value) -> Result<String, RunnerError> {
     serde_json::to_string(document).map_err(|error| RunnerError::InvalidInvocationInput {
         message: format!("failed to serialize invocation input document: {error}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_invocation_input;
+    use crate::types::{InvocationInput, RunnerError};
+    use serde_json::json;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn resolve_invocation_input_accepts_single_segment_artifact_names() {
+        let methodology_dir = unique_methodology_dir("single-segment");
+        write_methodology_fixture(&methodology_dir, "claim");
+
+        let resolved = resolve_invocation_input(
+            &methodology_dir,
+            Some(&InvocationInput::Artifact {
+                artifact_type: "claim".to_string(),
+                artifact_id: "claim-42".to_string(),
+                document: json!({ "summary": "Ship it" }),
+            }),
+        )
+        .expect("single-segment artifact names should be accepted")
+        .expect("artifact input should resolve");
+
+        assert_eq!(resolved.artifact_type, "claim");
+        assert_eq!(resolved.artifact_id, "claim-42");
+
+        fs::remove_dir_all(&methodology_dir).expect("temporary methodology dir should be removed");
+    }
+
+    #[test]
+    fn resolve_invocation_input_rejects_non_segment_artifact_names() {
+        for invalid_artifact_name in [
+            "",
+            ".",
+            "..",
+            "claim/child",
+            "/absolute",
+            r"claim\escape",
+            "claim\0escape",
+        ] {
+            let methodology_dir = unique_methodology_dir("invalid-segment");
+            write_methodology_fixture(&methodology_dir, "claim");
+
+            let error = resolve_invocation_input(
+                &methodology_dir,
+                Some(&InvocationInput::Artifact {
+                    artifact_type: invalid_artifact_name.to_string(),
+                    artifact_id: "claim-42".to_string(),
+                    document: json!({ "summary": "Ship it" }),
+                }),
+            )
+            .expect_err("invalid artifact type should be rejected");
+
+            assert_invalid_invocation_input(error, invalid_artifact_name);
+
+            let error = resolve_invocation_input(
+                &methodology_dir,
+                Some(&InvocationInput::Artifact {
+                    artifact_type: "claim".to_string(),
+                    artifact_id: invalid_artifact_name.to_string(),
+                    document: json!({ "summary": "Ship it" }),
+                }),
+            )
+            .expect_err("invalid artifact id should be rejected");
+
+            assert_invalid_invocation_input(error, invalid_artifact_name);
+
+            fs::remove_dir_all(&methodology_dir)
+                .expect("temporary methodology dir should be removed");
+        }
+    }
+
+    fn assert_invalid_invocation_input(error: RunnerError, invalid_artifact_name: &str) {
+        let message = error.to_string();
+        assert!(
+            matches!(error, RunnerError::InvalidInvocationInput { .. }),
+            "expected InvalidInvocationInput for {invalid_artifact_name:?}, got {error:?}"
+        );
+        assert!(
+            message.contains("single path segment"),
+            "expected single-path-segment guidance for {invalid_artifact_name:?}, got {message}"
+        );
+    }
+
+    fn write_methodology_fixture(methodology_dir: &Path, artifact_type: &str) {
+        fs::create_dir_all(methodology_dir.join("schemas"))
+            .expect("methodology schemas dir should be created");
+        fs::write(
+            methodology_dir.join("manifest.toml"),
+            format!("[[artifact_types]]\nname = \"{artifact_type}\"\n"),
+        )
+        .expect("methodology manifest should be written");
+        fs::write(
+            methodology_dir
+                .join("schemas")
+                .join(format!("{artifact_type}.schema.json")),
+            r#"{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string" }
+  },
+  "required": ["summary"],
+  "additionalProperties": false
+}"#,
+        )
+        .expect("artifact schema should be written");
+    }
+
+    fn unique_methodology_dir(name: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+        std::env::temp_dir().join(format!(
+            "agentd-runner-input-test-{name}-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
 }
