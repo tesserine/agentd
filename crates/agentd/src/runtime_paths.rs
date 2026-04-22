@@ -100,48 +100,37 @@ impl RuntimePathLayout {
     }
 
     fn client_socket_path(&self) -> Result<PathBuf, ClientSocketPathError> {
-        let mut candidates = Vec::new();
-
         if let Some(runtime_dir) = &self.xdg_runtime_dir {
-            candidates.push(runtime_dir.join("agentd").join(SOCKET_BASENAME));
-        }
-
-        if self.tmp_runtime_dir.exists() {
-            validate_tmp_runtime_dir(&self.tmp_runtime_dir, self.uid)?;
-        }
-        candidates.push(self.tmp_runtime_dir.join(SOCKET_BASENAME));
-        candidates.push(self.system_runtime_dir.join(SOCKET_BASENAME));
-
-        let mut last_candidate = None;
-        for candidate in candidates {
-            if !candidate.exists() {
-                last_candidate = Some(candidate);
-                continue;
-            }
-
-            let should_use_candidate = match UnixStream::connect(&candidate) {
-                Ok(stream) => {
-                    drop(stream);
-                    true
-                }
-                Err(error)
-                    if matches!(
-                        error.raw_os_error(),
-                        Some(libc::ENOENT) | Some(libc::ECONNREFUSED)
-                    ) =>
-                {
-                    false
-                }
-                Err(_) => true,
-            };
-
-            last_candidate = Some(candidate.clone());
-            if should_use_candidate {
+            let candidate = runtime_dir.join("agentd").join(SOCKET_BASENAME);
+            if socket_candidate_is_ready(&candidate) {
                 return Ok(candidate);
             }
         }
 
-        Ok(last_candidate.expect("client socket path candidates should not be empty"))
+        let tmp_socket_path = self.tmp_runtime_dir.join(SOCKET_BASENAME);
+        match fs::symlink_metadata(&self.tmp_runtime_dir) {
+            Ok(_) => {
+                validate_tmp_runtime_dir(&self.tmp_runtime_dir, self.uid)?;
+                if socket_candidate_is_ready(&tmp_socket_path) {
+                    return Ok(tmp_socket_path);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(TemporaryRuntimeDirError::new(
+                    &self.tmp_runtime_dir,
+                    format!("failed to inspect temporary runtime directory ({error})"),
+                )
+                .into());
+            }
+        }
+
+        let system_socket_path = self.system_runtime_dir.join(SOCKET_BASENAME);
+        if socket_candidate_is_ready(&system_socket_path) {
+            return Ok(system_socket_path);
+        }
+
+        Ok(system_socket_path)
     }
 
     fn daemon_runtime_paths(&self) -> DaemonRuntimePaths {
@@ -157,6 +146,28 @@ impl RuntimePathLayout {
             socket_path: runtime_dir.join(SOCKET_BASENAME),
             pid_file: runtime_dir.join(PID_BASENAME),
         }
+    }
+}
+
+fn socket_candidate_is_ready(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+
+    match UnixStream::connect(path) {
+        Ok(stream) => {
+            drop(stream);
+            true
+        }
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT) | Some(libc::ECONNREFUSED)
+            ) =>
+        {
+            false
+        }
+        Err(_) => true,
     }
 }
 
@@ -353,6 +364,36 @@ mod tests {
     }
 
     #[test]
+    fn client_socket_path_ignores_insecure_tmp_dir_when_xdg_socket_is_available() {
+        let root = unique_dir("xdg-ignore-bad-tmp");
+        let xdg_runtime_dir = root.join("xdg-runtime");
+        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
+        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
+        let _listener = UnixListener::bind(xdg_agentd_dir.join("agentd.sock"))
+            .expect("xdg runtime socket should bind");
+
+        let tmp_runtime_dir = root.join("tmp-runtime");
+        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
+        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions should be set");
+
+        let uid = unsafe { libc::geteuid() };
+        let layout = test_layout(
+            uid,
+            Some(xdg_runtime_dir),
+            tmp_runtime_dir,
+            root.join("run-agentd"),
+        );
+
+        assert_eq!(
+            layout
+                .client_socket_path()
+                .expect("xdg path should resolve before tmp validation"),
+            xdg_agentd_dir.join("agentd.sock")
+        );
+    }
+
+    #[test]
     fn client_socket_path_falls_through_to_system_when_earlier_candidates_are_unavailable() {
         let root = unique_dir("client-system-fallback");
         let xdg_runtime_dir = root.join("xdg-runtime");
@@ -388,6 +429,36 @@ mod tests {
                 .client_socket_path()
                 .expect("system path should resolve"),
             system_runtime_dir.join("agentd.sock")
+        );
+    }
+
+    #[test]
+    fn client_socket_path_rejects_insecure_tmp_dir_before_falling_through_to_system() {
+        let root = unique_dir("sys-reject-bad-tmp");
+        let tmp_runtime_dir = root.join("tmp-runtime");
+        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
+        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("permissions should be set");
+        let system_runtime_dir = root.join("run-agentd");
+        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
+        let _listener = UnixListener::bind(system_runtime_dir.join("agentd.sock"))
+            .expect("system runtime socket should bind");
+
+        let layout = test_layout(
+            unsafe { libc::geteuid() + 1 },
+            None,
+            tmp_runtime_dir.clone(),
+            system_runtime_dir,
+        );
+
+        let error = layout
+            .client_socket_path()
+            .expect_err("insecure tmp runtime dir should halt discovery");
+        assert!(error.to_string().contains("owned by uid"));
+        assert!(
+            error
+                .to_string()
+                .contains(tmp_runtime_dir.to_string_lossy().as_ref())
         );
     }
 
