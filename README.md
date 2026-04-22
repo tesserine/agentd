@@ -213,10 +213,11 @@ Manual invocation supports exactly one intent surface at a time:
 either:
 
 - explicit override with `--socket-path <PATH>`
-- default discovery in XDG-aligned order:
-  `$XDG_RUNTIME_DIR/agentd/agentd.sock`,
-  `/tmp/agentd-$UID/agentd.sock`,
-  `/run/agentd/agentd.sock`
+- default discovery by runtime context:
+  `$XDG_RUNTIME_DIR/agentd/agentd.sock` first when `XDG_RUNTIME_DIR` is set;
+  for rootless XDG-unset clients, `/tmp/agentd-$UID/agentd.sock` before
+  `/run/agentd/agentd.sock`; for root XDG-unset clients,
+  `/run/agentd/agentd.sock` directly
 
 When the `/tmp/agentd-$UID/` fallback exists, the client requires that
 directory to be user-owned and mode `0700`; otherwise it refuses with an

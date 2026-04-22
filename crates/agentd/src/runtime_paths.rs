@@ -107,21 +107,23 @@ impl RuntimePathLayout {
             }
         }
 
-        let tmp_socket_path = self.tmp_runtime_dir.join(SOCKET_BASENAME);
-        match fs::symlink_metadata(&self.tmp_runtime_dir) {
-            Ok(_) => {
-                validate_tmp_runtime_dir(&self.tmp_runtime_dir, self.uid)?;
-                if socket_candidate_is_ready(&tmp_socket_path) {
-                    return Ok(tmp_socket_path);
+        if self.uid != 0 {
+            let tmp_socket_path = self.tmp_runtime_dir.join(SOCKET_BASENAME);
+            match fs::symlink_metadata(&self.tmp_runtime_dir) {
+                Ok(_) => {
+                    validate_tmp_runtime_dir(&self.tmp_runtime_dir, self.uid)?;
+                    if socket_candidate_is_ready(&tmp_socket_path) {
+                        return Ok(tmp_socket_path);
+                    }
                 }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(TemporaryRuntimeDirError::new(
-                    &self.tmp_runtime_dir,
-                    format!("failed to inspect temporary runtime directory ({error})"),
-                )
-                .into());
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(TemporaryRuntimeDirError::new(
+                        &self.tmp_runtime_dir,
+                        format!("failed to inspect temporary runtime directory ({error})"),
+                    )
+                    .into());
+                }
             }
         }
 
@@ -394,6 +396,35 @@ mod tests {
     }
 
     #[test]
+    fn client_socket_path_prefers_xdg_runtime_dir_for_root_when_present() {
+        let root = unique_dir("client-root-xdg");
+        let xdg_runtime_dir = root.join("xdg-runtime");
+        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
+        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
+        let _listener = UnixListener::bind(xdg_agentd_dir.join("agentd.sock"))
+            .expect("xdg runtime socket should bind");
+
+        let tmp_runtime_dir = root.join("tmp-runtime");
+        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
+        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions should be set");
+
+        let layout = test_layout(
+            0,
+            Some(xdg_runtime_dir),
+            tmp_runtime_dir,
+            root.join("run-agentd"),
+        );
+
+        assert_eq!(
+            layout
+                .client_socket_path()
+                .expect("xdg path should resolve before root system fallback"),
+            xdg_agentd_dir.join("agentd.sock")
+        );
+    }
+
+    #[test]
     fn client_socket_path_falls_through_to_system_when_earlier_candidates_are_unavailable() {
         let root = unique_dir("client-system-fallback");
         let xdg_runtime_dir = root.join("xdg-runtime");
@@ -485,6 +516,29 @@ mod tests {
     }
 
     #[test]
+    fn client_socket_path_skips_tmp_validation_for_root_without_xdg() {
+        let root = unique_dir("client-root-skip-insecure-tmp");
+        let tmp_runtime_dir = root.join("tmp-runtime");
+        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
+        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions should be set");
+
+        let system_runtime_dir = root.join("run-agentd");
+        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
+        let _listener = UnixListener::bind(system_runtime_dir.join("agentd.sock"))
+            .expect("system runtime socket should bind");
+
+        let layout = test_layout(0, None, tmp_runtime_dir, system_runtime_dir.clone());
+
+        assert_eq!(
+            layout
+                .client_socket_path()
+                .expect("root should resolve the system socket"),
+            system_runtime_dir.join("agentd.sock")
+        );
+    }
+
+    #[test]
     fn client_socket_path_returns_system_path_when_no_default_socket_is_available() {
         let root = unique_dir("client-run-fallback");
         let layout = test_layout(
@@ -499,6 +553,31 @@ mod tests {
                 .client_socket_path()
                 .expect("system fallback should resolve"),
             root.join("run-agentd/agentd.sock")
+        );
+    }
+
+    #[test]
+    fn client_socket_path_ignores_tmp_socket_for_root_without_xdg() {
+        let root = unique_dir("client-root-ignore-tmp-socket");
+        let tmp_runtime_dir = root.join("tmp-runtime");
+        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
+        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("permissions should be set");
+        let _tmp_listener = UnixListener::bind(tmp_runtime_dir.join("agentd.sock"))
+            .expect("tmp runtime socket should bind");
+
+        let system_runtime_dir = root.join("run-agentd");
+        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
+        let _system_listener = UnixListener::bind(system_runtime_dir.join("agentd.sock"))
+            .expect("system runtime socket should bind");
+
+        let layout = test_layout(0, None, tmp_runtime_dir, system_runtime_dir.clone());
+
+        assert_eq!(
+            layout
+                .client_socket_path()
+                .expect("root should prefer the system socket"),
+            system_runtime_dir.join("agentd.sock")
         );
     }
 
