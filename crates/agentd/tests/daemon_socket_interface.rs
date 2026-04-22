@@ -10,7 +10,9 @@ use agentd::config::{Config, ConfigError};
 use agentd::{
     ClientError, DaemonError, RunRequest, SessionExecutor, request_run, run_daemon_until_shutdown,
 };
+use agentd_runner::InvocationInput;
 use agentd_runner::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
+use serde_json::json;
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -28,6 +30,39 @@ impl SessionExecutor for FixedOutcomeExecutor {
         _spec: SessionSpec,
         _invocation: SessionInvocation,
     ) -> Result<SessionOutcome, RunnerError> {
+        Ok(self.outcome.clone())
+    }
+}
+
+#[derive(Clone)]
+struct RecordingInvocationExecutor {
+    outcome: SessionOutcome,
+    invocations: Arc<Mutex<Vec<SessionInvocation>>>,
+}
+
+impl RecordingInvocationExecutor {
+    fn new(outcome: SessionOutcome) -> (Self, Arc<Mutex<Vec<SessionInvocation>>>) {
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                outcome,
+                invocations: Arc::clone(&invocations),
+            },
+            invocations,
+        )
+    }
+}
+
+impl SessionExecutor for RecordingInvocationExecutor {
+    fn run_session(
+        &self,
+        _spec: SessionSpec,
+        invocation: SessionInvocation,
+    ) -> Result<SessionOutcome, RunnerError> {
+        self.invocations
+            .lock()
+            .expect("recorded invocations should lock")
+            .push(invocation);
         Ok(self.outcome.clone())
     }
 }
@@ -194,6 +229,7 @@ fn daemon_reports_run_outcome_back_through_client_request() {
             profile: "site-builder".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: Some("task-42".to_string()),
+            input: None,
         },
     )
     .expect("client request should succeed");
@@ -221,6 +257,7 @@ fn client_reports_clear_error_when_daemon_is_not_running() {
             profile: "site-builder".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: None,
+            input: None,
         },
     )
     .expect_err("missing daemon should be reported");
@@ -230,6 +267,61 @@ fn client_reports_clear_error_when_daemon_is_not_running() {
             assert_eq!(path, config.daemon().socket_path());
         }
         other => panic!("expected daemon-not-running error, got {other:?}"),
+    }
+}
+
+#[test]
+fn daemon_round_trips_typed_invocation_input_through_the_socket_protocol() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("typed-input");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let (executor, invocations) =
+        RecordingInvocationExecutor::new(SessionOutcome::Success { exit_code: 0 });
+    let handle =
+        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
+    wait_for_path(config.daemon().socket_path());
+
+    let outcome = request_run(
+        config.daemon(),
+        &RunRequest {
+            profile: "site-builder".to_string(),
+            repo_url: "https://example.com/repo.git".to_string(),
+            work_unit: None,
+            input: Some(InvocationInput::Artifact {
+                artifact_type: "claim".to_string(),
+                artifact_id: "claim".to_string(),
+                document: json!({ "summary": "Ship it" }),
+            }),
+        },
+    )
+    .expect("client request should succeed");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    let invocation = invocations.lock().expect("invocations should lock")[0].clone();
+    assert_eq!(
+        invocation.input,
+        Some(InvocationInput::Artifact {
+            artifact_type: "claim".to_string(),
+            artifact_id: "claim".to_string(),
+            document: json!({ "summary": "Ship it" }),
+        })
+    );
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
     }
 }
 
@@ -349,6 +441,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
                 profile: "site-builder".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("first".to_string()),
+                input: None,
             },
         )
     });
@@ -363,6 +456,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
                 profile: "site-builder".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("second".to_string()),
+                input: None,
             },
         );
         second_tx
@@ -442,6 +536,7 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
                 profile: "site-builder".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("shutdown".to_string()),
+                input: None,
             },
         )
     });
@@ -505,6 +600,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
                 profile: "site-builder".to_string(),
                 repo_url: "https://example.com/repo.git".to_string(),
                 work_unit: Some("draining".to_string()),
+                input: None,
             },
         )
     });
@@ -519,6 +615,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
             profile: "site-builder".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: Some("rejected".to_string()),
+            input: None,
         },
     )
     .expect_err("new run should be rejected once shutdown begins");

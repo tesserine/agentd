@@ -44,6 +44,7 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
                 read_only: false,
                 relabel_shared: true,
             },
+            invocation_input_mount: None,
             additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
@@ -53,8 +54,10 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     let mount_value = argument_value(&args.join(" "), "--mount")
@@ -80,6 +83,7 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
                 read_only: false,
                 relabel_shared: true,
             },
+            invocation_input_mount: None,
             additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
@@ -89,8 +93,10 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     let user_index = args
@@ -121,6 +127,7 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
         repo_url: VALID_REMOTE_REPO_URL.to_string(),
         repo_token: None,
         work_unit: None,
+        input: None,
         timeout: None,
     };
     let args = build_create_container_args(
@@ -135,14 +142,16 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
                 read_only: false,
                 relabel_shared: true,
             },
+            invocation_input_mount: None,
             additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
             repo_token_secret_binding: None,
         },
         &spec,
         &invocation,
+        None,
     );
-    let expected_script = build_container_script(&spec, &invocation);
+    let expected_script = build_container_script(&spec, &invocation, None);
 
     let image_index = args
         .iter()
@@ -169,6 +178,7 @@ fn create_container_args_include_configured_additional_mounts_after_methodology_
                 read_only: false,
                 relabel_shared: true,
             },
+            invocation_input_mount: None,
             additional_mounts: vec![
                 PreparedBindMount {
                     source: PathBuf::from("/tmp/staging/mount-0"),
@@ -191,8 +201,10 @@ fn create_container_args_include_configured_additional_mounts_after_methodology_
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     let mount_values = argument_values(&args, "--mount");
@@ -228,8 +240,10 @@ fn build_container_script_terminates_git_clone_options_before_repo_url() {
             repo_url: "-repo.git".to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     assert!(script.contains("git clone --no-hardlinks -- '-repo.git' '/home/site-builder/repo'"));
@@ -243,8 +257,10 @@ fn build_container_script_disables_git_terminal_prompts() {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     assert!(script.contains("GIT_TERMINAL_PROMPT=0 git clone --no-hardlinks -- "));
@@ -262,8 +278,10 @@ fn build_container_script_creates_home_workspace_and_execs_profile_command_from_
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: Some("task-42".to_string()),
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     assert!(script.contains("useradd --create-home --home-dir '/home/myprofile' --shell /bin/sh --user-group 'myprofile'"));
@@ -335,8 +353,10 @@ fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_t
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     assert!(
@@ -379,8 +399,10 @@ fn build_container_script_does_not_emit_intermediate_home_chown_commands() {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile'\n"));
@@ -404,8 +426,10 @@ fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
+        None,
     );
 
     assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
@@ -427,6 +451,7 @@ fn clone_command_passes_repo_token_to_git_via_environment_not_argv() {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: Some("test-token".to_string()),
             work_unit: None,
+            input: None,
             timeout: None,
         },
         "/tmp/repo",
@@ -474,6 +499,7 @@ fn clone_command_omits_git_auth_environment_when_repo_token_is_absent() {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
         "/tmp/repo",
@@ -874,6 +900,7 @@ fn run_session_does_not_pass_repo_token_via_podman_create_arguments() {
                 repo_url: VALID_REMOTE_REPO_URL.to_string(),
                 repo_token: Some("repo-secret-token".to_string()),
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -1363,6 +1390,7 @@ fn run_session_returns_run_error_when_cleanup_after_run_also_fails() {
                     repo_url: VALID_REMOTE_REPO_URL.to_string(),
                     repo_token: None,
                     work_unit: None,
+                    input: None,
                     timeout: None,
                 },
             )

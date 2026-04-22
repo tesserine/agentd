@@ -12,7 +12,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use agentd_runner::{
-    RunnerError, SessionOutcome, StartupReconciliationReport, reconcile_startup_resources,
+    InvocationInput, RunnerError, SessionOutcome, StartupReconciliationReport,
+    reconcile_startup_resources,
 };
 use serde::{Deserialize, Serialize};
 
@@ -126,6 +127,7 @@ enum RequestMessage {
         profile: String,
         repo_url: String,
         work_unit: Option<String>,
+        input: Option<InvocationInput>,
     },
 }
 
@@ -429,6 +431,7 @@ pub fn request_run(
             profile: request.profile.clone(),
             repo_url: request.repo_url.clone(),
             work_unit: request.work_unit.clone(),
+            input: request.input.clone(),
         },
     )? {
         ResponseMessage::SessionOutcome { outcome } => Ok(outcome.into()),
@@ -449,6 +452,7 @@ pub(crate) fn request_run_without_waiting(
             profile: request.profile.clone(),
             repo_url: request.repo_url.clone(),
             work_unit: request.work_unit.clone(),
+            input: request.input.clone(),
         },
     )
 }
@@ -552,12 +556,14 @@ fn handle_connection_inner(
             profile,
             repo_url,
             work_unit,
+            input,
         } => match dispatch_run(
             config,
             &RunRequest {
                 profile: profile.clone(),
                 repo_url,
                 work_unit: work_unit.clone(),
+                input,
             },
             executor,
         ) {

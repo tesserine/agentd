@@ -12,8 +12,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agentd_runner::{
-    BindMount, ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome, SessionSpec,
-    run_session,
+    BindMount, InvocationInput, ResolvedEnvironmentVariable, SessionInvocation, SessionOutcome,
+    SessionSpec, run_session,
 };
 use serde_json::Value;
 
@@ -59,6 +59,64 @@ fn wait_for_session_record_dir(
     }
 }
 
+fn write_methodology_manifest(path: &Path, artifact_types: &[&str]) {
+    let mut manifest = String::from("name = \"test-methodology\"\n");
+    for artifact_type in artifact_types {
+        manifest.push_str("\n[[artifact_types]]\nname = \"");
+        manifest.push_str(artifact_type);
+        manifest.push_str("\"\n");
+    }
+    fs::write(path.join("manifest.toml"), manifest)
+        .expect("methodology manifest should be written");
+}
+
+fn install_request_schema(path: &Path, version: &str) {
+    let schema_dir = path.join("schemas");
+    fs::create_dir_all(&schema_dir).expect("schema dir should be created");
+    fs::write(
+        schema_dir.join("request.schema.json"),
+        format!(
+            r#"{{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-tesserine-canonical": {{
+    "version": "{version}",
+    "schema_url": "https://example.com/request.schema.json",
+    "prose_url": "https://example.com/REQUEST.md"
+  }},
+  "type": "object",
+  "required": ["description", "source"],
+  "additionalProperties": false,
+  "properties": {{
+    "description": {{ "type": "string", "minLength": 1 }},
+    "source": {{ "type": "string", "minLength": 1 }},
+    "context": {{ "type": "string" }}
+  }}
+}}
+"#
+        ),
+    )
+    .expect("request schema should be written");
+}
+
+fn install_claim_schema(path: &Path) {
+    let schema_dir = path.join("schemas");
+    fs::create_dir_all(&schema_dir).expect("schema dir should be created");
+    fs::write(
+        schema_dir.join("claim.schema.json"),
+        r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["summary"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": { "type": "string", "minLength": 1 }
+  }
+}
+"#,
+    )
+    .expect("claim schema should be written");
+}
+
 #[test]
 fn succeeds_without_timeout_and_cleans_up_container() {
     if skip_if_podman_unavailable("succeeds_without_timeout_and_cleans_up_container") {
@@ -101,6 +159,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: Some("task-42".to_string()),
+            input: None,
             timeout: None,
         },
     )
@@ -109,6 +168,149 @@ fn succeeds_without_timeout_and_cleans_up_container() {
     assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn materializes_request_text_input_before_session_command_runs() {
+    if skip_if_podman_unavailable("materializes_request_text_input_before_session_command_runs") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("request-input-run");
+    write_methodology_manifest(&fixture.methodology_dir(), &["request"]);
+    install_request_schema(&fixture.methodology_dir(), "1.0.0");
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "request-input-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: Vec::new(),
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "assert-request-input-present".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            input: Some(InvocationInput::RequestText {
+                description: "Add a status page".to_string(),
+            }),
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn materializes_generic_artifact_input_before_session_command_runs() {
+    if skip_if_podman_unavailable("materializes_generic_artifact_input_before_session_command_runs")
+    {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("artifact-input-run");
+    write_methodology_manifest(&fixture.methodology_dir(), &["claim"]);
+    install_claim_schema(&fixture.methodology_dir());
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "artifact-input-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: Vec::new(),
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "assert-claim-input-present".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            input: Some(InvocationInput::Artifact {
+                artifact_type: "claim".to_string(),
+                artifact_id: "claim".to_string(),
+                document: serde_json::json!({ "summary": "Ship it" }),
+            }),
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn rejects_request_text_when_methodology_declares_an_unsupported_request_version() {
+    if skip_if_podman_unavailable(
+        "rejects_request_text_when_methodology_declares_an_unsupported_request_version",
+    ) {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("unsupported-request-version-run");
+    write_methodology_manifest(&fixture.methodology_dir(), &["request"]);
+    install_request_schema(&fixture.methodology_dir(), "2.0.0");
+    let image = fixture.build_image();
+
+    let error = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            profile_name: "unsupported-request-version-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: Vec::new(),
+            command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: Vec::new(),
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            input: Some(InvocationInput::RequestText {
+                description: "Add a status page".to_string(),
+            }),
+            timeout: None,
+        },
+    )
+    .expect_err("unsupported request version should fail before session start");
+
+    assert!(
+        error
+            .to_string()
+            .contains("canonical request version 2.0.0 is not supported"),
+        "expected unsupported-version error, got: {error}"
+    );
 }
 
 #[test]
@@ -152,6 +354,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: Some("task-42".to_string()),
+            input: None,
             timeout: None,
         },
     )
@@ -193,6 +396,7 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
     )
@@ -242,6 +446,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
     )
@@ -291,6 +496,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
     )
@@ -341,6 +547,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: Some("task-42".to_string()),
+            input: None,
             timeout: None,
         },
     )
@@ -397,6 +604,7 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
     )
@@ -464,6 +672,7 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
     )
@@ -535,6 +744,7 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
     )
@@ -581,6 +791,7 @@ fn preserves_session_user_access_to_preexisting_home_content() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
     )
@@ -622,6 +833,7 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: Some("issue-76".to_string()),
+            input: None,
             timeout: None,
         },
     )
@@ -710,6 +922,7 @@ fn preserves_host_readability_for_restrictive_container_written_audit_entries_af
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: Some("issue-76".to_string()),
+            input: None,
             timeout: None,
         },
     )
@@ -811,6 +1024,7 @@ fn refuses_hard_linked_audit_entries_without_mutating_operator_mount_file_modes(
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: None,
         },
     )
@@ -884,6 +1098,7 @@ fn preserves_failing_audit_trail_for_post_mortem_reconstruction() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: Some("issue-76".to_string()),
+            input: None,
             timeout: None,
         },
     )
@@ -956,6 +1171,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
+            input: None,
             timeout: Some(Duration::from_secs(1)),
         },
     )
@@ -1007,6 +1223,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                 repo_url,
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -1556,6 +1773,19 @@ case "$command_name" in
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "success-without-work-unit" ]; then
             [ "${AGENTD_WORK_UNIT+set}" != "set" ]
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "assert-request-input-present" ]; then
+            [ -f "${HOME}/repo/.runa/workspace/request/operator-input.json" ]
+            grep -F '"description":"Add a status page"' "${HOME}/repo/.runa/workspace/request/operator-input.json"
+            grep -F '"source":"operator"' "${HOME}/repo/.runa/workspace/request/operator-input.json"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "assert-claim-input-present" ]; then
+            [ -f "${HOME}/repo/.runa/workspace/claim/claim.json" ]
+            grep -F '"summary":"Ship it"' "${HOME}/repo/.runa/workspace/claim/claim.json"
             exit 0
         fi
 

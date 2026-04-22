@@ -8,6 +8,7 @@
 //! --attach` is ambiguous (podman infrastructure error vs. container process)
 //! and requires container state inspection to disambiguate.
 
+use crate::input::{INVOCATION_INPUT_MOUNT_PATH, ResolvedInvocationInput};
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::podman::{run_podman_command, run_podman_command_until};
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
@@ -34,8 +35,15 @@ pub(crate) fn create_container(
     resources: &SessionResources,
     spec: &SessionSpec,
     invocation: &SessionInvocation,
+    resolved_input: Option<&ResolvedInvocationInput>,
 ) -> Result<(), RunnerError> {
-    run_podman_command(build_create_container_args(resources, spec, invocation)).map(|_| ())
+    run_podman_command(build_create_container_args(
+        resources,
+        spec,
+        invocation,
+        resolved_input,
+    ))
+    .map(|_| ())
 }
 
 pub(crate) fn run_container_to_completion(
@@ -145,7 +153,11 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 // and `exec`s the configured session command as the unprivileged profile user
 // from the cloned repository. `set -eu` at the top ensures any setup failure
 // aborts immediately rather than continuing with a broken workspace.
-fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
+fn build_container_script(
+    spec: &SessionSpec,
+    invocation: &SessionInvocation,
+    resolved_input: Option<&ResolvedInvocationInput>,
+) -> String {
     let username = &spec.profile_name;
     let home_dir_path = session_home_dir(username);
     let home_dir = home_dir_path.display().to_string();
@@ -195,6 +207,21 @@ fn build_container_script(spec: &SessionSpec, invocation: &SessionInvocation) ->
     script.push_str(&shell_quote(&internal_audit_runa_dir));
     script.push(' ');
     script.push_str(&shell_quote(&repo_runa_dir));
+    if let Some(resolved_input) = resolved_input {
+        let workspace_dir = format!("{repo_runa_dir}/workspace/{}", resolved_input.artifact_type);
+        let artifact_path = format!("{workspace_dir}/{}.json", resolved_input.artifact_id);
+        let staged_document_path = format!("{INVOCATION_INPUT_MOUNT_PATH}/document.json");
+        script.push_str("\nmkdir -p ");
+        script.push_str(&shell_quote(&workspace_dir));
+        script.push_str("\ncp ");
+        script.push_str(&shell_quote(&staged_document_path));
+        script.push(' ');
+        script.push_str(&shell_quote(&artifact_path));
+        script.push_str("\nchown -R ");
+        script.push_str(&shell_quote(&user_group));
+        script.push(' ');
+        script.push_str(&shell_quote(&workspace_dir));
+    }
     script.push_str("\nexport HOME=");
     script.push_str(&shell_quote(&home_dir));
     if let Some(work_unit) = &invocation.work_unit {
@@ -291,6 +318,7 @@ fn build_create_container_args(
     resources: &SessionResources,
     spec: &SessionSpec,
     invocation: &SessionInvocation,
+    resolved_input: Option<&ResolvedInvocationInput>,
 ) -> Vec<String> {
     let mut args = vec![
         "create".to_string(),
@@ -311,6 +339,16 @@ fn build_create_container_args(
         resources.audit_mount.target.display(),
         resources.audit_mount.read_only
     ));
+
+    if let Some(mount) = &resources.invocation_input_mount {
+        args.push("--mount".to_string());
+        args.push(format!(
+            "type=bind,src={},target={},ro={},relabel=shared",
+            mount.source.display(),
+            mount.target.display(),
+            mount.read_only
+        ));
+    }
 
     for mount in &resources.additional_mounts {
         args.push("--mount".to_string());
@@ -370,7 +408,7 @@ fn build_create_container_args(
     args.push("/bin/sh".to_string());
     args.push(spec.base_image.clone());
     args.push("-lc".to_string());
-    args.push(build_container_script(spec, invocation));
+    args.push(build_container_script(spec, invocation, resolved_input));
 
     args
 }

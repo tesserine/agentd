@@ -13,6 +13,7 @@
 
 mod audit;
 mod container;
+mod input;
 mod lifecycle;
 mod naming;
 mod podman;
@@ -27,9 +28,9 @@ pub(crate) mod test_support;
 
 pub use reconcile::reconcile_startup_resources;
 pub use types::{
-    BindMount, EnvironmentNameValidationError, MountOverlapError, MountTargetValidationError,
-    ProfileNameValidationError, ResolvedEnvironmentVariable, RunnerError, SessionInvocation,
-    SessionOutcome, SessionSpec, StartupReconciliationReport,
+    BindMount, EnvironmentNameValidationError, InvocationInput, MountOverlapError,
+    MountTargetValidationError, ProfileNameValidationError, ResolvedEnvironmentVariable,
+    RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
 };
 pub use validation::{
     validate_environment_name, validate_mount_overlap, validate_mount_target,
@@ -38,6 +39,7 @@ pub use validation::{
 
 use audit::{SessionAuditCompletion, finalize_session_audit_record, prepare_session_audit_record};
 use container::{create_container, run_container_to_completion, run_container_with_timeout};
+use input::resolve_invocation_input;
 use lifecycle::{
     LifecycleFailureKind, log_lifecycle_failure, log_session_error, log_session_outcome,
     log_session_started, log_session_teardown,
@@ -67,6 +69,8 @@ pub fn run_session(
 ) -> Result<SessionOutcome, RunnerError> {
     validate_spec(&spec)?;
     validate_invocation(&invocation)?;
+    let resolved_input =
+        resolve_invocation_input(&spec.methodology_dir, invocation.input.as_ref())?;
     let session_id = unique_suffix()?;
 
     let container_name =
@@ -105,6 +109,7 @@ pub fn run_session(
         &invocation,
         &session_id,
         audit_record.clone(),
+        resolved_input.as_ref(),
     ) {
         Ok(resources) => resources,
         Err(ResourceAllocationFailure {
@@ -140,7 +145,7 @@ pub fn run_session(
         }
     };
 
-    if let Err(error) = create_container(&resources, &spec, &invocation) {
+    if let Err(error) = create_container(&resources, &spec, &invocation, resolved_input.as_ref()) {
         let cleanup_result = cleanup_session_resources(&resources);
         let audit_result = finalize_session_audit_record_if_cleanup_succeeded(
             &cleanup_result,
@@ -425,6 +430,7 @@ mod tests {
                         repo_url: "https://example.com/agentd.git".to_string(),
                         repo_token: None,
                         work_unit: None,
+                        input: None,
                         timeout: None,
                     },
                 )
@@ -500,6 +506,7 @@ mod tests {
                             repo_url: "https://example.com/agentd.git".to_string(),
                             repo_token: None,
                             work_unit: None,
+                            input: None,
                             timeout: None,
                         },
                     )
@@ -582,6 +589,7 @@ mod tests {
                         repo_url: "https://example.com/agentd.git".to_string(),
                         repo_token: None,
                         work_unit: None,
+                        input: None,
                         timeout: None,
                     },
                 )
@@ -661,6 +669,7 @@ mod tests {
                         repo_url: "https://example.com/agentd.git".to_string(),
                         repo_token: None,
                         work_unit: None,
+                        input: None,
                         timeout: None,
                     },
                 )
@@ -782,6 +791,7 @@ mod tests {
                         repo_url: "https://example.com/agentd.git".to_string(),
                         repo_token: None,
                         work_unit: None,
+                        input: None,
                         timeout: None,
                     },
                 )
@@ -896,6 +906,7 @@ mod tests {
                         repo_url: "https://example.com/agentd.git".to_string(),
                         repo_token: None,
                         work_unit: None,
+                        input: None,
                         timeout: None,
                     },
                 )

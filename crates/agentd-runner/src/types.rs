@@ -5,6 +5,8 @@
 //! [`run_session`](crate::run_session) operates on. Validation error types
 //! for the standalone validators are also defined here.
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -75,6 +77,19 @@ pub struct ResolvedEnvironmentVariable {
     pub value: String,
 }
 
+/// Typed operator-supplied input materialized into the session workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InvocationInput {
+    /// Convenience text input synthesized into a canonical request artifact.
+    RequestText { description: String },
+    /// A complete JSON artifact supplied by the operator.
+    Artifact {
+        artifact_type: String,
+        artifact_id: String,
+        document: Value,
+    },
+}
+
 /// Per-invocation parameters for a session launch.
 ///
 /// Describes the repository to clone, optional clone-only repository
@@ -94,6 +109,9 @@ pub struct SessionInvocation {
     /// Optional work unit identifier exposed to the session command through
     /// the runner-managed `AGENTD_WORK_UNIT` environment variable when set.
     pub work_unit: Option<String>,
+    /// Optional operator-supplied input to materialize into the repo
+    /// workspace before the session command runs.
+    pub input: Option<InvocationInput>,
     /// Optional session timeout. When set, the runner force-removes the
     /// container after this duration and returns
     /// [`SessionOutcome::TimedOut`].
@@ -310,6 +328,9 @@ pub enum RunnerError {
     /// `repo_token` without using `https://`. Produced during invocation
     /// validation.
     InvalidRepoUrl { message: String },
+    /// The operator-supplied invocation input is unsupported by the
+    /// methodology, malformed, or does not match the methodology schema.
+    InvalidInvocationInput { message: String },
     /// The command array is empty or contains an empty element.
     /// Produced during spec validation.
     InvalidCommand,
@@ -369,6 +390,7 @@ impl fmt::Display for RunnerError {
                 write!(f, "audit_root must be an absolute path: {}", path.display())
             }
             RunnerError::InvalidRepoUrl { message } => write!(f, "repo_url {message}"),
+            RunnerError::InvalidInvocationInput { message } => write!(f, "{message}"),
             RunnerError::InvalidCommand => {
                 write!(f, "command must contain at least one argument")
             }

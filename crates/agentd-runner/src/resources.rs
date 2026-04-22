@@ -6,6 +6,7 @@
 //! secrets or stale staging directories when resource creation fails midway.
 
 use crate::audit::SessionAuditRecord;
+use crate::input::{INVOCATION_INPUT_MOUNT_PATH, ResolvedInvocationInput};
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::naming::{SESSION_ID_LEN, format_secret_name};
 use crate::podman::run_podman_command_with_input;
@@ -17,6 +18,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
+const INVOCATION_INPUT_STAGE_DIR_NAME: &str = "invocation-input";
+const INVOCATION_INPUT_FILE_NAME: &str = "document.json";
 const AUDIT_RUNA_STAGE_LINK_NAME: &str = "audit-runa";
 const ADDITIONAL_MOUNT_STAGE_PREFIX: &str = "mount-";
 const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
@@ -42,6 +45,7 @@ pub(crate) struct SessionResources {
     pub(crate) methodology_mount_source: PathBuf,
     pub(crate) audit_record: SessionAuditRecord,
     pub(crate) audit_mount: PreparedBindMount,
+    pub(crate) invocation_input_mount: Option<PreparedBindMount>,
     pub(crate) additional_mounts: Vec<PreparedBindMount>,
     pub(crate) environment_secret_bindings: Vec<SecretBinding>,
     pub(crate) repo_token_secret_binding: Option<SecretBinding>,
@@ -92,6 +96,7 @@ pub(crate) fn prepare_session_resources(
     invocation: &SessionInvocation,
     session_id: &str,
     audit_record: SessionAuditRecord,
+    resolved_input: Option<&ResolvedInvocationInput>,
 ) -> Result<SessionResources, ResourceAllocationFailure> {
     let manifest_path = spec.methodology_dir.join("manifest.toml");
     if !manifest_path.is_file() {
@@ -116,6 +121,18 @@ pub(crate) fn prepare_session_resources(
         }
     };
     let methodology_mount_source = methodology_staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
+    let invocation_input_mount =
+        match create_invocation_input_mount(resolved_input, &methodology_staging_dir) {
+            Ok(mount) => mount,
+            Err(error) => {
+                return Err(rollback_failed_staging_dir_allocation(
+                    container_name,
+                    session_id,
+                    &methodology_staging_dir,
+                    error,
+                ));
+            }
+        };
     let additional_mounts = match create_additional_mounts(&spec.mounts, &methodology_staging_dir) {
         Ok(mounts) => mounts,
         Err(error) => {
@@ -133,6 +150,7 @@ pub(crate) fn prepare_session_resources(
         methodology_mount_source,
         audit_record,
         audit_mount,
+        invocation_input_mount,
         additional_mounts,
         environment_secret_bindings: Vec::new(),
         repo_token_secret_binding: None,
@@ -306,6 +324,29 @@ fn create_audit_mount(
         false,
         true,
     )
+}
+
+fn create_invocation_input_mount(
+    resolved_input: Option<&ResolvedInvocationInput>,
+    staging_dir: &Path,
+) -> Result<Option<PreparedBindMount>, RunnerError> {
+    let Some(resolved_input) = resolved_input else {
+        return Ok(None);
+    };
+
+    let staged_dir = staging_dir.join(INVOCATION_INPUT_STAGE_DIR_NAME);
+    fs::create_dir_all(&staged_dir)?;
+    fs::write(
+        staged_dir.join(INVOCATION_INPUT_FILE_NAME),
+        &resolved_input.document_json,
+    )?;
+
+    Ok(Some(PreparedBindMount {
+        source: staged_dir,
+        target: PathBuf::from(INVOCATION_INPUT_MOUNT_PATH),
+        read_only: true,
+        relabel_shared: true,
+    }))
 }
 
 fn create_prepared_bind_mount(
@@ -623,10 +664,12 @@ mod tests {
                     repo_url: "https://example.com/repo.git".to_string(),
                     repo_token: None,
                     work_unit: None,
+                    input: None,
                     timeout: None,
                 },
                 &session_id,
                 test_audit_record(&session_id),
+                None,
             )
         });
 
@@ -699,10 +742,12 @@ mod tests {
                     repo_url: "https://example.com/repo.git".to_string(),
                     repo_token: Some("repo-token".to_string()),
                     work_unit: None,
+                    input: None,
                     timeout: None,
                 },
                 &session_id,
                 test_audit_record(&session_id),
+                None,
             )
         });
 
@@ -766,10 +811,12 @@ mod tests {
                 repo_url: "https://example.com/repo.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
             &session_id,
             test_audit_record(&session_id),
+            None,
         );
 
         match result

@@ -80,6 +80,7 @@ impl Dispatcher for SocketDispatcher {
                         profile: request.profile.clone(),
                         repo_url: request.repo_url.clone(),
                         work_unit: None,
+                        input: None,
                     },
                 ) {
                     tracing::warn!(
@@ -311,6 +312,7 @@ command = ["site-builder", "exec"]
                 "profile": "site-builder",
                 "repo_url": "https://example.com/site.git",
                 "work_unit": null,
+                "input": null,
             })
         );
 

@@ -1,8 +1,8 @@
 use std::fmt;
 
 use agentd_runner::{
-    ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
-    run_session,
+    InvocationInput, ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome,
+    SessionSpec, run_session,
 };
 
 use crate::audit_root::prepare_audit_root;
@@ -14,6 +14,7 @@ pub struct RunRequest {
     pub profile: String,
     pub repo_url: String,
     pub work_unit: Option<String>,
+    pub input: Option<InvocationInput>,
 }
 
 /// Errors produced while mapping a run request into a runner session.
@@ -153,6 +154,7 @@ pub fn dispatch_run(
                 repo_url: request.repo_url.clone(),
                 repo_token,
                 work_unit: request.work_unit.clone(),
+                input: request.input.clone(),
                 timeout: None,
             },
         )

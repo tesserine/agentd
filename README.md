@@ -35,6 +35,10 @@ visibility.
 Profiles may now declare a default repository and an optional cron schedule.
 Manual runs still flow through `agentd run`, and scheduled runs dispatch
 through the same daemon socket intake without introducing a separate job type.
+Manual runs may also carry per-invocation work input without modifying the
+profile: request text can be synthesized into a canonical request artifact, and
+complete JSON artifacts can be placed directly into the session workspace when
+the active methodology declares the relevant artifact type and schema.
 Profiles may also declare additional bind mounts for host-managed state such as
 subscription auth directories. Independently of profile mounts, agentd now
 persists each session's audit record under the rootless default
@@ -186,12 +190,43 @@ Trigger a session through the running daemon:
 agentd run site-builder --work-unit issue-42
 ```
 
+Manual invocation supports exactly one intent surface at a time:
+
+- `--work-unit <ID>` targets existing queued work
+- `--request <TEXT>` synthesizes a canonical request artifact at
+  `.runa/workspace/request/operator-input.json`
+- `--artifact-type <TYPE> --artifact-file <PATH>` validates and places a
+  complete JSON artifact at `.runa/workspace/<TYPE>/<file-stem>.json`
+
+`--work-unit`, `--request`, and `--artifact-file` are mutually exclusive.
+
 `agentd run` reads the same config file and connects to the socket path defined
 there. When the profile declares `repo`, the CLI can omit the positional repo
 argument; an explicit repo still overrides the configured default:
 
 ```bash
 agentd run site-builder https://github.com/pentaxis93/agentd.git --work-unit issue-42
+```
+
+Text input is methodology-gated. `--request` is available only when the active
+methodology declares artifact type `request`, ships `schemas/request.schema.json`,
+and that schema advertises a supported canonical request version through
+`x-tesserine-canonical.version`. In `agentd v0.1.x`, the supported set is
+`1.0.0` only. Unsupported or undeclared request support is rejected before the
+container is created.
+
+Artifact-file input is generic. The CLI reads the file locally, requires UTF-8
+JSON, derives the artifact id from the file stem, and sends structured JSON to
+the daemon. The runner accepts that input only when the methodology declares
+the artifact type in `manifest.toml` and ships a matching
+`schemas/<type>.schema.json`.
+
+Examples:
+
+```bash
+agentd run site-builder --request "Add a status page"
+agentd run site-builder --artifact-type claim --artifact-file ./claim.json
+agentd run site-builder https://github.com/pentaxis93/agentd.git --request "Review the last release candidate"
 ```
 
 Both manual and scheduled dispatches use the same daemon socket intake. Inside
@@ -201,9 +236,11 @@ the container, the agent sees:
 - A fresh clone of the repository at `/home/site-builder/repo`
 - Repo-root `.runa` bridged to persistent audit storage
 - Read-only methodology mount at `/agentd/methodology`
+- A runner-managed read-only invocation-input mount at `/agentd/invocation-input` when manual input is supplied
 - Any operator-declared additional bind mounts, read-only or read-write per profile
 - Credentials injected as environment variables
 - `AGENTD_WORK_UNIT` when the invocation includes one
+- A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `--request` or `--artifact-file`
 - The configured session command executing from the repo directory
 
 The container is force-removed on completion. The session's audit record

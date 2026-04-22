@@ -506,6 +506,7 @@ mod tests {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
                 work_unit: Some("issue-76".to_string()),
+                input: None,
                 timeout: None,
             },
         )
@@ -621,6 +622,7 @@ mod tests {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -664,6 +666,7 @@ mod tests {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -746,6 +749,7 @@ mod tests {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -797,6 +801,7 @@ mod tests {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -839,6 +844,7 @@ mod tests {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
@@ -893,6 +899,7 @@ mod tests {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
                 work_unit: None,
+                input: None,
                 timeout: None,
             },
         )
