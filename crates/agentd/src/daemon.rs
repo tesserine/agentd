@@ -18,7 +18,7 @@ use agentd_runner::{
 use serde::{Deserialize, Serialize};
 
 use crate::audit_root::prepare_audit_root;
-use crate::config::{Config, ConfigError, DaemonConfig};
+use crate::config::{Config, ConfigError};
 use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
 use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 
@@ -125,7 +125,7 @@ enum RequestMessage {
     Ping,
     Run {
         profile: String,
-        repo_url: String,
+        repo_url: Option<String>,
         work_unit: Option<String>,
         input: Option<InvocationInput>,
     },
@@ -422,11 +422,11 @@ fn log_handler_panic(handler: JoinHandle<()>) {
 
 /// Trigger a run against the local daemon and wait for its terminal outcome.
 pub fn request_run(
-    config: &DaemonConfig,
+    socket_path: impl AsRef<Path>,
     request: &RunRequest,
 ) -> Result<SessionOutcome, ClientError> {
     match send_request(
-        config.socket_path(),
+        socket_path.as_ref(),
         &RequestMessage::Run {
             profile: request.profile.clone(),
             repo_url: request.repo_url.clone(),
@@ -443,11 +443,11 @@ pub fn request_run(
 }
 
 pub(crate) fn request_run_without_waiting(
-    config: &DaemonConfig,
+    socket_path: impl AsRef<Path>,
     request: &RunRequest,
 ) -> Result<(), ClientError> {
     send_request_without_response(
-        config.socket_path(),
+        socket_path.as_ref(),
         &RequestMessage::Run {
             profile: request.profile.clone(),
             repo_url: request.repo_url.clone(),

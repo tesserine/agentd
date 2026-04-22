@@ -178,10 +178,19 @@ agentd daemon --config /etc/agentd/agentd.toml
 `agentd` with no subcommand is equivalent to `agentd daemon`.
 
 The daemon runs in the foreground, reconciles stale resources from prior runs,
-and binds a Unix socket for operator control. Default paths:
-`/run/agentd/agentd.sock` and `/run/agentd/agentd.pid`. On SIGINT or SIGTERM,
-the daemon stops accepting connections and drains in-flight sessions; a second
-signal exits immediately.
+and binds a Unix socket for operator control. When `daemon.socket_path` and
+`daemon.pid_file` are omitted, agentd chooses coordinated defaults from the
+current runtime context:
+
+- `$XDG_RUNTIME_DIR/agentd/agentd.sock` and `$XDG_RUNTIME_DIR/agentd/agentd.pid`
+  when `XDG_RUNTIME_DIR` is set
+- `/tmp/agentd-$UID/agentd.sock` and `/tmp/agentd-$UID/agentd.pid` for
+  rootless environments without `XDG_RUNTIME_DIR`
+- `/run/agentd/agentd.sock` and `/run/agentd/agentd.pid` for root-owned system
+  installs
+
+On SIGINT or SIGTERM, the daemon stops accepting connections and drains
+in-flight sessions; a second signal exits immediately.
 The Unix socket protocol is internal to `agentd` in `v0.1.x`: daemon and CLI must be the same build, and operators must restart the daemon after replacing the binary before using `agentd run` again.
 
 Trigger a session through the running daemon:
@@ -200,11 +209,25 @@ Manual invocation supports exactly one intent surface at a time:
 
 `--work-unit`, `--request`, and `--artifact-file` are mutually exclusive.
 
-`agentd run` reads the same config file and connects to the socket path defined
-there. When the profile declares `repo`, the CLI can omit the positional repo
-argument; an explicit repo still overrides the configured default:
+`agentd run` does not read `agentd.toml`. The client connects to the daemon by
+either:
+
+- explicit override with `--socket-path <PATH>`
+- default discovery in XDG-aligned order:
+  `$XDG_RUNTIME_DIR/agentd/agentd.sock`,
+  `/tmp/agentd-$UID/agentd.sock`,
+  `/run/agentd/agentd.sock`
+
+When the `/tmp/agentd-$UID/` fallback exists, the client requires that
+directory to be user-owned and mode `0700`; otherwise it refuses with an
+actionable error instead of trusting an insecure `/tmp` path.
+
+Profile lookup and default-repo resolution now happen daemon-side. The client
+may omit the positional repo argument when the named profile declares `repo`,
+and an explicit repo still overrides the configured default:
 
 ```bash
+agentd run --socket-path /custom/agentd.sock site-builder --work-unit issue-42
 agentd run site-builder https://github.com/pentaxis93/agentd.git --work-unit issue-42
 ```
 

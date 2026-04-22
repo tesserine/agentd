@@ -75,10 +75,10 @@ impl Dispatcher for SocketDispatcher {
             .name(format!("agentd-scheduled-dispatch-{}", request.profile))
             .spawn(move || {
                 if let Err(error) = request_run_without_waiting(
-                    &daemon_config,
+                    daemon_config.socket_path(),
                     &RunRequest {
                         profile: request.profile.clone(),
-                        repo_url: request.repo_url.clone(),
+                        repo_url: Some(request.repo_url.clone()),
                         work_unit: None,
                         input: None,
                     },

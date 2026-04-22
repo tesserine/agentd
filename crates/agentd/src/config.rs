@@ -23,6 +23,8 @@ use croner::parser::{CronParser, Seconds, Year};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::runtime_paths::default_daemon_runtime_paths;
+
 /// Validated daemon and profile registry parsed from a TOML configuration file.
 ///
 /// Guarantees that daemon runtime paths are present, all profile names are
@@ -513,6 +515,12 @@ impl DaemonConfig {
     }
 }
 
+impl AsRef<Path> for DaemonConfig {
+    fn as_ref(&self) -> &Path {
+        self.socket_path()
+    }
+}
+
 /// Errors produced when loading or validating a configuration file.
 #[derive(Debug)]
 pub enum ConfigError {
@@ -816,11 +824,17 @@ struct RawCredentialConfig {
 }
 
 fn default_daemon_socket_path() -> String {
-    "/run/agentd/agentd.sock".to_string()
+    default_daemon_runtime_paths()
+        .socket_path()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn default_daemon_pid_file() -> String {
-    "/run/agentd/agentd.pid".to_string()
+    default_daemon_runtime_paths()
+        .pid_file()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn normalize_path_lexically(path: &Path) -> String {

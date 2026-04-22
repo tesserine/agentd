@@ -228,7 +228,7 @@ fn daemon_reports_run_outcome_back_through_client_request() {
         config.daemon(),
         &RunRequest {
             profile: "site-builder".to_string(),
-            repo_url: "https://example.com/repo.git".to_string(),
+            repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: Some("task-42".to_string()),
             input: None,
         },
@@ -256,7 +256,7 @@ fn client_reports_clear_error_when_daemon_is_not_running() {
         config.daemon(),
         &RunRequest {
             profile: "site-builder".to_string(),
-            repo_url: "https://example.com/repo.git".to_string(),
+            repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: None,
             input: None,
         },
@@ -294,7 +294,7 @@ fn daemon_round_trips_typed_invocation_input_through_the_socket_protocol() {
         config.daemon(),
         &RunRequest {
             profile: "site-builder".to_string(),
-            repo_url: "https://example.com/repo.git".to_string(),
+            repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: None,
             input: Some(InvocationInput::Artifact {
                 artifact_type: "claim".to_string(),
@@ -348,7 +348,7 @@ fn daemon_rejects_conflicting_work_unit_and_input_from_socket_callers() {
         config.daemon(),
         &RunRequest {
             profile: "site-builder".to_string(),
-            repo_url: "https://example.com/repo.git".to_string(),
+            repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: Some("issue-42".to_string()),
             input: Some(InvocationInput::RequestText {
                 description: "Add a status page".to_string(),
@@ -495,7 +495,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
             first_config.daemon(),
             &RunRequest {
                 profile: "site-builder".to_string(),
-                repo_url: "https://example.com/repo.git".to_string(),
+                repo_url: Some("https://example.com/repo.git".to_string()),
                 work_unit: Some("first".to_string()),
                 input: None,
             },
@@ -510,7 +510,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
             second_config.daemon(),
             &RunRequest {
                 profile: "site-builder".to_string(),
-                repo_url: "https://example.com/repo.git".to_string(),
+                repo_url: Some("https://example.com/repo.git".to_string()),
                 work_unit: Some("second".to_string()),
                 input: None,
             },
@@ -590,7 +590,7 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
             client_config.daemon(),
             &RunRequest {
                 profile: "site-builder".to_string(),
-                repo_url: "https://example.com/repo.git".to_string(),
+                repo_url: Some("https://example.com/repo.git".to_string()),
                 work_unit: Some("shutdown".to_string()),
                 input: None,
             },
@@ -654,7 +654,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
             first_config.daemon(),
             &RunRequest {
                 profile: "site-builder".to_string(),
-                repo_url: "https://example.com/repo.git".to_string(),
+                repo_url: Some("https://example.com/repo.git".to_string()),
                 work_unit: Some("draining".to_string()),
                 input: None,
             },
@@ -669,7 +669,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
         config.daemon(),
         &RunRequest {
             profile: "site-builder".to_string(),
-            repo_url: "https://example.com/repo.git".to_string(),
+            repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: Some("rejected".to_string()),
             input: None,
         },

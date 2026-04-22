@@ -12,7 +12,7 @@ use crate::config::{Config, ConfigError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
     pub profile: String,
-    pub repo_url: String,
+    pub repo_url: Option<String>,
     /// Optional manual work-unit target. Mutually exclusive with `input`.
     pub work_unit: Option<String>,
     /// Optional manual invocation input. Mutually exclusive with `work_unit`.
@@ -23,6 +23,9 @@ pub struct RunRequest {
 #[derive(Debug)]
 pub enum DispatchError {
     UnknownProfile {
+        profile: String,
+    },
+    MissingRepo {
         profile: String,
     },
     MissingCredentialSource {
@@ -38,6 +41,10 @@ impl fmt::Display for DispatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownProfile { profile } => write!(f, "unknown profile '{profile}'"),
+            Self::MissingRepo { profile } => write!(
+                f,
+                "profile '{profile}' requires a repo argument or configured profile repo"
+            ),
             Self::MissingCredentialSource {
                 profile,
                 credential,
@@ -109,6 +116,13 @@ pub fn dispatch_run(
             .ok_or_else(|| DispatchError::UnknownProfile {
                 profile: request.profile.clone(),
             })?;
+    let repo_url = request
+        .repo_url
+        .clone()
+        .or_else(|| profile.repo().map(str::to_owned));
+    let repo_url = repo_url.ok_or_else(|| DispatchError::MissingRepo {
+        profile: profile.name().to_string(),
+    })?;
     let daemon_instance_id = config.daemon().daemon_instance_id()?;
     let audit_root = prepare_audit_root(config.daemon())?;
 
@@ -153,7 +167,7 @@ pub fn dispatch_run(
                 environment,
             },
             SessionInvocation {
-                repo_url: request.repo_url.clone(),
+                repo_url,
                 repo_token,
                 work_unit: request.work_unit.clone(),
                 input: request.input.clone(),
