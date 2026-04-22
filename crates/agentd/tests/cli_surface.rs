@@ -250,6 +250,49 @@ fn binary_daemon_subcommand_starts_daemon_mode() {
 }
 
 #[test]
+fn binary_bare_command_with_config_starts_daemon_mode() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-bare-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "daemon-bare-command",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+        ])
+        .env("AGENTD_LOG_FORMAT", "text")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("agentd binary should spawn");
+
+    wait_for_path(&socket_path);
+    wait_for_path(&pid_file);
+    terminate(&mut child).expect("daemon should accept SIGTERM");
+    let output = child
+        .wait_with_output()
+        .expect("daemon output should be available");
+
+    assert!(
+        output.status.success(),
+        "daemon should exit cleanly: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn binary_run_help_shows_socket_path_and_not_config() {
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args(["run", "--help"])
@@ -331,6 +374,47 @@ fn binary_run_command_reports_clear_error_when_daemon_is_not_running() {
     assert!(
         stderr.contains("agentd is not running"),
         "expected daemon-not-running error, got: {stderr}"
+    );
+}
+
+#[test]
+fn binary_run_command_rejects_root_level_config() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-root-config-rejected-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-root-config-rejected",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+            "run",
+            "site-builder",
+            "https://example.com/repo.git",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        !output.status.success(),
+        "run command should reject daemon config at the root surface"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert!(
+        stderr.contains("--config") && stderr.contains("run"),
+        "expected root-level config rejection mentioning run, got: {stderr}"
     );
 }
 

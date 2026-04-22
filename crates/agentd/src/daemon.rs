@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit_root::prepare_audit_root;
 use crate::config::{Config, ConfigError};
+use crate::runtime_paths::{current_user_tmp_runtime_dir, ensure_tmp_runtime_dir};
 use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
 use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 
@@ -637,18 +638,13 @@ enum SocketCleanupState {
 
 impl DaemonRuntime {
     fn claim(socket_path: &Path, pid_file: &Path) -> Result<Self, DaemonError> {
-        let socket_parent_created = socket_path
-            .parent()
-            .map(ensure_directory_exists)
-            .transpose()?
-            .unwrap_or(false);
         if let Some(parent) = socket_path.parent() {
-            if socket_parent_created {
-                restrict_directory_permissions(parent, RUNTIME_DIR_MODE)?;
-            }
+            prepare_runtime_directory(parent)?;
         }
         if let Some(parent) = pid_file.parent() {
-            fs::create_dir_all(parent)?;
+            if socket_path.parent() != Some(parent) {
+                prepare_runtime_directory(parent)?;
+            }
         }
 
         let mut pid_lock = OpenOptions::new()
@@ -714,6 +710,26 @@ impl Drop for DaemonRuntime {
         }
         let _ = fs::remove_file(&self.pid_file);
     }
+}
+
+fn prepare_runtime_directory(path: &Path) -> Result<(), DaemonError> {
+    let uid = unsafe { libc::geteuid() };
+    if path == current_user_tmp_runtime_dir() {
+        ensure_tmp_runtime_dir(path, uid).map_err(|error| {
+            DaemonError::Io(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                error.to_string(),
+            ))
+        })?;
+        return Ok(());
+    }
+
+    let created = ensure_directory_exists(path)?;
+    if created {
+        restrict_directory_permissions(path, RUNTIME_DIR_MODE)?;
+    }
+
+    Ok(())
 }
 
 fn prepare_socket_path(socket_path: &Path) -> Result<(), DaemonError> {

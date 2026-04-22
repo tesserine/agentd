@@ -10,7 +10,7 @@ use agentd::{
     run_daemon_until_shutdown,
 };
 use agentd_runner::InvocationInput;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
@@ -89,17 +89,22 @@ impl Error for RunCommandError {}
 #[derive(Parser, Debug)]
 #[command(name = "agentd")]
 struct Cli {
+    #[arg(long)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Args, Debug, Default)]
+struct DaemonArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Start the foreground daemon.
-    Daemon {
-        #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
-        config: PathBuf,
-    },
+    Daemon(DaemonArgs),
     /// Trigger a manual session through the running daemon.
     Run {
         profile: String,
@@ -140,8 +145,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        None => run_daemon(Config::load(std::path::Path::new(DEFAULT_CONFIG_PATH))?),
-        Some(Command::Daemon { config }) => run_daemon(Config::load(&config)?),
+        None => run_daemon(Config::load(resolve_daemon_config_path(
+            cli.config.as_deref(),
+            None,
+        )?)?),
+        Some(Command::Daemon(daemon_args)) => run_daemon(Config::load(
+            resolve_daemon_config_path(cli.config.as_deref(), daemon_args.config.as_deref())?,
+        )?),
         Some(Command::Run {
             profile,
             repo,
@@ -150,15 +160,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             request,
             artifact_file,
             artifact_type,
-        }) => run_client(
-            socket_path.as_deref(),
-            profile,
-            repo,
-            work_unit,
-            request,
-            artifact_file,
-            artifact_type,
-        ),
+        }) => {
+            if cli.config.is_some() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--config is only supported for daemon mode, not `agentd run`",
+                )));
+            }
+            run_client(
+                socket_path.as_deref(),
+                profile,
+                repo,
+                work_unit,
+                request,
+                artifact_file,
+                artifact_type,
+            )
+        }
+    }
+}
+
+fn resolve_daemon_config_path<'a>(
+    root_config: Option<&'a std::path::Path>,
+    daemon_config: Option<&'a std::path::Path>,
+) -> Result<&'a std::path::Path, Box<dyn std::error::Error>> {
+    match (root_config, daemon_config) {
+        (Some(_), Some(_)) => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--config may be provided only once",
+        ))),
+        (Some(config), None) | (None, Some(config)) => Ok(config),
+        (None, None) => Ok(std::path::Path::new(DEFAULT_CONFIG_PATH)),
     }
 }
 
