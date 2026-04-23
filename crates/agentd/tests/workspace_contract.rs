@@ -119,6 +119,20 @@ fn workspace_docs_declare_same_build_socket_policy() {
         architecture.contains("daemon and CLI must be the same build"),
         "architecture should declare the same-build daemon/CLI requirement"
     );
+    assert!(
+        readme.contains("rootless XDG-unset")
+            && readme.contains("/tmp/agentd-$UID/agentd.sock")
+            && readme.contains("root XDG-unset")
+            && readme.contains("/run/agentd/agentd.sock"),
+        "README should distinguish rootless tmp fallback from root system fallback"
+    );
+    assert!(
+        architecture.contains("rootless XDG-unset")
+            && architecture.contains("/tmp/agentd-$UID/agentd.sock")
+            && architecture.contains("root XDG-unset")
+            && architecture.contains("/run/agentd/agentd.sock"),
+        "architecture should distinguish rootless tmp fallback from root system fallback"
+    );
 }
 
 #[test]

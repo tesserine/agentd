@@ -12,13 +12,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use agentd_runner::{
-    InvocationInput, RunnerError, SessionOutcome, StartupReconciliationReport,
-    reconcile_startup_resources,
+    RunnerError, SessionOutcome, StartupReconciliationReport, reconcile_startup_resources,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::audit_root::prepare_audit_root;
-use crate::config::{Config, ConfigError, DaemonConfig};
+use crate::config::{Config, ConfigError};
+use crate::protocol::{RequestMessage, ResponseMessage};
+use crate::runtime_paths::{current_user_tmp_runtime_dir, ensure_tmp_runtime_dir};
 use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
 use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 
@@ -116,90 +116,6 @@ impl From<io::Error> for ClientError {
 impl From<serde_json::Error> for ClientError {
     fn from(error: serde_json::Error) -> Self {
         Self::Protocol(error)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum RequestMessage {
-    Ping,
-    Run {
-        profile: String,
-        repo_url: String,
-        work_unit: Option<String>,
-        input: Option<InvocationInput>,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ResponseMessage {
-    Pong,
-    SessionOutcome { outcome: OutcomeMessage },
-    Error { message: String },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum OutcomeMessage {
-    Success { exit_code: i32 },
-    GenericFailure { exit_code: i32 },
-    UsageError { exit_code: i32 },
-    Blocked { exit_code: i32 },
-    NothingReady { exit_code: i32 },
-    WorkFailed { exit_code: i32 },
-    InfrastructureFailure { exit_code: i32 },
-    CommandNotExecutable { exit_code: i32 },
-    CommandNotFound { exit_code: i32 },
-    TerminatedBySignal { exit_code: i32, signal: i32 },
-    TimedOut,
-}
-
-impl From<SessionOutcome> for OutcomeMessage {
-    fn from(outcome: SessionOutcome) -> Self {
-        match outcome {
-            SessionOutcome::Success { exit_code } => Self::Success { exit_code },
-            SessionOutcome::GenericFailure { exit_code } => Self::GenericFailure { exit_code },
-            SessionOutcome::UsageError { exit_code } => Self::UsageError { exit_code },
-            SessionOutcome::Blocked { exit_code } => Self::Blocked { exit_code },
-            SessionOutcome::NothingReady { exit_code } => Self::NothingReady { exit_code },
-            SessionOutcome::WorkFailed { exit_code } => Self::WorkFailed { exit_code },
-            SessionOutcome::InfrastructureFailure { exit_code } => {
-                Self::InfrastructureFailure { exit_code }
-            }
-            SessionOutcome::CommandNotExecutable { exit_code } => {
-                Self::CommandNotExecutable { exit_code }
-            }
-            SessionOutcome::CommandNotFound { exit_code } => Self::CommandNotFound { exit_code },
-            SessionOutcome::TerminatedBySignal { exit_code, signal } => {
-                Self::TerminatedBySignal { exit_code, signal }
-            }
-            SessionOutcome::TimedOut => Self::TimedOut,
-        }
-    }
-}
-
-impl From<OutcomeMessage> for SessionOutcome {
-    fn from(outcome: OutcomeMessage) -> Self {
-        match outcome {
-            OutcomeMessage::Success { exit_code } => Self::Success { exit_code },
-            OutcomeMessage::GenericFailure { exit_code } => Self::GenericFailure { exit_code },
-            OutcomeMessage::UsageError { exit_code } => Self::UsageError { exit_code },
-            OutcomeMessage::Blocked { exit_code } => Self::Blocked { exit_code },
-            OutcomeMessage::NothingReady { exit_code } => Self::NothingReady { exit_code },
-            OutcomeMessage::WorkFailed { exit_code } => Self::WorkFailed { exit_code },
-            OutcomeMessage::InfrastructureFailure { exit_code } => {
-                Self::InfrastructureFailure { exit_code }
-            }
-            OutcomeMessage::CommandNotExecutable { exit_code } => {
-                Self::CommandNotExecutable { exit_code }
-            }
-            OutcomeMessage::CommandNotFound { exit_code } => Self::CommandNotFound { exit_code },
-            OutcomeMessage::TerminatedBySignal { exit_code, signal } => {
-                Self::TerminatedBySignal { exit_code, signal }
-            }
-            OutcomeMessage::TimedOut => Self::TimedOut,
-        }
     }
 }
 
@@ -422,11 +338,11 @@ fn log_handler_panic(handler: JoinHandle<()>) {
 
 /// Trigger a run against the local daemon and wait for its terminal outcome.
 pub fn request_run(
-    config: &DaemonConfig,
+    socket_path: impl AsRef<Path>,
     request: &RunRequest,
 ) -> Result<SessionOutcome, ClientError> {
     match send_request(
-        config.socket_path(),
+        socket_path.as_ref(),
         &RequestMessage::Run {
             profile: request.profile.clone(),
             repo_url: request.repo_url.clone(),
@@ -443,11 +359,11 @@ pub fn request_run(
 }
 
 pub(crate) fn request_run_without_waiting(
-    config: &DaemonConfig,
+    socket_path: impl AsRef<Path>,
     request: &RunRequest,
 ) -> Result<(), ClientError> {
     send_request_without_response(
-        config.socket_path(),
+        socket_path.as_ref(),
         &RequestMessage::Run {
             profile: request.profile.clone(),
             repo_url: request.repo_url.clone(),
@@ -637,18 +553,13 @@ enum SocketCleanupState {
 
 impl DaemonRuntime {
     fn claim(socket_path: &Path, pid_file: &Path) -> Result<Self, DaemonError> {
-        let socket_parent_created = socket_path
-            .parent()
-            .map(ensure_directory_exists)
-            .transpose()?
-            .unwrap_or(false);
         if let Some(parent) = socket_path.parent() {
-            if socket_parent_created {
-                restrict_directory_permissions(parent, RUNTIME_DIR_MODE)?;
-            }
+            prepare_runtime_directory(parent)?;
         }
         if let Some(parent) = pid_file.parent() {
-            fs::create_dir_all(parent)?;
+            if socket_path.parent() != Some(parent) {
+                prepare_runtime_directory(parent)?;
+            }
         }
 
         let mut pid_lock = OpenOptions::new()
@@ -714,6 +625,26 @@ impl Drop for DaemonRuntime {
         }
         let _ = fs::remove_file(&self.pid_file);
     }
+}
+
+fn prepare_runtime_directory(path: &Path) -> Result<(), DaemonError> {
+    let uid = unsafe { libc::geteuid() };
+    if path == current_user_tmp_runtime_dir() {
+        ensure_tmp_runtime_dir(path, uid).map_err(|error| {
+            DaemonError::Io(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                error.to_string(),
+            ))
+        })?;
+        return Ok(());
+    }
+
+    let created = ensure_directory_exists(path)?;
+    if created {
+        restrict_directory_permissions(path, RUNTIME_DIR_MODE)?;
+    }
+
+    Ok(())
 }
 
 fn prepare_socket_path(socket_path: &Path) -> Result<(), DaemonError> {

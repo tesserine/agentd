@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::{error::Error, fmt};
 
-use agentd::config::{Config, DaemonConfig};
+use agentd::config::Config;
 use agentd::{
-    RunRequest, RunnerSessionExecutor, configure_tracing, request_run, run_daemon_until_shutdown,
+    ClientError, ClientSocketPathError, RunRequest, RunnerSessionExecutor, configure_tracing,
+    request_run, resolve_client_socket_path, run_daemon_until_shutdown,
 };
 use agentd_runner::InvocationInput;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
@@ -17,12 +18,6 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
 #[derive(Debug)]
 enum RunCommandError {
     Outcome(agentd_runner::SessionOutcome),
-    UnknownProfile {
-        profile: String,
-    },
-    MissingRepo {
-        profile: String,
-    },
     ArtifactFileUnreadable {
         path: PathBuf,
         error: std::io::Error,
@@ -57,11 +52,6 @@ impl fmt::Display for RunCommandError {
                     }
                 }
             },
-            Self::UnknownProfile { profile } => write!(f, "unknown profile '{profile}'"),
-            Self::MissingRepo { profile } => write!(
-                f,
-                "profile '{profile}' requires a repo argument or configured profile repo"
-            ),
             Self::ArtifactFileUnreadable { path, error } => {
                 write!(
                     f,
@@ -99,20 +89,28 @@ impl Error for RunCommandError {}
 #[derive(Parser, Debug)]
 #[command(name = "agentd")]
 struct Cli {
-    #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH)]
-    config: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Args, Debug, Default)]
+struct DaemonArgs {
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Start the foreground daemon.
-    Daemon,
+    Daemon(DaemonArgs),
     /// Trigger a manual session through the running daemon.
     Run {
         profile: String,
         repo: Option<String>,
+        #[arg(long)]
+        socket_path: Option<PathBuf>,
         #[arg(long, conflicts_with_all = ["request", "artifact_file"])]
         work_unit: Option<String>,
         #[arg(long, conflicts_with_all = ["work_unit", "artifact_file"])]
@@ -147,23 +145,52 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        None | Some(Command::Daemon) => run_daemon(Config::load(&cli.config)?),
+        None => run_daemon(Config::load(resolve_daemon_config_path(
+            cli.config.as_deref(),
+            None,
+        )?)?),
+        Some(Command::Daemon(daemon_args)) => run_daemon(Config::load(
+            resolve_daemon_config_path(cli.config.as_deref(), daemon_args.config.as_deref())?,
+        )?),
         Some(Command::Run {
             profile,
             repo,
+            socket_path,
             work_unit,
             request,
             artifact_file,
             artifact_type,
-        }) => run_client(
-            &cli.config,
-            profile,
-            repo,
-            work_unit,
-            request,
-            artifact_file,
-            artifact_type,
-        ),
+        }) => {
+            if cli.config.is_some() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--config is only supported for daemon mode, not `agentd run`",
+                )));
+            }
+            run_client(
+                socket_path.as_deref(),
+                profile,
+                repo,
+                work_unit,
+                request,
+                artifact_file,
+                artifact_type,
+            )
+        }
+    }
+}
+
+fn resolve_daemon_config_path<'a>(
+    root_config: Option<&'a std::path::Path>,
+    daemon_config: Option<&'a std::path::Path>,
+) -> Result<&'a std::path::Path, Box<dyn std::error::Error>> {
+    match (root_config, daemon_config) {
+        (Some(_), Some(_)) => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--config may be provided only once",
+        ))),
+        (Some(config), None) | (None, Some(config)) => Ok(config),
+        (None, None) => Ok(std::path::Path::new(DEFAULT_CONFIG_PATH)),
     }
 }
 
@@ -186,7 +213,7 @@ fn register_termination_handlers(shutdown: Arc<AtomicBool>) -> Result<(), std::i
 }
 
 fn run_client(
-    config_path: &std::path::Path,
+    explicit_socket_path: Option<&std::path::Path>,
     profile: String,
     repo: Option<String>,
     work_unit: Option<String>,
@@ -194,11 +221,16 @@ fn run_client(
     artifact_file: Option<PathBuf>,
     artifact_type: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let repo = resolve_run_repo(config_path, &profile, repo)?;
+    let socket_path = match resolve_client_socket_path(explicit_socket_path) {
+        Ok(path) => path,
+        Err(ClientSocketPathError::DaemonNotDiscovered { last_path }) => {
+            return Err(Box::new(ClientError::DaemonNotRunning { path: last_path }));
+        }
+        Err(error) => return Err(Box::new(error)),
+    };
     let input = resolve_invocation_input(request, artifact_file, artifact_type)?;
-    let daemon_config = DaemonConfig::load(config_path)?;
     let outcome = request_run(
-        &daemon_config,
+        &socket_path,
         &RunRequest {
             profile,
             repo_url: repo,
@@ -258,29 +290,6 @@ fn resolve_invocation_input(
         artifact_id: artifact_id.to_string(),
         document,
     }))
-}
-
-fn resolve_run_repo(
-    config_path: &std::path::Path,
-    profile: &str,
-    repo: Option<String>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    if let Some(repo) = repo {
-        return Ok(repo);
-    }
-
-    let config = Config::load(config_path)?;
-    let profile = config.profile(profile).ok_or_else(|| {
-        Box::new(RunCommandError::UnknownProfile {
-            profile: profile.to_string(),
-        }) as Box<dyn std::error::Error>
-    })?;
-
-    profile.repo().map(str::to_owned).ok_or_else(|| {
-        Box::new(RunCommandError::MissingRepo {
-            profile: profile.name().to_string(),
-        }) as Box<dyn std::error::Error>
-    })
 }
 
 #[cfg(test)]

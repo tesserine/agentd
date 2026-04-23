@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,11 @@ use serde_json::json;
 
 type DaemonHandle = thread::JoinHandle<Result<(), agentd::DaemonError>>;
 type RecordedInvocations = Arc<Mutex<Vec<SessionInvocation>>>;
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Clone)]
 struct FixedOutcomeExecutor {
@@ -195,7 +200,7 @@ fn start_recording_test_daemon(
 }
 
 #[test]
-fn binary_without_subcommand_starts_daemon_mode() {
+fn binary_daemon_subcommand_starts_daemon_mode() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-{}-{}",
         std::process::id(),
@@ -214,6 +219,7 @@ fn binary_without_subcommand_starts_daemon_mode() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
+            "daemon",
             "--config",
             config_path.to_str().expect("config path should be utf-8"),
         ])
@@ -244,6 +250,93 @@ fn binary_without_subcommand_starts_daemon_mode() {
 }
 
 #[test]
+fn binary_bare_command_with_config_starts_daemon_mode() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-bare-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "daemon-bare-command",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path should be utf-8"),
+        ])
+        .env("AGENTD_LOG_FORMAT", "text")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("agentd binary should spawn");
+
+    wait_for_path(&socket_path);
+    wait_for_path(&pid_file);
+    terminate(&mut child).expect("daemon should accept SIGTERM");
+    let output = child
+        .wait_with_output()
+        .expect("daemon output should be available");
+
+    assert!(
+        output.status.success(),
+        "daemon should exit cleanly: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn binary_run_help_shows_socket_path_and_not_config() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args(["run", "--help"])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        output.status.success(),
+        "run help should exit successfully: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.contains("--socket-path"),
+        "run help should advertise socket override: {stdout}"
+    );
+    assert!(
+        !stdout.contains("--config"),
+        "run help should not advertise daemon config coupling: {stdout}"
+    );
+}
+
+#[test]
+fn binary_daemon_help_shows_config() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args(["daemon", "--help"])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        output.status.success(),
+        "daemon help should exit successfully: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.contains("--config"),
+        "daemon help should retain config loading: {stdout}"
+    );
+}
+
+#[test]
 fn binary_run_command_reports_clear_error_when_daemon_is_not_running() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-not-running-{}-{}",
@@ -256,8 +349,49 @@ fn binary_run_command_reports_clear_error_when_daemon_is_not_running() {
     std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
     let socket_path = runtime_dir.join("agentd.sock");
     let pid_file = runtime_dir.join("agentd.pid");
-    let config_path = write_temp_config(
+    let _config_path = write_temp_config(
         "client-command",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
+            "site-builder",
+            "https://example.com/repo.git",
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        !output.status.success(),
+        "run command should fail without daemon"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert!(
+        stderr.contains("agentd is not running"),
+        "expected daemon-not-running error, got: {stderr}"
+    );
+}
+
+#[test]
+fn binary_run_command_rejects_root_level_config() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-root-config-rejected-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-root-config-rejected",
         &daemon_test_config(&socket_path, &pid_file),
     );
 
@@ -274,13 +408,13 @@ fn binary_run_command_reports_clear_error_when_daemon_is_not_running() {
 
     assert!(
         !output.status.success(),
-        "run command should fail without daemon"
+        "run command should reject daemon config at the root surface"
     );
 
     let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
     assert!(
-        stderr.contains("agentd is not running"),
-        "expected daemon-not-running error, got: {stderr}"
+        stderr.contains("--config") && stderr.contains("run"),
+        "expected root-level config rejection mentioning run, got: {stderr}"
     );
 }
 
@@ -308,9 +442,9 @@ fn binary_run_command_uses_profile_default_repo_when_repo_argument_is_omitted() 
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
         ])
         .output()
@@ -361,9 +495,9 @@ fn binary_run_command_prefers_explicit_repo_over_profile_default_repo() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             explicit_repo,
         ])
@@ -400,16 +534,16 @@ fn binary_run_command_rejects_request_when_work_unit_is_also_supplied() {
     std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
     let socket_path = runtime_dir.join("agentd.sock");
     let pid_file = runtime_dir.join("agentd.pid");
-    let config_path = write_temp_config(
+    let _config_path = write_temp_config(
         "client-command-request-work-unit-conflict",
         &daemon_test_config(&socket_path, &pid_file),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
             "--work-unit",
@@ -445,7 +579,7 @@ fn binary_run_command_requires_artifact_type_when_artifact_file_is_supplied() {
     std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
     let socket_path = runtime_dir.join("agentd.sock");
     let pid_file = runtime_dir.join("agentd.pid");
-    let config_path = write_temp_config(
+    let _config_path = write_temp_config(
         "client-command-artifact-type-required",
         &daemon_test_config(&socket_path, &pid_file),
     );
@@ -458,9 +592,9 @@ fn binary_run_command_requires_artifact_type_when_artifact_file_is_supplied() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
             "--artifact-file",
@@ -505,9 +639,9 @@ fn binary_run_command_forwards_request_text_as_typed_invocation_input() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
             "--request",
@@ -565,9 +699,9 @@ fn binary_run_command_reads_artifact_file_and_forwards_structured_input() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
             "--artifact-type",
@@ -623,16 +757,24 @@ fn binary_run_command_reports_clear_error_when_repo_is_missing_from_cli_and_prof
         "client-command-missing-repo",
         &daemon_test_config(&socket_path, &pid_file),
     );
+    let (shutdown, handle, _config) =
+        start_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
         ])
         .output()
         .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
 
     assert!(
         !output.status.success(),
@@ -663,16 +805,24 @@ fn binary_run_command_reports_unknown_profile_when_repo_argument_is_omitted() {
         "client-command-unknown-profile",
         &daemon_test_config(&socket_path, &pid_file),
     );
+    let (shutdown, handle, _config) =
+        start_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "unknown-profile",
         ])
         .output()
         .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
 
     assert!(
         !output.status.success(),
@@ -718,9 +868,9 @@ fn binary_run_command_exits_non_zero_and_reports_failed_sessions_on_stderr() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
         ])
@@ -776,9 +926,9 @@ fn binary_run_command_exits_non_zero_and_reports_timed_out_sessions_on_stderr() 
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
         ])
@@ -837,9 +987,9 @@ fn binary_run_command_exits_non_zero_and_reports_signal_terminated_sessions_on_s
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
         ])
@@ -893,9 +1043,9 @@ fn binary_run_command_exits_zero_and_reports_blocked_sessions_on_stdout() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
         ])
@@ -948,9 +1098,9 @@ fn binary_run_command_exits_zero_and_reports_nothing_ready_sessions_on_stdout() 
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
             "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
             "site-builder",
             "https://example.com/repo.git",
         ])
@@ -981,7 +1131,10 @@ fn binary_run_command_exits_zero_and_reports_nothing_ready_sessions_on_stdout() 
 }
 
 #[test]
-fn binary_run_command_succeeds_when_profile_registry_becomes_invalid_after_daemon_start() {
+fn binary_run_command_succeeds_without_client_config_when_using_xdg_socket_discovery() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-invalid-registry-{}-{}",
         std::process::id(),
@@ -991,44 +1144,32 @@ fn binary_run_command_succeeds_when_profile_registry_becomes_invalid_after_daemo
             .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
-    let socket_path = runtime_dir.join("agentd.sock");
-    let pid_file = runtime_dir.join("agentd.pid");
+    let xdg_runtime_dir = runtime_dir.join("xdg");
+    std::fs::create_dir_all(&xdg_runtime_dir).expect("xdg runtime dir should be created");
     let config_path = write_temp_config(
         "client-command-invalid-registry-after-start",
-        &daemon_test_config(&socket_path, &pid_file),
-    );
-
-    let (shutdown, handle, _config) =
-        start_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"
-[daemon]
-socket_path = "{socket_path}"
-pid_file = "{pid_file}"
-
+        r#"
 [[profiles]]
-name = "Site-Builder"
+name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
+repo = "https://example.com/default.git"
 
 command = ["site-builder", "exec"]
 "#,
-            socket_path = socket_path.display(),
-            pid_file = pid_file.display()
-        ),
-    )
-    .expect("config should be rewritten");
+    );
+
+    unsafe {
+        std::env::set_var("XDG_RUNTIME_DIR", &xdg_runtime_dir);
+    }
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
+    wait_for_path(&xdg_runtime_dir.join("agentd/agentd.sock"));
+    std::fs::remove_file(&config_path).expect("config should be removable after daemon startup");
 
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
-        .args([
-            "--config",
-            config_path.to_str().expect("config path should be utf-8"),
-            "run",
-            "site-builder",
-            "https://example.com/repo.git",
-        ])
+        .args(["run", "site-builder"])
+        .env("XDG_RUNTIME_DIR", &xdg_runtime_dir)
         .output()
         .expect("agentd binary should run");
 
@@ -1047,4 +1188,11 @@ command = ["site-builder", "exec"]
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
         "session success\n"
     );
+    assert_eq!(
+        invocations.lock().expect("invocations should lock")[0].repo_url,
+        "https://example.com/default.git"
+    );
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }

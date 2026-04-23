@@ -3,6 +3,7 @@ use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 
 use agentd::config::{Config, ConfigError, DaemonConfig};
+use agentd::default_daemon_runtime_paths;
 use agentd_runner::MountTargetValidationError;
 
 fn env_lock() -> &'static Mutex<()> {
@@ -120,14 +121,9 @@ fn parses_example_config_into_static_profile_settings() {
         .expect("code-reviewer profile should exist");
 
     assert_eq!(config.profiles().len(), 2);
-    assert_eq!(
-        config.daemon().socket_path(),
-        Path::new("/run/agentd/agentd.sock")
-    );
-    assert_eq!(
-        config.daemon().pid_file(),
-        Path::new("/run/agentd/agentd.pid")
-    );
+    let runtime_paths = default_daemon_runtime_paths();
+    assert_eq!(config.daemon().socket_path(), runtime_paths.socket_path());
+    assert_eq!(config.daemon().pid_file(), runtime_paths.pid_file());
     assert_eq!(site_builder.name(), "site-builder");
     assert_eq!(
         site_builder.base_image(),
@@ -457,14 +453,9 @@ command = ["site-builder", "exec"]
     )
     .expect("config should parse with daemon defaults");
 
-    assert_eq!(
-        config.daemon().socket_path(),
-        Path::new("/run/agentd/agentd.sock")
-    );
-    assert_eq!(
-        config.daemon().pid_file(),
-        Path::new("/run/agentd/agentd.pid")
-    );
+    let runtime_paths = default_daemon_runtime_paths();
+    assert_eq!(config.daemon().socket_path(), runtime_paths.socket_path());
+    assert_eq!(config.daemon().pid_file(), runtime_paths.pid_file());
 }
 
 #[test]
@@ -1588,8 +1579,9 @@ command = ["site-builder", "exec"]
 
     let config = DaemonConfig::load(&path).expect("daemon config should parse");
 
-    assert_eq!(config.socket_path(), Path::new("/run/agentd/agentd.sock"));
-    assert_eq!(config.pid_file(), Path::new("/run/agentd/agentd.pid"));
+    let runtime_paths = default_daemon_runtime_paths();
+    assert_eq!(config.socket_path(), runtime_paths.socket_path());
+    assert_eq!(config.pid_file(), runtime_paths.pid_file());
 }
 
 #[test]

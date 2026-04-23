@@ -101,6 +101,20 @@ execution. In `v0.1.x` this socket protocol is internal and unversioned:
 daemon and CLI must be the same build, and replacing the binary requires a
 daemon restart before new CLI invocations are supported.
 
+Manual CLI dispatch is intentionally decoupled from daemon-owned config files.
+`agentd run` discovers the daemon through a socket path rather than by reading
+`agentd.toml`: explicit `--socket-path` wins, otherwise the client checks
+`$XDG_RUNTIME_DIR/agentd/agentd.sock` first when `XDG_RUNTIME_DIR` is set.
+For rootless XDG-unset clients it then checks `/tmp/agentd-$UID/agentd.sock`
+before `/run/agentd/agentd.sock`; for root XDG-unset clients it bypasses the
+`/tmp` fallback and checks `/run/agentd/agentd.sock` directly. The
+`/tmp/agentd-$UID/` fallback is trusted only when the directory is user-owned
+and mode `0700`. A default candidate is selected only after it answers the
+agentd socket protocol `Ping` request with `Pong`; unrelated listeners and
+ambiguous probe failures are skipped so later defaults can be considered.
+Profile lookup and default-repo resolution happen daemon-side after the socket
+request is received, so client and daemon responsibility boundaries stay clean.
+
 Operational visibility for that lifecycle uses structured tracing events written
 to stderr. The production default is timestamped JSON lines at `info` so
 operators can monitor normal session start, outcome, teardown, and lifecycle
