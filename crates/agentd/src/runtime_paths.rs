@@ -32,6 +32,7 @@ impl DaemonRuntimePaths {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientSocketPathError {
     InsecureTemporaryRuntimeDir { path: PathBuf, message: String },
+    DaemonNotDiscovered { last_path: PathBuf },
 }
 
 impl fmt::Display for ClientSocketPathError {
@@ -43,6 +44,9 @@ impl fmt::Display for ClientSocketPathError {
                     "{message}: {}. Use --socket-path to override.",
                     path.display()
                 )
+            }
+            Self::DaemonNotDiscovered { last_path } => {
+                write!(f, "agentd is not running (socket {})", last_path.display())
             }
         }
     }
@@ -137,7 +141,9 @@ impl RuntimePathLayout {
             return Ok(system_socket_path);
         }
 
-        Ok(system_socket_path)
+        Err(ClientSocketPathError::DaemonNotDiscovered {
+            last_path: system_socket_path,
+        })
     }
 
     fn daemon_runtime_paths(&self) -> DaemonRuntimePaths {
@@ -704,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn client_socket_path_returns_system_path_when_no_default_socket_is_available() {
+    fn client_socket_path_reports_undiscovered_daemon_when_no_default_socket_is_available() {
         let root = unique_dir("client-run-fallback");
         let layout = test_layout(
             1000,
@@ -713,12 +719,50 @@ mod tests {
             root.join("run-agentd"),
         );
 
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("system fallback should resolve"),
-            root.join("run-agentd/agentd.sock")
+        let error = layout
+            .client_socket_path()
+            .expect_err("exhausted discovery should report no daemon");
+        match error {
+            ClientSocketPathError::DaemonNotDiscovered { last_path } => {
+                assert_eq!(last_path, root.join("run-agentd/agentd.sock"));
+            }
+            other => panic!("expected daemon-not-discovered error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_socket_path_reports_undiscovered_daemon_when_final_system_socket_fails_probe() {
+        let root = unique_dir("client-system-wrong-final");
+        let system_runtime_dir = root.join("run-agentd");
+        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
+        let responder = spawn_wrong_protocol_responder(&system_runtime_dir.join("agentd.sock"));
+
+        let layout = test_layout(
+            1000,
+            None,
+            root.join("missing-tmp-runtime"),
+            system_runtime_dir.clone(),
         );
+
+        let error = layout
+            .client_socket_path()
+            .expect_err("failed final probe should report no daemon");
+        match error {
+            ClientSocketPathError::DaemonNotDiscovered { last_path } => {
+                assert_eq!(last_path, system_runtime_dir.join("agentd.sock"));
+                assert_eq!(
+                    ClientSocketPathError::DaemonNotDiscovered { last_path }.to_string(),
+                    format!(
+                        "agentd is not running (socket {})",
+                        system_runtime_dir.join("agentd.sock").display()
+                    )
+                );
+            }
+            other => panic!("expected daemon-not-discovered error, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("wrong-protocol responder should finish");
     }
 
     #[test]
