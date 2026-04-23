@@ -1,7 +1,9 @@
+use std::ffi::CString;
 use std::fmt;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -238,31 +240,8 @@ pub(crate) fn ensure_tmp_runtime_dir(
     match fs::symlink_metadata(path) {
         Ok(_) => validate_tmp_runtime_dir(path, expected_uid),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(|create_error| {
-                TemporaryRuntimeDirError::new(
-                    path,
-                    format!("failed to create temporary runtime directory ({create_error})"),
-                )
-            })?;
-            let mut permissions = fs::metadata(path)
-                .map_err(|metadata_error| {
-                    TemporaryRuntimeDirError::new(
-                        path,
-                        format!(
-                            "failed to inspect created temporary runtime directory ({metadata_error})"
-                        ),
-                    )
-                })?
-                .permissions();
-            permissions.set_mode(REQUIRED_TMP_MODE);
-            fs::set_permissions(path, permissions).map_err(|permission_error| {
-                TemporaryRuntimeDirError::new(
-                    path,
-                    format!(
-                        "failed to set mode 0700 on temporary runtime directory ({permission_error})"
-                    ),
-                )
-            })?;
+            before_tmp_runtime_dir_create(path);
+            create_tmp_runtime_dir(path)?;
             validate_tmp_runtime_dir(path, expected_uid)
         }
         Err(error) => Err(TemporaryRuntimeDirError::new(
@@ -271,6 +250,68 @@ pub(crate) fn ensure_tmp_runtime_dir(
         )),
     }
 }
+
+fn create_tmp_runtime_dir(path: &Path) -> Result<(), TemporaryRuntimeDirError> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        TemporaryRuntimeDirError::new(
+            path,
+            "temporary runtime directory path contains an interior NUL byte",
+        )
+    })?;
+
+    let result = unsafe { libc::mkdir(c_path.as_ptr(), REQUIRED_TMP_MODE as libc::mode_t) };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if matches!(error.raw_os_error(), Some(libc::EEXIST)) {
+        return Ok(());
+    }
+
+    Err(TemporaryRuntimeDirError::new(
+        path,
+        format!("failed to create temporary runtime directory ({error})"),
+    ))
+}
+
+#[cfg(test)]
+type TmpRuntimeDirCreateHook = Option<(PathBuf, fn(&Path))>;
+
+#[cfg(test)]
+static BEFORE_TMP_RUNTIME_DIR_CREATE_HOOK: std::sync::Mutex<TmpRuntimeDirCreateHook> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn set_before_tmp_runtime_dir_create_hook(path: &Path, hook: fn(&Path)) {
+    *BEFORE_TMP_RUNTIME_DIR_CREATE_HOOK
+        .lock()
+        .expect("tmp runtime dir create hook lock should not be poisoned") =
+        Some((path.to_path_buf(), hook));
+}
+
+#[cfg(test)]
+fn clear_before_tmp_runtime_dir_create_hook() {
+    *BEFORE_TMP_RUNTIME_DIR_CREATE_HOOK
+        .lock()
+        .expect("tmp runtime dir create hook lock should not be poisoned") = None;
+}
+
+#[cfg(test)]
+fn before_tmp_runtime_dir_create(path: &Path) {
+    let hook = BEFORE_TMP_RUNTIME_DIR_CREATE_HOOK
+        .lock()
+        .expect("tmp runtime dir create hook lock should not be poisoned")
+        .as_ref()
+        .and_then(|(hook_path, hook)| (hook_path == path).then_some(*hook));
+
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
+#[cfg(not(test))]
+fn before_tmp_runtime_dir_create(_path: &Path) {}
 
 fn tmp_runtime_dir_for_uid(uid: u32) -> PathBuf {
     PathBuf::from(format!("/tmp/agentd-{uid}"))
@@ -826,6 +867,40 @@ mod tests {
             error
                 .to_string()
                 .contains(tmp_runtime_dir.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn ensure_tmp_runtime_dir_rejects_symlink_substitution_without_changing_target_mode() {
+        fn replace_missing_tmp_runtime_dir_with_symlink(path: &Path) {
+            let target = path.with_file_name("attacker-target");
+            std::os::unix::fs::symlink(target, path)
+                .expect("substituted symlink should be created");
+        }
+
+        let root = unique_dir("ensure-tmp-runtime-symlink-race");
+        let tmp_runtime_dir = root.join("tmp-runtime");
+        let attacker_target = root.join("attacker-target");
+        std::fs::create_dir(&attacker_target).expect("attacker target should be created");
+        std::fs::set_permissions(&attacker_target, std::fs::Permissions::from_mode(0o755))
+            .expect("attacker target mode should be set");
+        let uid = unsafe { libc::geteuid() };
+
+        set_before_tmp_runtime_dir_create_hook(
+            &tmp_runtime_dir,
+            replace_missing_tmp_runtime_dir_with_symlink,
+        );
+        let error = ensure_tmp_runtime_dir(&tmp_runtime_dir, uid)
+            .expect_err("substituted symlink should be rejected");
+        clear_before_tmp_runtime_dir_create_hook();
+
+        assert!(error.to_string().contains("not a directory"));
+        let target_metadata = std::fs::metadata(&attacker_target)
+            .expect("attacker target metadata should be readable");
+        assert_eq!(
+            target_metadata.permissions().mode() & 0o777,
+            0o755,
+            "symlink target mode should not be changed through the public tmp path"
         );
     }
 
