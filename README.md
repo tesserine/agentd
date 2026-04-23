@@ -219,6 +219,11 @@ either:
   `/run/agentd/agentd.sock`; for root XDG-unset clients,
   `/run/agentd/agentd.sock` directly
 
+Default discovery treats a candidate socket as available only when it answers
+the agentd socket protocol `Ping` request with `Pong`; unrelated listeners,
+silent sockets, malformed responses, and ambiguous probe errors fall through
+to the next default candidate.
+
 When the `/tmp/agentd-$UID/` fallback exists, the client requires that
 directory to be user-owned and mode `0700`; otherwise it refuses with an
 actionable error instead of trusting an insecure `/tmp` path.

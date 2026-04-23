@@ -9,6 +9,7 @@ pub mod config;
 pub mod daemon;
 pub mod dispatch;
 pub mod logging;
+mod protocol;
 pub mod runtime_paths;
 mod scheduler;
 

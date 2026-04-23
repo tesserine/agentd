@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Default `agentd run` socket discovery now requires a candidate socket to
+  answer the agentd Ping/Pong protocol before selecting it, and ambiguous
+  connect/probe errors now fall through instead of being treated as ready.
 - Session teardown now skips audit finalization and sealing when cleanup fails, leaving `agentd/session.json` intentionally incomplete instead of marking a session complete while its audit bind mount may still be live.
 - Completed session outcomes now remain caller-visible when only audit finalization fails after teardown cleanup succeeds.
 - Audit sealing now refuses multi-linked entries before rewriting metadata, preventing host file mode changes through hard-linked audit aliases.
