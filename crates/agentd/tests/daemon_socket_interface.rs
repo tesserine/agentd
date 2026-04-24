@@ -163,14 +163,15 @@ fn config_in_runtime_dir(runtime_dir: &std::path::Path) -> Config {
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
@@ -227,7 +228,7 @@ fn daemon_reports_run_outcome_back_through_client_request() {
     let outcome = request_run(
         config.daemon(),
         &RunRequest {
-            profile: "site-builder".to_string(),
+            agent: "site-builder".to_string(),
             repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: Some("task-42".to_string()),
             input: None,
@@ -255,7 +256,7 @@ fn client_reports_clear_error_when_daemon_is_not_running() {
     let error = request_run(
         config.daemon(),
         &RunRequest {
-            profile: "site-builder".to_string(),
+            agent: "site-builder".to_string(),
             repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: None,
             input: None,
@@ -293,7 +294,7 @@ fn daemon_round_trips_typed_invocation_input_through_the_socket_protocol() {
     let outcome = request_run(
         config.daemon(),
         &RunRequest {
-            profile: "site-builder".to_string(),
+            agent: "site-builder".to_string(),
             repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: None,
             input: Some(InvocationInput::Artifact {
@@ -347,7 +348,7 @@ fn daemon_rejects_conflicting_work_unit_and_input_from_socket_callers() {
     let error = request_run(
         config.daemon(),
         &RunRequest {
-            profile: "site-builder".to_string(),
+            agent: "site-builder".to_string(),
             repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: Some("issue-42".to_string()),
             input: Some(InvocationInput::RequestText {
@@ -494,7 +495,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
         request_run(
             first_config.daemon(),
             &RunRequest {
-                profile: "site-builder".to_string(),
+                agent: "site-builder".to_string(),
                 repo_url: Some("https://example.com/repo.git".to_string()),
                 work_unit: Some("first".to_string()),
                 input: None,
@@ -509,7 +510,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
         let outcome = request_run(
             second_config.daemon(),
             &RunRequest {
-                profile: "site-builder".to_string(),
+                agent: "site-builder".to_string(),
                 repo_url: Some("https://example.com/repo.git".to_string()),
                 work_unit: Some("second".to_string()),
                 input: None,
@@ -589,7 +590,7 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
         request_run(
             client_config.daemon(),
             &RunRequest {
-                profile: "site-builder".to_string(),
+                agent: "site-builder".to_string(),
                 repo_url: Some("https://example.com/repo.git".to_string()),
                 work_unit: Some("shutdown".to_string()),
                 input: None,
@@ -653,7 +654,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
         request_run(
             first_config.daemon(),
             &RunRequest {
-                profile: "site-builder".to_string(),
+                agent: "site-builder".to_string(),
                 repo_url: Some("https://example.com/repo.git".to_string()),
                 work_unit: Some("draining".to_string()),
                 input: None,
@@ -668,7 +669,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
     let error = request_run(
         config.daemon(),
         &RunRequest {
-            profile: "site-builder".to_string(),
+            agent: "site-builder".to_string(),
             repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: Some("rejected".to_string()),
             input: None,
@@ -716,14 +717,15 @@ fn daemon_created_runtime_socket_and_directory_are_private() {
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
@@ -811,12 +813,13 @@ fn daemon_startup_rejects_relative_daemon_runtime_paths_before_claiming_runtime(
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");

@@ -1,5 +1,5 @@
-# Static profile registry for agentd.
-# A profile can carry its own default repo and optional schedule.
+# Static agent registry for agentd.
+# An agent can carry its own default repo and optional schedule.
 
 #[daemon]
 # Optional explicit host path for persistent audit records. Rootless installs
@@ -9,77 +9,50 @@
 # /var/lib/tesserine/audit.
 #audit_root = "/var/lib/tesserine/audit"
 
-[[profiles]]
-# Stable operator-facing profile name used for lookup and container identity.
+[[agents]]
+# Stable operator-facing agent name used for lookup and container identity.
 name = "site-builder"
 # Prebuilt image containing the agent runtime and runa.
 base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
 # Default repository URL cloned for manual runs when `agentd run` omits a repo,
-# and for each scheduled run of this profile.
+# and for each scheduled run of this agent.
 repo = "https://github.com/pentaxis93/agentd.git"
 # Optional five-field cron expression in daemon-local time.
 schedule = "*/15 * * * *"
-# Static session command executed from the cloned repository. This profile is
-# tightly bound to one codebase, so the session repo is the app it builds.
-command = [
-  "/bin/sh",
-  "-lc",
-  '''
-runa init --methodology /agentd/methodology/manifest.toml
-cat > .runa/config.toml <<'EOF'
-[agent]
-command = ["site-builder", "exec"]
-EOF
-if [ -n "${AGENTD_WORK_UNIT:-}" ]; then
-  exec runa run --work-unit "${AGENTD_WORK_UNIT}"
-fi
-exec runa run
-''',
-]
 # Optional environment variable name resolved by the daemon for clone-only
 # repository authentication. This value does not flow into the agent runtime.
 repo_token_source = "SITE_BUILDER_REPO_TOKEN"
+# Exact argv for the agent process. agentd handles runa init and runa run.
+[agents.command]
+argv = ["site-builder", "exec"]
 
-#[[profiles.mounts]]
+#[[agents.mounts]]
 # Additional bind mounts are operator-chosen host paths.
 # `source` must be an absolute existing host path.
 # `target` must be an absolute container path and must not duplicate or
-# overlap another mount target in the same profile.
+# overlap another mount target in the same agent.
 #source = "/home/core/.claude"
 #target = "/home/site-builder/.claude"
 #read_only = true
 
-[[profiles.credentials]]
+[[agents.credentials]]
 # Secret name exposed inside the session environment.
 name = "GITHUB_TOKEN"
 # Environment variable name read from the daemon's own process environment.
 source = "AGENTD_GITHUB_TOKEN"
 
-[[profiles]]
-# A profile whose home repo contains its own review policy and target selection.
+[[agents]]
+# An agent whose home repo contains its own review policy and target selection.
 name = "code-reviewer"
 base_image = "ghcr.io/example/code-reviewer:latest"
 methodology_dir = "../groundwork"
 repo = "https://github.com/pentaxis93/agentd.git"
-command = [
-  "/bin/sh",
-  "-lc",
-  '''
-runa init --methodology /agentd/methodology/manifest.toml
-cat > .runa/config.toml <<'EOF'
-[agent]
-command = ["code-reviewer", "exec"]
-EOF
-if [ -n "${AGENTD_WORK_UNIT:-}" ]; then
-  exec runa run --work-unit "${AGENTD_WORK_UNIT}"
-fi
-exec runa run
-''',
-]
 repo_token_source = "CODE_REVIEWER_REPO_TOKEN"
+[agents.command]
+argv = ["code-reviewer", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"

@@ -18,7 +18,7 @@ credential injection, workspace setup, identity management. Operators building
 this ad-hoc re-solve the same problems for each agent and each deployment.
 
 agentd is the self-hosted runtime layer. The operator declares *what* through
-profile configuration — which image, which credentials, which methodology.
+agent configuration — which image, which credentials, which methodology.
 agentd owns *how* — container lifecycle, privilege management, resource cleanup.
 The agent gets an isolated, ephemeral workspace with exactly what it needs and
 nothing more.
@@ -27,20 +27,20 @@ nothing more.
 
 v0.1.0 — early development.
 
-The session lifecycle works end-to-end: profile configuration, foreground daemon
+The session lifecycle works end-to-end: agent configuration, foreground daemon
 startup, operator-triggered sessions, ephemeral Podman containers, credential
 injection, execution, and teardown. Startup reconciliation cleans stale
 resources from prior runs. Structured JSON tracing provides operational
 visibility.
-Profiles may now declare a default repository and an optional cron schedule.
+Agents may now declare a default repository and an optional cron schedule.
 Manual runs still flow through `agentd run`, and scheduled runs dispatch
 through the same daemon socket intake without introducing a separate job type.
 Manual runs may also carry per-invocation work input without modifying the
-profile: request text can be synthesized into a canonical request artifact, and
+agent: request text can be synthesized into a canonical request artifact, and
 complete JSON artifacts can be placed directly into the session workspace when
 the active methodology declares the relevant artifact type and schema.
-Profiles may also declare additional bind mounts for host-managed state such as
-subscription auth directories. Independently of profile mounts, agentd now
+Agents may also declare additional bind mounts for host-managed state such as
+subscription auth directories. Independently of agent mounts, agentd now
 persists each session's audit record under the rootless default
 `$XDG_STATE_HOME/tesserine/audit/`, falling back to
 `$HOME/.local/state/tesserine/audit/`, with `daemon.audit_root` available as an
@@ -48,15 +48,15 @@ explicit override for root-owned installs such as `/var/lib/tesserine/audit/`.
 
 ## Configuration
 
-A profile is a named environment specification: base image, methodology
+An agent is a named environment specification: base image, methodology
 directory, optional additional bind mounts, optional default repo, optional
-cron schedule, credentials, and runtime command. Define profiles in a TOML
+cron schedule, credentials, and exact command argv. Define agents in a TOML
 config file — start from
 [`examples/agentd.toml`](examples/agentd.toml):
 
 ```toml
-# Static profile registry for agentd.
-# A profile can carry its own default repo and optional schedule.
+# Static agent registry for agentd.
+# An agent can carry its own default repo and optional schedule.
 
 #[daemon]
 # Optional explicit host path for persistent audit records. Rootless installs
@@ -66,80 +66,53 @@ config file — start from
 # /var/lib/tesserine/audit.
 #audit_root = "/var/lib/tesserine/audit"
 
-[[profiles]]
-# Stable operator-facing profile name used for lookup and container identity.
+[[agents]]
+# Stable operator-facing agent name used for lookup and container identity.
 name = "site-builder"
 # Prebuilt image containing the agent runtime and runa.
 base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
 # Default repository URL cloned for manual runs when `agentd run` omits a repo,
-# and for every scheduled run of this profile.
+# and for every scheduled run of this agent.
 repo = "https://github.com/pentaxis93/agentd.git"
 # Optional five-field cron expression in daemon-local time.
 schedule = "*/15 * * * *"
-# Static session command executed from the cloned repository. This profile is
-# tightly bound to one app, so the session repo is the project being built.
-command = [
-  "/bin/sh",
-  "-lc",
-  '''
-runa init --methodology /agentd/methodology/manifest.toml
-cat > .runa/config.toml <<'EOF'
-[agent]
-command = ["site-builder", "exec"]
-EOF
-if [ -n "${AGENTD_WORK_UNIT:-}" ]; then
-  exec runa run --work-unit "${AGENTD_WORK_UNIT}"
-fi
-exec runa run
-''',
-]
 # Optional environment variable name resolved by the daemon for clone-only
 # repository authentication. This value does not flow into the agent runtime.
 repo_token_source = "SITE_BUILDER_REPO_TOKEN"
+# Exact argv for the agent process. agentd handles runa init and runa run.
+[agents.command]
+argv = ["site-builder", "exec"]
 
-#[[profiles.mounts]]
-# Additional host bind mounts are declared explicitly per profile.
+#[[agents.mounts]]
+# Additional host bind mounts are declared explicitly per agent.
 # `source` must be an absolute host path and must already exist.
 # `target` must be an absolute path inside the container and must not
-# duplicate or overlap another mount target in the same profile.
+# duplicate or overlap another mount target in the same agent.
 # `read_only = true` is appropriate for host-managed auth directories.
 #source = "/home/core/.claude"
 #target = "/home/site-builder/.claude"
 #read_only = true
 
-[[profiles.credentials]]
+[[agents.credentials]]
 # Secret name exposed inside the session environment.
 name = "GITHUB_TOKEN"
 # Environment variable name read from the daemon's own process environment.
 source = "AGENTD_GITHUB_TOKEN"
 
-[[profiles]]
+[[agents]]
 # A home-repo review agent that carries its own review configuration and scans
 # repositories beyond the repo used to launch the session.
 name = "code-reviewer"
 base_image = "ghcr.io/example/code-reviewer:latest"
 methodology_dir = "../groundwork"
 repo = "https://github.com/pentaxis93/agentd.git"
-command = [
-  "/bin/sh",
-  "-lc",
-  '''
-runa init --methodology /agentd/methodology/manifest.toml
-cat > .runa/config.toml <<'EOF'
-[agent]
-command = ["code-reviewer", "exec"]
-EOF
-if [ -n "${AGENTD_WORK_UNIT:-}" ]; then
-  exec runa run --work-unit "${AGENTD_WORK_UNIT}"
-fi
-exec runa run
-''',
-]
 repo_token_source = "CODE_REVIEWER_REPO_TOKEN"
+[agents.command]
+argv = ["code-reviewer", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 ```
@@ -148,15 +121,15 @@ Credential `source` fields name environment variables in the daemon's process
 environment — export them before starting the daemon. Additional `mounts`
 entries are bind mounts: `source` must be an absolute existing host path,
 `target` must be an absolute container path, targets must be unique within the
-profile, and runner-managed targets are reserved: `/agentd/methodology`,
-`/home/{profile}`, `/home/{profile}/.agentd`, and `/home/{profile}/repo` plus
+agent, and runner-managed targets are reserved: `/agentd/methodology`,
+`/home/{agent}`, `/home/{agent}/.agentd`, and `/home/{agent}/repo` plus
 their descendants. Other
-targets under `/home/{profile}` remain supported, including read-only auth
+targets under `/home/{agent}` remain supported, including read-only auth
 mounts such as `/home/site-builder/.claude`. Additional mounts are not
 relabelled; on SELinux-enabled hosts, operators must ensure each host path
 already has a container-compatible label. The base image must provide
-`/bin/sh`, `find`, `git`, `useradd`, `gosu`, and whatever binaries the
-configured session command uses. When a profile declares `schedule`, it must
+`/bin/sh`, `find`, `git`, `useradd`, `gosu`, `runa`, and whatever binaries the
+declared agent command uses. When an agent declares `schedule`, it must
 also declare `repo`. Schedules are evaluated in daemon-local time and missed
 fires are not backfilled after downtime. Persistent audit records default to
 `$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set
@@ -228,8 +201,8 @@ When the `/tmp/agentd-$UID/` fallback exists, the client requires that
 directory to be user-owned and mode `0700`; otherwise it refuses with an
 actionable error instead of trusting an insecure `/tmp` path.
 
-Profile lookup and default-repo resolution now happen daemon-side. The client
-may omit the positional repo argument when the named profile declares `repo`,
+Agent lookup and default-repo resolution now happen daemon-side. The client
+may omit the positional repo argument when the named agent declares `repo`,
 and an explicit repo still overrides the configured default:
 
 ```bash
@@ -266,15 +239,15 @@ the container, the agent sees:
 - Repo-root `.runa` bridged to persistent audit storage
 - Read-only methodology mount at `/agentd/methodology`
 - A runner-managed read-only invocation-input mount at `/agentd/invocation-input` when manual input is supplied
-- Any operator-declared additional bind mounts, read-only or read-write per profile
+- Any operator-declared additional bind mounts, read-only or read-write per agent
 - Credentials injected as environment variables
 - `AGENTD_WORK_UNIT` when the invocation includes one
 - A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `--request` or `--artifact-file`
-- The configured session command executing from the repo directory
+- `runa init` state followed by `runa run --agent-command -- <argv>` from the repo directory
 
 The container is force-removed on completion. The session's audit record
 persists on the host under the resolved audit root
-`<audit_root>/<profile>/<session_id>/`, with runa state in `runa/` and agentd
+`<audit_root>/<agent>/<session_id>/`, with runa state in `runa/` and agentd
 metadata in `agentd/session.json`. If teardown cleanup fails, or if audit
 finalization attempts closeout and fails, that metadata remains intentionally
 incomplete with no `end_timestamp` or `outcome`. On successful finalization,
@@ -288,9 +261,9 @@ cause.
 
 ## Scheduled Runs
 
-Profiles with `schedule` run autonomously while the daemon is up. The scheduler
+Agents with `schedule` run autonomously while the daemon is up. The scheduler
 evaluates cron expressions in daemon-local time and opens the same Unix-socket
-client path that `agentd run` uses. Multiple scheduled profiles may overlap,
+client path that `agentd run` uses. Multiple scheduled agents may overlap,
 and their sessions dispatch independently. Session outcomes do not affect later
 schedule evaluation: the next occurrence runs at its next scheduled time.
 
@@ -301,7 +274,7 @@ schedule evaluation: the next occurrence runs at its next scheduled time.
   system is built and why.
 - **[AGENTS.md](AGENTS.md)** — development discipline, BDD workflow, commit and
   branch conventions. Read this before contributing.
-- **[examples/agentd.toml](examples/agentd.toml)** — annotated profile
+- **[examples/agentd.toml](examples/agentd.toml)** — annotated agent
   configuration. Starting point for writing your own.
 
 ## License

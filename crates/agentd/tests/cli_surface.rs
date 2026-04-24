@@ -92,12 +92,13 @@ fn daemon_test_config(socket_path: &Path, pid_file: &Path) -> String {
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
         socket_path = socket_path.display(),
         pid_file = pid_file.display()
@@ -111,13 +112,14 @@ fn daemon_test_config_with_default_repo(socket_path: &Path, pid_file: &Path, rep
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "{repo}"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
         socket_path = socket_path.display(),
         pid_file = pid_file.display(),
@@ -132,14 +134,15 @@ fn daemon_test_config_with_credential(socket_path: &Path, pid_file: &Path) -> St
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
@@ -419,7 +422,7 @@ fn binary_run_command_rejects_root_level_config() {
 }
 
 #[test]
-fn binary_run_command_uses_profile_default_repo_when_repo_argument_is_omitted() {
+fn binary_run_command_uses_agent_default_repo_when_repo_argument_is_omitted() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-default-repo-{}-{}",
         std::process::id(),
@@ -458,7 +461,7 @@ fn binary_run_command_uses_profile_default_repo_when_repo_argument_is_omitted() 
 
     assert!(
         output.status.success(),
-        "run command should succeed with a profile default repo: {}",
+        "run command should succeed with an agent default repo: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
@@ -468,7 +471,7 @@ fn binary_run_command_uses_profile_default_repo_when_repo_argument_is_omitted() 
 }
 
 #[test]
-fn binary_run_command_prefers_explicit_repo_over_profile_default_repo() {
+fn binary_run_command_prefers_explicit_repo_over_agent_default_repo() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-explicit-repo-{}-{}",
         std::process::id(),
@@ -741,7 +744,7 @@ fn binary_run_command_reads_artifact_file_and_forwards_structured_input() {
 }
 
 #[test]
-fn binary_run_command_reports_clear_error_when_repo_is_missing_from_cli_and_profile() {
+fn binary_run_command_reports_clear_error_when_repo_is_missing_from_cli_and_agent() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-missing-repo-{}-{}",
         std::process::id(),
@@ -783,15 +786,15 @@ fn binary_run_command_reports_clear_error_when_repo_is_missing_from_cli_and_prof
 
     let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
     assert!(
-        stderr.contains("requires a repo argument or configured profile repo"),
+        stderr.contains("requires a repo argument or configured agent repo"),
         "expected missing-repo error, got: {stderr}"
     );
 }
 
 #[test]
-fn binary_run_command_reports_unknown_profile_when_repo_argument_is_omitted() {
+fn binary_run_command_reports_unknown_agent_when_repo_argument_is_omitted() {
     let runtime_dir = std::env::temp_dir().join(format!(
-        "agentd-cli-runtime-unknown-profile-{}-{}",
+        "agentd-cli-runtime-unknown-agent-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -802,7 +805,7 @@ fn binary_run_command_reports_unknown_profile_when_repo_argument_is_omitted() {
     let socket_path = runtime_dir.join("agentd.sock");
     let pid_file = runtime_dir.join("agentd.pid");
     let config_path = write_temp_config(
-        "client-command-unknown-profile",
+        "client-command-unknown-agent",
         &daemon_test_config(&socket_path, &pid_file),
     );
     let (shutdown, handle, _config) =
@@ -813,7 +816,7 @@ fn binary_run_command_reports_unknown_profile_when_repo_argument_is_omitted() {
             "run",
             "--socket-path",
             socket_path.to_str().expect("socket path should be utf-8"),
-            "unknown-profile",
+            "unknown-agent",
         ])
         .output()
         .expect("agentd binary should run");
@@ -826,17 +829,17 @@ fn binary_run_command_reports_unknown_profile_when_repo_argument_is_omitted() {
 
     assert!(
         !output.status.success(),
-        "run command should fail for an unknown profile"
+        "run command should fail for an unknown agent"
     );
 
     let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
     assert!(
-        stderr.contains("unknown profile 'unknown-profile'"),
-        "expected unknown-profile error, got: {stderr}"
+        stderr.contains("unknown agent 'unknown-agent'"),
+        "expected unknown-agent error, got: {stderr}"
     );
     assert!(
-        !stderr.contains("requires a repo argument or configured profile repo"),
-        "unknown-profile failure should not be reported as missing repo: {stderr}"
+        !stderr.contains("requires a repo argument or configured agent repo"),
+        "unknown-agent failure should not be reported as missing repo: {stderr}"
     );
 }
 
@@ -1149,13 +1152,14 @@ fn binary_run_command_succeeds_without_client_config_when_using_xdg_socket_disco
     let config_path = write_temp_config(
         "client-command-invalid-registry-after-start",
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "https://example.com/default.git"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
 

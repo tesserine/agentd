@@ -24,22 +24,23 @@ fn example_config() -> String {
         .expect("example config should be readable")
 }
 
-fn assert_invalid_profile_name_parse_error(name: &str) {
+fn assert_invalid_agent_name_parse_error(name: &str) {
     let error = Config::from_str(&format!(
         r#"
-[[profiles]]
+[[agents]]
 name = "{name}"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#
     ))
-    .expect_err("invalid profile names should be rejected at parse time");
+    .expect_err("invalid agent names should be rejected at parse time");
 
     match error {
-        ConfigError::InvalidProfileName { name: invalid_name } => assert_eq!(invalid_name, name),
-        other => panic!("expected invalid profile name error, got {other}"),
+        ConfigError::InvalidAgentName { name: invalid_name } => assert_eq!(invalid_name, name),
+        other => panic!("expected invalid agent name error, got {other}"),
     }
 }
 
@@ -86,14 +87,15 @@ fn assert_invalid_mount_target_parse_error(
     let target = target.replace('\\', "\\\\").replace('"', "\\\"");
     let error = Config::from_str(&format!(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/home/core/.claude"
 target = "{target}"
 read_only = true
@@ -102,8 +104,8 @@ read_only = true
     .expect_err("runner-invalid mount targets should be rejected during config parse");
 
     match error {
-        ConfigError::InvalidMountTarget { profile, error } => {
-            assert_eq!(profile, "site-builder");
+        ConfigError::InvalidMountTarget { agent, error } => {
+            assert_eq!(agent, "site-builder");
             assert_eq!(error, expected_error);
         }
         other => panic!("expected invalid mount target error, got {other}"),
@@ -111,16 +113,40 @@ read_only = true
 }
 
 #[test]
-fn parses_example_config_into_static_profile_settings() {
+fn parses_agents_with_declarative_command_argv() {
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect("agent config should parse");
+
+    let agent = config
+        .agent("site-builder")
+        .expect("site-builder agent should exist");
+
+    assert_eq!(config.agents().len(), 1);
+    assert_eq!(agent.name(), "site-builder");
+    assert_eq!(agent.agent_command(), ["site-builder", "exec"]);
+}
+
+#[test]
+fn parses_example_config_into_static_agent_settings() {
     let config = Config::from_str(&example_config()).expect("example config should parse");
     let site_builder = config
-        .profile("site-builder")
-        .expect("site-builder profile should exist");
+        .agent("site-builder")
+        .expect("site-builder agent should exist");
     let code_reviewer = config
-        .profile("code-reviewer")
-        .expect("code-reviewer profile should exist");
+        .agent("code-reviewer")
+        .expect("code-reviewer agent should exist");
 
-    assert_eq!(config.profiles().len(), 2);
+    assert_eq!(config.agents().len(), 2);
     let runtime_paths = default_daemon_runtime_paths();
     assert_eq!(config.daemon().socket_path(), runtime_paths.socket_path());
     assert_eq!(config.daemon().pid_file(), runtime_paths.pid_file());
@@ -139,12 +165,7 @@ fn parses_example_config_into_static_profile_settings() {
         site_builder.repo_token_source(),
         Some("SITE_BUILDER_REPO_TOKEN")
     );
-    assert_eq!(site_builder.command()[0], "/bin/sh");
-    assert_eq!(site_builder.command()[1], "-lc");
-    assert!(site_builder.command()[2].contains("runa init --methodology"));
-    assert!(site_builder.command()[2].contains("/agentd/methodology/manifest.toml"));
-    assert!(site_builder.command()[2].contains("command = [\"site-builder\", \"exec\"]"));
-    assert!(site_builder.command()[2].contains("AGENTD_WORK_UNIT"));
+    assert_eq!(site_builder.agent_command(), ["site-builder", "exec"]);
     assert_eq!(site_builder.credentials().len(), 1);
     assert_eq!(site_builder.credentials()[0].name(), "GITHUB_TOKEN");
     assert_eq!(
@@ -168,12 +189,7 @@ fn parses_example_config_into_static_profile_settings() {
         code_reviewer.repo_token_source(),
         Some("CODE_REVIEWER_REPO_TOKEN")
     );
-    assert_eq!(code_reviewer.command()[0], "/bin/sh");
-    assert_eq!(code_reviewer.command()[1], "-lc");
-    assert!(code_reviewer.command()[2].contains("runa init --methodology"));
-    assert!(code_reviewer.command()[2].contains("/agentd/methodology/manifest.toml"));
-    assert!(code_reviewer.command()[2].contains("command = [\"code-reviewer\", \"exec\"]"));
-    assert!(code_reviewer.command()[2].contains("AGENTD_WORK_UNIT"));
+    assert_eq!(code_reviewer.agent_command(), ["code-reviewer", "exec"]);
     assert_eq!(code_reviewer.credentials().len(), 1);
     assert_eq!(code_reviewer.credentials()[0].name(), "GITHUB_TOKEN");
     assert_eq!(
@@ -188,22 +204,21 @@ fn loading_config_resolves_relative_methodology_path_from_file_location() {
     let path = write_temp_config(
         "relative-path",
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
 
     let config = Config::load(&path).expect("config file should parse");
-    let profile = config
-        .profile("site-builder")
-        .expect("profile should exist");
+    let agent = config.agent("site-builder").expect("agent should exist");
 
     assert_eq!(
-        profile.methodology_dir(),
+        agent.methodology_dir(),
         path.parent()
             .expect("config file should have a parent directory")
             .join("../groundwork")
@@ -217,12 +232,13 @@ fn loading_config_from_a_relative_path_resolves_methodology_dir_from_an_absolute
         &current_dir.join("target"),
         "relative-load-path",
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
     let relative_path = path
@@ -230,18 +246,16 @@ command = ["site-builder", "exec"]
         .expect("fixture path should be under the current directory");
 
     let config = Config::load(relative_path).expect("config file should parse");
-    let profile = config
-        .profile("site-builder")
-        .expect("profile should exist");
+    let agent = config.agent("site-builder").expect("agent should exist");
 
     assert_eq!(
-        profile.methodology_dir(),
+        agent.methodology_dir(),
         path.parent()
             .expect("config file should have a parent directory")
             .join("../groundwork")
     );
     assert!(
-        profile.methodology_dir().is_absolute(),
+        agent.methodology_dir().is_absolute(),
         "loaded methodology_dir should be absolute when loaded from a file"
     );
 }
@@ -255,12 +269,13 @@ fn loading_config_resolves_relative_daemon_paths_from_file_location() {
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
 
@@ -290,12 +305,13 @@ fn loading_config_from_a_relative_path_resolves_relative_daemon_paths_from_an_ab
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
     let relative_path = path
@@ -333,12 +349,13 @@ fn daemon_instance_id_is_stable_for_the_same_runtime_paths() {
 socket_path = "/run/agentd/a.sock"
 pid_file = "/run/agentd/a.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -370,12 +387,13 @@ fn daemon_instance_id_changes_when_daemon_runtime_paths_change() {
 socket_path = "/run/agentd/a.sock"
 pid_file = "/run/agentd/a.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("first config should parse");
@@ -385,12 +403,13 @@ command = ["site-builder", "exec"]
 socket_path = "/run/agentd/b.sock"
 pid_file = "/run/agentd/a.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("second config should parse");
@@ -415,12 +434,13 @@ fn daemon_instance_id_rejects_relative_daemon_runtime_paths_from_str_configs() {
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -443,12 +463,13 @@ command = ["site-builder", "exec"]
 fn parses_default_daemon_paths_when_daemon_section_is_omitted() {
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse with daemon defaults");
@@ -466,12 +487,13 @@ fn daemon_instance_id_rejects_relative_pid_file_after_absolute_socket_path() {
 socket_path = "/run/agentd/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -498,12 +520,13 @@ fn parses_explicit_daemon_paths() {
 socket_path = "/tmp/agentd-test.sock"
 pid_file = "/tmp/agentd-test.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse explicit daemon paths");
@@ -527,12 +550,13 @@ socket_path = "/tmp/agentd-test.sock"
 pid_file = "/tmp/agentd-test.pid"
 audit_root = "/srv/agentd/audit"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse explicit daemon paths");
@@ -556,12 +580,13 @@ socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 audit_root = "state/audit"
 
-[[profiles]]
+[[agents]]
 name = "Site-Builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
 
@@ -590,12 +615,13 @@ fn daemon_audit_root_uses_xdg_state_home_before_home_fallback() {
 
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -626,12 +652,13 @@ fn daemon_audit_root_falls_back_to_home_local_state_when_xdg_state_home_is_unset
 
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -661,12 +688,13 @@ fn daemon_audit_root_requires_a_usable_default_when_not_explicitly_configured() 
 
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
@@ -686,86 +714,84 @@ command = ["site-builder", "exec"]
 fn parses_repo_token_source_as_optional_clone_auth_lookup_key() {
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "SITE_BUILDER_REPO_TOKEN"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse repo token source");
 
-    let profile = config
-        .profile("site-builder")
-        .expect("profile should exist");
+    let agent = config.agent("site-builder").expect("agent should exist");
 
-    assert_eq!(profile.repo_token_source(), Some("SITE_BUILDER_REPO_TOKEN"));
+    assert_eq!(agent.repo_token_source(), Some("SITE_BUILDER_REPO_TOKEN"));
 }
 
 #[test]
-fn parses_profile_repo_as_optional_default_clone_url() {
+fn parses_agent_repo_as_optional_default_clone_url() {
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "https://example.com/agentd.git"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse repo");
 
-    let profile = config
-        .profile("site-builder")
-        .expect("profile should exist");
+    let agent = config.agent("site-builder").expect("agent should exist");
 
-    assert_eq!(profile.repo(), Some("https://example.com/agentd.git"));
+    assert_eq!(agent.repo(), Some("https://example.com/agentd.git"));
 }
 
 #[test]
-fn parses_profile_schedule_as_optional_cron_expression() {
+fn parses_agent_schedule_as_optional_cron_expression() {
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "https://example.com/agentd.git"
 schedule = "*/15 * * * *"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse schedule");
 
-    let profile = config
-        .profile("site-builder")
-        .expect("profile should exist");
+    let agent = config.agent("site-builder").expect("agent should exist");
 
-    assert_eq!(profile.schedule(), Some("*/15 * * * *"));
+    assert_eq!(agent.schedule(), Some("*/15 * * * *"));
 }
 
 #[test]
-fn parses_profile_mounts_as_operator_declared_bind_mounts() {
+fn parses_agent_mounts_as_operator_declared_bind_mounts() {
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/home/core/.claude"
 target = "/home/site-builder/.claude"
 read_only = true
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/var/lib/tesserine/audit"
 target = "/home/site-builder/.runa"
 read_only = false
@@ -773,43 +799,39 @@ read_only = false
     )
     .expect("config should parse declared mounts");
 
-    let profile = config
-        .profile("site-builder")
-        .expect("profile should exist");
+    let agent = config.agent("site-builder").expect("agent should exist");
 
-    assert_eq!(profile.mounts().len(), 2);
+    assert_eq!(agent.mounts().len(), 2);
+    assert_eq!(agent.mounts()[0].source(), Path::new("/home/core/.claude"));
     assert_eq!(
-        profile.mounts()[0].source(),
-        Path::new("/home/core/.claude")
-    );
-    assert_eq!(
-        profile.mounts()[0].target(),
+        agent.mounts()[0].target(),
         Path::new("/home/site-builder/.claude")
     );
-    assert!(profile.mounts()[0].read_only());
+    assert!(agent.mounts()[0].read_only());
     assert_eq!(
-        profile.mounts()[1].source(),
+        agent.mounts()[1].source(),
         Path::new("/var/lib/tesserine/audit")
     );
     assert_eq!(
-        profile.mounts()[1].target(),
+        agent.mounts()[1].target(),
         Path::new("/home/site-builder/.runa")
     );
-    assert!(!profile.mounts()[1].read_only());
+    assert!(!agent.mounts()[1].read_only());
 }
 
 #[test]
-fn rejects_profile_mount_sources_that_are_not_absolute() {
+fn rejects_agent_mount_sources_that_are_not_absolute() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "../claude"
 target = "/home/site-builder/.claude"
 read_only = true
@@ -818,8 +840,8 @@ read_only = true
     .expect_err("relative mount sources should be rejected");
 
     match error {
-        ConfigError::MountSourceMustBeAbsolute { profile, source } => {
-            assert_eq!(profile, "site-builder");
+        ConfigError::MountSourceMustBeAbsolute { agent, source } => {
+            assert_eq!(agent, "site-builder");
             assert_eq!(source, Path::new("../claude"));
         }
         other => panic!("expected absolute mount source error, got {other}"),
@@ -827,7 +849,7 @@ read_only = true
 }
 
 #[test]
-fn rejects_profile_mount_targets_that_are_not_absolute() {
+fn rejects_agent_mount_targets_that_are_not_absolute() {
     assert_invalid_mount_target_parse_error(
         ".claude",
         MountTargetValidationError::Invalid {
@@ -837,22 +859,23 @@ fn rejects_profile_mount_targets_that_are_not_absolute() {
 }
 
 #[test]
-fn rejects_duplicate_profile_mount_targets() {
+fn rejects_duplicate_agent_mount_targets() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/home/core/.claude"
 target = "/home/site-builder/.claude"
 read_only = true
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/var/lib/tesserine/audit"
 target = "/home/site-builder/.claude"
 read_only = false
@@ -861,8 +884,8 @@ read_only = false
     .expect_err("duplicate mount targets should be rejected");
 
     match error {
-        ConfigError::DuplicateMountTarget { profile, target } => {
-            assert_eq!(profile, "site-builder");
+        ConfigError::DuplicateMountTarget { agent, target } => {
+            assert_eq!(agent, "site-builder");
             assert_eq!(target, Path::new("/home/site-builder/.claude"));
         }
         other => panic!("expected duplicate mount target error, got {other}"),
@@ -870,23 +893,24 @@ read_only = false
 }
 
 #[test]
-fn load_rejects_overlapping_profile_mount_targets() {
+fn load_rejects_overlapping_agent_mount_targets() {
     let path = write_temp_config(
         "overlapping-mount-targets",
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/home/core/.config"
 target = "/home/site-builder/.config"
 read_only = true
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/home/core/.config/claude"
 target = "/home/site-builder/.config/claude"
 read_only = true
@@ -897,11 +921,11 @@ read_only = true
 
     match error {
         ConfigError::OverlappingMountTargets {
-            profile,
+            agent,
             first,
             second,
         } => {
-            assert_eq!(profile, "site-builder");
+            assert_eq!(agent, "site-builder");
             assert_eq!(first, Path::new("/home/site-builder/.config"));
             assert_eq!(second, Path::new("/home/site-builder/.config/claude"));
         }
@@ -910,7 +934,7 @@ read_only = true
 }
 
 #[test]
-fn rejects_profile_mount_targets_with_parent_dir_components() {
+fn rejects_agent_mount_targets_with_parent_dir_components() {
     assert_invalid_mount_target_parse_error(
         "/home/site-builder/x/../repo/.git",
         MountTargetValidationError::Invalid {
@@ -920,7 +944,7 @@ fn rejects_profile_mount_targets_with_parent_dir_components() {
 }
 
 #[test]
-fn rejects_profile_mount_targets_with_current_dir_components() {
+fn rejects_agent_mount_targets_with_current_dir_components() {
     assert_invalid_mount_target_parse_error(
         "/home/site-builder/./a",
         MountTargetValidationError::Invalid {
@@ -930,7 +954,7 @@ fn rejects_profile_mount_targets_with_current_dir_components() {
 }
 
 #[test]
-fn rejects_profile_mount_targets_containing_commas() {
+fn rejects_agent_mount_targets_containing_commas() {
     assert_invalid_mount_target_parse_error(
         "/home/site-builder/data,archive",
         MountTargetValidationError::Invalid {
@@ -940,7 +964,7 @@ fn rejects_profile_mount_targets_containing_commas() {
 }
 
 #[test]
-fn rejects_profile_mount_targets_with_trailing_slashes() {
+fn rejects_agent_mount_targets_with_trailing_slashes() {
     assert_invalid_mount_target_parse_error(
         "/home/site-builder/.claude/",
         MountTargetValidationError::Invalid {
@@ -950,7 +974,7 @@ fn rejects_profile_mount_targets_with_trailing_slashes() {
 }
 
 #[test]
-fn rejects_profile_mount_targets_containing_find_metacharacters() {
+fn rejects_agent_mount_targets_containing_find_metacharacters() {
     for target in [
         "/home/site-builder/foo*bar",
         "/home/site-builder/foo?bar",
@@ -967,18 +991,19 @@ fn rejects_profile_mount_targets_containing_find_metacharacters() {
 }
 
 #[test]
-fn load_rejects_profile_mount_targets_with_trailing_slashes() {
+fn load_rejects_agent_mount_targets_with_trailing_slashes() {
     let path = write_temp_config(
         "invalid-mount-target-trailing-slash",
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/home/core/.claude"
 target = "/home/site-builder/.claude/"
 read_only = true
@@ -988,8 +1013,8 @@ read_only = true
     let error = Config::load(&path).expect_err("trailing-slash mount targets should be rejected");
 
     match &error {
-        ConfigError::InvalidMountTarget { profile, error } => {
-            assert_eq!(profile, "site-builder");
+        ConfigError::InvalidMountTarget { agent, error } => {
+            assert_eq!(agent, "site-builder");
             assert_eq!(
                 error,
                 &MountTargetValidationError::Invalid {
@@ -1002,12 +1027,12 @@ read_only = true
 
     assert_eq!(
         error.to_string(),
-        "profile 'site-builder' defines invalid mount target: mount target must be an absolute path without trailing '/', '.' or '..' components, ',', or find metacharacters ('*', '?', '[', ']', '\\\\'): /home/site-builder/.claude/"
+        "agent 'site-builder' defines invalid mount target: mount target must be an absolute path without trailing '/', '.' or '..' components, ',', or find metacharacters ('*', '?', '[', ']', '\\\\'): /home/site-builder/.claude/"
     );
 }
 
 #[test]
-fn rejects_profile_mount_targets_that_are_ancestors_of_methodology_mount() {
+fn rejects_agent_mount_targets_that_are_ancestors_of_methodology_mount() {
     assert_invalid_mount_target_parse_error(
         "/agentd",
         MountTargetValidationError::Reserved {
@@ -1017,7 +1042,7 @@ fn rejects_profile_mount_targets_that_are_ancestors_of_methodology_mount() {
 }
 
 #[test]
-fn rejects_profile_mount_targets_that_collide_with_methodology_mount() {
+fn rejects_agent_mount_targets_that_collide_with_methodology_mount() {
     assert_invalid_mount_target_parse_error(
         "/agentd/methodology",
         MountTargetValidationError::Reserved {
@@ -1027,7 +1052,7 @@ fn rejects_profile_mount_targets_that_collide_with_methodology_mount() {
 }
 
 #[test]
-fn rejects_profile_mount_targets_that_collide_with_home_directory() {
+fn rejects_agent_mount_targets_that_collide_with_home_directory() {
     assert_invalid_mount_target_parse_error(
         "/home/site-builder",
         MountTargetValidationError::Reserved {
@@ -1037,7 +1062,7 @@ fn rejects_profile_mount_targets_that_collide_with_home_directory() {
 }
 
 #[test]
-fn rejects_profile_mount_targets_that_collide_with_repo_directory() {
+fn rejects_agent_mount_targets_that_collide_with_repo_directory() {
     assert_invalid_mount_target_parse_error(
         "/home/site-builder/repo",
         MountTargetValidationError::Reserved {
@@ -1050,85 +1075,87 @@ fn rejects_profile_mount_targets_that_collide_with_repo_directory() {
 fn normalizes_empty_repo_token_source_to_none() {
     let config = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo_token_source = ""
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("empty repo token source should disable clone auth");
 
-    let profile = config
-        .profile("site-builder")
-        .expect("profile should exist");
+    let agent = config.agent("site-builder").expect("agent should exist");
 
-    assert_eq!(profile.repo_token_source(), None);
+    assert_eq!(agent.repo_token_source(), None);
 }
 
 #[test]
 fn rejects_schedule_without_repo() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 schedule = "*/15 * * * *"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
-    .expect_err("scheduled profiles without repos should be rejected");
+    .expect_err("scheduled agents without repos should be rejected");
 
     match error {
-        ConfigError::ScheduleRequiresRepo { profile } => assert_eq!(profile, "site-builder"),
+        ConfigError::ScheduleRequiresRepo { agent } => assert_eq!(agent, "site-builder"),
         other => panic!("expected schedule-requires-repo error, got {other}"),
     }
 }
 
 #[test]
-fn rejects_invalid_profile_repo_url() {
+fn rejects_invalid_agent_repo_url() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "/srv/test-repo.git"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
-    .expect_err("invalid profile repos should be rejected");
+    .expect_err("invalid agent repos should be rejected");
 
     match error {
-        ConfigError::InvalidRepo { profile, .. } => assert_eq!(profile, "site-builder"),
+        ConfigError::InvalidRepo { agent, .. } => assert_eq!(agent, "site-builder"),
         other => panic!("expected invalid repo error, got {other}"),
     }
 }
 
 #[test]
-fn rejects_invalid_profile_schedule() {
+fn rejects_invalid_agent_schedule() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "https://example.com/agentd.git"
 schedule = "* * *"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
-    .expect_err("invalid profile schedules should be rejected");
+    .expect_err("invalid agent schedules should be rejected");
 
     match error {
-        ConfigError::InvalidSchedule { profile, schedule } => {
-            assert_eq!(profile, "site-builder");
+        ConfigError::InvalidSchedule { agent, schedule } => {
+            assert_eq!(agent, "site-builder");
             assert_eq!(schedule, "* * *");
         }
         other => panic!("expected invalid schedule error, got {other}"),
@@ -1140,13 +1167,14 @@ fn rejects_repo_token_source_with_outer_whitespace() {
     for repo_token_source in [" SITE_BUILDER_REPO_TOKEN", "SITE_BUILDER_REPO_TOKEN "] {
         let error = Config::from_str(&format!(
             r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "{repo_token_source}"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#
         ))
         .expect_err("whitespace-padded repo token sources should be rejected");
@@ -1154,11 +1182,11 @@ command = ["site-builder", "exec"]
         match error {
             ConfigError::FieldHasOuterWhitespace {
                 field,
-                profile,
+                agent,
                 credential,
             } => {
                 assert_eq!(field, "repo_token_source");
-                assert_eq!(profile.as_deref(), Some("site-builder"));
+                assert_eq!(agent.as_deref(), Some("site-builder"));
                 assert_eq!(credential, None);
             }
             other => panic!("expected whitespace validation error, got {other}"),
@@ -1167,16 +1195,17 @@ command = ["site-builder", "exec"]
 }
 
 #[test]
-fn rejects_unknown_fields_in_profile_config() {
+fn rejects_unknown_fields_in_agent_config() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 extra = "nope"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect_err("unknown fields should be rejected");
@@ -1193,12 +1222,13 @@ fn rejects_unknown_fields_in_daemon_config() {
 socket_path = "/tmp/agentd.sock"
 extra = "nope"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect_err("unknown daemon fields should be rejected");
@@ -1208,55 +1238,58 @@ command = ["site-builder", "exec"]
 }
 
 #[test]
-fn rejects_duplicate_profile_names() {
+fn rejects_duplicate_agent_names() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:stable"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
-    .expect_err("duplicate profile names should be rejected");
+    .expect_err("duplicate agent names should be rejected");
 
     match error {
-        ConfigError::DuplicateProfileName { name } => assert_eq!(name, "site-builder"),
-        other => panic!("expected duplicate profile name error, got {other}"),
+        ConfigError::DuplicateAgentName { name } => assert_eq!(name, "site-builder"),
+        other => panic!("expected duplicate agent name error, got {other}"),
     }
 }
 
 #[test]
-fn rejects_configs_without_profiles() {
-    let error = Config::from_str("").expect_err("configs must define at least one profile");
+fn rejects_configs_without_agents() {
+    let error = Config::from_str("").expect_err("configs must define at least one agent");
 
-    assert!(error.to_string().contains("at least one profile"));
+    assert!(error.to_string().contains("at least one agent"));
 }
 
 #[test]
-fn rejects_duplicate_credential_names_within_a_profile() {
+fn rejects_duplicate_credential_names_within_a_agent() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_OTHER_TOKEN"
 "#,
@@ -1264,8 +1297,8 @@ source = "AGENTD_GITHUB_OTHER_TOKEN"
     .expect_err("duplicate credential names should be rejected");
 
     match error {
-        ConfigError::DuplicateCredentialName { profile, name } => {
-            assert_eq!(profile, "site-builder");
+        ConfigError::DuplicateCredentialName { agent, name } => {
+            assert_eq!(agent, "site-builder");
             assert_eq!(name, "GITHUB_TOKEN");
         }
         other => panic!("expected duplicate credential name error, got {other}"),
@@ -1276,12 +1309,13 @@ source = "AGENTD_GITHUB_OTHER_TOKEN"
 fn rejects_empty_required_string_fields() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = ""
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect_err("empty names should be rejected");
@@ -1290,28 +1324,29 @@ command = ["site-builder", "exec"]
 }
 
 #[test]
-fn rejects_profile_names_with_leading_or_trailing_whitespace() {
+fn rejects_agent_names_with_leading_or_trailing_whitespace() {
     for name in [" site-builder", "site-builder "] {
         let error = Config::from_str(&format!(
             r#"
-[[profiles]]
+[[agents]]
 name = "{name}"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#
         ))
-        .expect_err("whitespace-padded profile names should be rejected");
+        .expect_err("whitespace-padded agent names should be rejected");
 
         match error {
             ConfigError::FieldHasOuterWhitespace {
                 field,
-                profile,
+                agent,
                 credential,
             } => {
                 assert_eq!(field, "name");
-                assert_eq!(profile, None);
+                assert_eq!(agent, None);
                 assert_eq!(credential, None);
             }
             other => panic!("expected whitespace validation error, got {other}"),
@@ -1320,23 +1355,23 @@ command = ["site-builder", "exec"]
 }
 
 #[test]
-fn rejects_uppercase_profile_names_at_parse_time() {
-    assert_invalid_profile_name_parse_error("Site-Builder");
+fn rejects_uppercase_agent_names_at_parse_time() {
+    assert_invalid_agent_name_parse_error("Site-Builder");
 }
 
 #[test]
-fn rejects_digit_prefixed_profile_names_at_parse_time() {
-    assert_invalid_profile_name_parse_error("123site-builder");
+fn rejects_digit_prefixed_agent_names_at_parse_time() {
+    assert_invalid_agent_name_parse_error("123site-builder");
 }
 
 #[test]
-fn rejects_reserved_profile_names_at_parse_time() {
-    assert_invalid_profile_name_parse_error("root");
+fn rejects_reserved_agent_names_at_parse_time() {
+    assert_invalid_agent_name_parse_error("root");
 }
 
 #[test]
-fn rejects_profile_names_longer_than_thirty_two_characters_at_parse_time() {
-    assert_invalid_profile_name_parse_error(&format!("a{}", "b".repeat(32)));
+fn rejects_agent_names_longer_than_thirty_two_characters_at_parse_time() {
+    assert_invalid_agent_name_parse_error(&format!("a{}", "b".repeat(32)));
 }
 
 #[test]
@@ -1344,14 +1379,15 @@ fn rejects_credential_names_with_leading_or_trailing_whitespace() {
     for name in [" GITHUB_TOKEN", "GITHUB_TOKEN "] {
         let error = Config::from_str(&format!(
             r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "{name}"
 source = "AGENTD_GITHUB_TOKEN"
 "#
@@ -1361,11 +1397,11 @@ source = "AGENTD_GITHUB_TOKEN"
         match error {
             ConfigError::FieldHasOuterWhitespace {
                 field,
-                profile,
+                agent,
                 credential,
             } => {
                 assert_eq!(field, "credentials.name");
-                assert_eq!(profile.as_deref(), Some("site-builder"));
+                assert_eq!(agent.as_deref(), Some("site-builder"));
                 assert_eq!(credential, None);
             }
             other => panic!("expected whitespace validation error, got {other}"),
@@ -1377,14 +1413,15 @@ source = "AGENTD_GITHUB_TOKEN"
 fn rejects_credential_names_containing_commas() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "TOKEN,EXTRA"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
@@ -1392,8 +1429,8 @@ source = "AGENTD_GITHUB_TOKEN"
     .expect_err("comma-delimited credential names should be rejected");
 
     match error {
-        ConfigError::InvalidCredentialName { profile, name } => {
-            assert_eq!(profile, "site-builder");
+        ConfigError::InvalidCredentialName { agent, name } => {
+            assert_eq!(agent, "site-builder");
             assert_eq!(name, "TOKEN,EXTRA");
         }
         other => panic!("expected invalid credential name error, got {other}"),
@@ -1404,14 +1441,15 @@ source = "AGENTD_GITHUB_TOKEN"
 fn rejects_credential_names_containing_equals_signs() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "FOO=BAR"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
@@ -1419,8 +1457,8 @@ source = "AGENTD_GITHUB_TOKEN"
     .expect_err("credential names containing '=' should be rejected");
 
     match error {
-        ConfigError::InvalidCredentialName { profile, name } => {
-            assert_eq!(profile, "site-builder");
+        ConfigError::InvalidCredentialName { agent, name } => {
+            assert_eq!(agent, "site-builder");
             assert_eq!(name, "FOO=BAR");
         }
         other => panic!("expected invalid credential name error, got {other}"),
@@ -1431,24 +1469,25 @@ source = "AGENTD_GITHUB_TOKEN"
 fn rejects_reserved_credential_names() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
-name = "PROFILE_NAME"
+[[agents.credentials]]
+name = "AGENT_NAME"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
     )
     .expect_err("runner-reserved credential names should be rejected");
 
     match error {
-        ConfigError::InvalidCredentialName { profile, name } => {
-            assert_eq!(profile, "site-builder");
-            assert_eq!(name, "PROFILE_NAME");
+        ConfigError::InvalidCredentialName { agent, name } => {
+            assert_eq!(agent, "site-builder");
+            assert_eq!(name, "AGENT_NAME");
         }
         other => panic!("expected invalid credential name error, got {other}"),
     }
@@ -1458,24 +1497,26 @@ source = "AGENTD_GITHUB_TOKEN"
 fn rejects_empty_command_arrays_and_empty_command_elements() {
     let empty_command_error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = []
+[agents.command]
+argv = []
 "#,
     )
     .expect_err("empty command arrays should be rejected");
 
     let empty_element_error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", ""]
+[agents.command]
+argv = ["site-builder", ""]
 "#,
     )
     .expect_err("empty command elements should be rejected");
@@ -1488,7 +1529,7 @@ command = ["site-builder", ""]
 fn rejects_missing_command_field() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
@@ -1503,13 +1544,14 @@ methodology_dir = "../groundwork"
 fn rejects_legacy_runa_table() {
     let error = Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-[profiles.runa]
-command = ["site-builder", "exec"]
+[agents.runa]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect_err("legacy runa table should be rejected");
@@ -1545,12 +1587,13 @@ fn loading_daemon_config_resolves_relative_paths_from_file_location() {
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[profiles]]
+[[agents]]
 name = "Site-Builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
 
@@ -1568,12 +1611,13 @@ fn loading_daemon_config_uses_defaults_when_daemon_section_is_omitted() {
     let path = write_temp_config(
         "daemon-only-defaults",
         r#"
-[[profiles]]
+[[agents]]
 name = "Site-Builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
 
@@ -1593,12 +1637,13 @@ fn loading_daemon_config_rejects_unknown_fields_in_daemon_section() {
 socket_path = "/tmp/agentd.sock"
 extra = "nope"
 
-[[profiles]]
+[[agents]]
 name = "Site-Builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     );
 
@@ -1616,7 +1661,7 @@ fn loading_daemon_config_rejects_unknown_top_level_sections() {
 [deamon]
 socket_path = "/tmp/agentd.sock"
 
-[[profiles]]
+[[agents]]
 unexpected = "still allowed to exist here"
 "#,
     );
@@ -1629,16 +1674,16 @@ unexpected = "still allowed to exist here"
 }
 
 #[test]
-fn loading_daemon_config_ignores_invalid_profile_registry_entries() {
+fn loading_daemon_config_ignores_invalid_agent_registry_entries() {
     let path = write_temp_config(
-        "daemon-only-ignores-profiles",
+        "daemon-only-ignores-agents",
         r#"
 [daemon]
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[profiles]]
-unexpected = "daemon loader should ignore profile schema entirely"
+[[agents]]
+unexpected = "daemon loader should ignore agent schema entirely"
 "#,
     );
 

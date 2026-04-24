@@ -119,11 +119,11 @@ impl From<serde_json::Error> for ClientError {
     }
 }
 
-fn log_manual_run_completed(profile: &str, work_unit: Option<&str>, outcome: &SessionOutcome) {
+fn log_manual_run_completed(agent: &str, work_unit: Option<&str>, outcome: &SessionOutcome) {
     match outcome {
         SessionOutcome::TimedOut => tracing::warn!(
             event = "agentd.manual_run_completed",
-            profile = profile,
+            agent = agent,
             work_unit = work_unit.unwrap_or(""),
             work_unit_present = work_unit.is_some(),
             outcome = outcome.label(),
@@ -133,7 +133,7 @@ fn log_manual_run_completed(profile: &str, work_unit: Option<&str>, outcome: &Se
         | SessionOutcome::Blocked { .. }
         | SessionOutcome::NothingReady { .. } => tracing::info!(
             event = "agentd.manual_run_completed",
-            profile = profile,
+            agent = agent,
             work_unit = work_unit.unwrap_or(""),
             work_unit_present = work_unit.is_some(),
             outcome = outcome.label(),
@@ -143,7 +143,7 @@ fn log_manual_run_completed(profile: &str, work_unit: Option<&str>, outcome: &Se
         ),
         _ => tracing::warn!(
             event = "agentd.manual_run_completed",
-            profile = profile,
+            agent = agent,
             work_unit = work_unit.unwrap_or(""),
             work_unit_present = work_unit.is_some(),
             outcome = outcome.label(),
@@ -344,7 +344,7 @@ pub fn request_run(
     match send_request(
         socket_path.as_ref(),
         &RequestMessage::Run {
-            profile: request.profile.clone(),
+            agent: request.agent.clone(),
             repo_url: request.repo_url.clone(),
             work_unit: request.work_unit.clone(),
             input: request.input.clone(),
@@ -365,7 +365,7 @@ pub(crate) fn request_run_without_waiting(
     send_request_without_response(
         socket_path.as_ref(),
         &RequestMessage::Run {
-            profile: request.profile.clone(),
+            agent: request.agent.clone(),
             repo_url: request.repo_url.clone(),
             work_unit: request.work_unit.clone(),
             input: request.input.clone(),
@@ -469,14 +469,14 @@ fn handle_connection_inner(
     let response = match request {
         RequestMessage::Ping => ResponseMessage::Pong,
         RequestMessage::Run {
-            profile,
+            agent,
             repo_url,
             work_unit,
             input,
         } => match dispatch_run(
             config,
             &RunRequest {
-                profile: profile.clone(),
+                agent: agent.clone(),
                 repo_url,
                 work_unit: work_unit.clone(),
                 input,
@@ -484,7 +484,7 @@ fn handle_connection_inner(
             executor,
         ) {
             Ok(outcome) => {
-                log_manual_run_completed(&profile, work_unit.as_deref(), &outcome);
+                log_manual_run_completed(&agent, work_unit.as_deref(), &outcome);
                 ResponseMessage::SessionOutcome {
                     outcome: outcome.into(),
                 }
@@ -816,14 +816,15 @@ mod tests {
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#,

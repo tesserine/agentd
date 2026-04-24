@@ -320,7 +320,7 @@ fn create_audit_mount(
     create_prepared_bind_mount(
         &audit_record.runa_dir,
         staging_dir.join(AUDIT_RUNA_STAGE_LINK_NAME),
-        session_internal_audit_runa_dir(&spec.profile_name),
+        session_internal_audit_runa_dir(&spec.agent_name),
         false,
         true,
     )
@@ -463,7 +463,7 @@ mod tests {
             runa_dir,
             metadata_path,
             session_id: session_id.to_string(),
-            profile: "site-builder".to_string(),
+            agent: "site-builder".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: None,
             start_timestamp: "2026-04-16T00:00:00Z".to_string(),

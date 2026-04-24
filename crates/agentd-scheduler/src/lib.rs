@@ -1,4 +1,4 @@
-//! Cron-based scheduling for agentd profiles.
+//! Cron-based scheduling for agentd agents.
 //!
 //! The scheduler owns timing policy only: it evaluates cron expressions in
 //! daemon-local time and dispatches run requests through an abstract
@@ -16,19 +16,19 @@ use croner::parser::{CronParser, Seconds, Year};
 
 const MAX_IDLE_SLEEP: Duration = Duration::from_secs(1);
 
-/// One scheduled autonomous run source: profile identity, default repo, and a
+/// One scheduled autonomous run source: agent identity, default repo, and a
 /// parsed cron expression.
 #[derive(Debug, Clone)]
-pub struct ScheduledProfile {
+pub struct ScheduledAgent {
     request: ScheduledRunRequest,
     cron: Cron,
 }
 
-impl ScheduledProfile {
-    /// Parses a five-field cron expression for a scheduled profile.
-    pub fn new(profile: String, repo_url: String, schedule: &str) -> Result<Self, CronError> {
+impl ScheduledAgent {
+    /// Parses a five-field cron expression for a scheduled agent.
+    pub fn new(agent: String, repo_url: String, schedule: &str) -> Result<Self, CronError> {
         Ok(Self {
-            request: ScheduledRunRequest { profile, repo_url },
+            request: ScheduledRunRequest { agent, repo_url },
             cron: parse_schedule(schedule)?,
         })
     }
@@ -37,7 +37,7 @@ impl ScheduledProfile {
 /// A concrete run request emitted by the scheduler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduledRunRequest {
-    pub profile: String,
+    pub agent: String,
     pub repo_url: String,
 }
 
@@ -88,24 +88,24 @@ impl Clock for SystemClock {
     }
 }
 
-/// In-memory scheduler state that tracks the next fire time per profile.
+/// In-memory scheduler state that tracks the next fire time per agent.
 #[derive(Debug, Clone)]
 pub struct Scheduler {
     entries: Vec<ScheduledEntry>,
 }
 
 impl Scheduler {
-    /// Builds scheduler state from the configured scheduled profiles.
-    pub fn new(profiles: Vec<ScheduledProfile>, now: DateTime<Local>) -> Result<Self, CronError> {
-        let mut entries = Vec::with_capacity(profiles.len());
-        for profile in profiles {
-            entries.push(ScheduledEntry::new(profile, now)?);
+    /// Builds scheduler state from the configured scheduled agents.
+    pub fn new(agents: Vec<ScheduledAgent>, now: DateTime<Local>) -> Result<Self, CronError> {
+        let mut entries = Vec::with_capacity(agents.len());
+        for agent in agents {
+            entries.push(ScheduledEntry::new(agent, now)?);
         }
 
         Ok(Self { entries })
     }
 
-    /// Returns whether the scheduler has any active profiles.
+    /// Returns whether the scheduler has any active agents.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -115,9 +115,9 @@ impl Scheduler {
         self.entries.iter().map(|entry| entry.next_fire).min()
     }
 
-    /// Dispatches every profile whose next fire time is due at `now`.
+    /// Dispatches every agent whose next fire time is due at `now`.
     ///
-    /// Each due profile dispatches at most once per tick. After dispatch, the
+    /// Each due agent dispatches at most once per tick. After dispatch, the
     /// next fire time advances to the first occurrence strictly after `now`,
     /// which intentionally skips missed occurrences instead of backfilling.
     /// Startup seeding is inclusive, but post-dispatch advancement is
@@ -134,9 +134,9 @@ impl Scheduler {
                 continue;
             }
 
-            let request = entry.profile.request.clone();
+            let request = entry.agent.request.clone();
             let dispatch_result = dispatcher.dispatch(request.clone()).map(|_| request);
-            entry.next_fire = entry.profile.cron.find_next_occurrence(&now, false).expect(
+            entry.next_fire = entry.agent.cron.find_next_occurrence(&now, false).expect(
                 "validated schedules should always have a next occurrence after the current time",
             );
             results.push(dispatch_result);
@@ -178,14 +178,14 @@ pub fn run_until_shutdown<D: Dispatcher, C: Clock>(
 
 #[derive(Debug, Clone)]
 struct ScheduledEntry {
-    profile: ScheduledProfile,
+    agent: ScheduledAgent,
     next_fire: DateTime<Local>,
 }
 
 impl ScheduledEntry {
-    fn new(profile: ScheduledProfile, now: DateTime<Local>) -> Result<Self, CronError> {
-        let next_fire = profile.cron.find_next_occurrence(&now, true)?;
-        Ok(Self { profile, next_fire })
+    fn new(agent: ScheduledAgent, now: DateTime<Local>) -> Result<Self, CronError> {
+        let next_fire = agent.cron.find_next_occurrence(&now, true)?;
+        Ok(Self { agent, next_fire })
     }
 }
 
@@ -244,17 +244,17 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_due_profiles_once_each_when_schedules_overlap() {
+    fn dispatches_due_agents_once_each_when_schedules_overlap() {
         let start = local_datetime(2026, 4, 10, 10, 0, 30);
         let mut scheduler = Scheduler::new(
             vec![
-                ScheduledProfile::new(
+                ScheduledAgent::new(
                     "site-builder".to_string(),
                     "https://example.com/site.git".to_string(),
                     "*/15 * * * *",
                 )
                 .expect("schedule should parse"),
-                ScheduledProfile::new(
+                ScheduledAgent::new(
                     "code-reviewer".to_string(),
                     "https://example.com/review.git".to_string(),
                     "*/15 * * * *",
@@ -273,11 +273,11 @@ mod tests {
             dispatcher.requests(),
             vec![
                 ScheduledRunRequest {
-                    profile: "site-builder".to_string(),
+                    agent: "site-builder".to_string(),
                     repo_url: "https://example.com/site.git".to_string(),
                 },
                 ScheduledRunRequest {
-                    profile: "code-reviewer".to_string(),
+                    agent: "code-reviewer".to_string(),
                     repo_url: "https://example.com/review.git".to_string(),
                 },
             ]
@@ -289,7 +289,7 @@ mod tests {
         let start = local_datetime(2026, 4, 10, 10, 0, 30);
         let mut scheduler = Scheduler::new(
             vec![
-                ScheduledProfile::new(
+                ScheduledAgent::new(
                     "site-builder".to_string(),
                     "https://example.com/site.git".to_string(),
                     "* * * * *",
@@ -330,7 +330,7 @@ mod tests {
         let start = local_datetime(2026, 4, 10, 10, 15, 0);
         let mut scheduler = Scheduler::new(
             vec![
-                ScheduledProfile::new(
+                ScheduledAgent::new(
                     "site-builder".to_string(),
                     "https://example.com/site.git".to_string(),
                     "*/15 * * * *",
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(
             dispatcher.requests(),
             vec![ScheduledRunRequest {
-                profile: "site-builder".to_string(),
+                agent: "site-builder".to_string(),
                 repo_url: "https://example.com/site.git".to_string(),
             }]
         );
@@ -369,17 +369,17 @@ mod tests {
     }
 
     #[test]
-    fn next_wake_at_tracks_the_earliest_scheduled_profile() {
+    fn next_wake_at_tracks_the_earliest_scheduled_agent() {
         let start = local_datetime(2026, 4, 10, 10, 0, 30);
         let scheduler = Scheduler::new(
             vec![
-                ScheduledProfile::new(
+                ScheduledAgent::new(
                     "site-builder".to_string(),
                     "https://example.com/site.git".to_string(),
                     "*/20 * * * *",
                 )
                 .expect("schedule should parse"),
-                ScheduledProfile::new(
+                ScheduledAgent::new(
                     "code-reviewer".to_string(),
                     "https://example.com/review.git".to_string(),
                     "*/5 * * * *",

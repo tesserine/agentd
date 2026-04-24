@@ -28,15 +28,11 @@ fn run_session_with_test_audit_root(
     run_session(spec, invocation)
 }
 
-fn wait_for_session_record_dir(
-    audit_root: &Path,
-    profile_name: &str,
-    timeout: Duration,
-) -> PathBuf {
+fn wait_for_session_record_dir(audit_root: &Path, agent_name: &str, timeout: Duration) -> PathBuf {
     let deadline = Instant::now() + timeout;
     loop {
-        let profile_root = audit_root.join(profile_name);
-        if let Ok(entries) = fs::read_dir(&profile_root) {
+        let agent_root = audit_root.join(agent_name);
+        if let Ok(entries) = fs::read_dir(&agent_root) {
             let entries = entries
                 .map(|entry| {
                     entry
@@ -53,7 +49,7 @@ fn wait_for_session_record_dir(
         assert!(
             Instant::now() < deadline,
             "timed out waiting for session record under {}",
-            profile_root.display()
+            agent_root.display()
         );
         thread::sleep(Duration::from_millis(25));
     }
@@ -133,12 +129,12 @@ fn succeeds_without_timeout_and_cleans_up_container() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "success-run".to_string(),
+            agent_name: "success-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec![
+            agent_command: vec![
                 "site-builder".to_string(),
                 "exec".to_string(),
                 "--sandbox".to_string(),
@@ -188,12 +184,12 @@ fn materializes_request_text_input_before_session_command_runs() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "request-input-run".to_string(),
+            agent_name: "request-input-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "assert-request-input-present".to_string(),
@@ -235,12 +231,12 @@ fn materializes_generic_artifact_input_before_session_command_runs() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "artifact-input-run".to_string(),
+            agent_name: "artifact-input-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "assert-claim-input-present".to_string(),
@@ -285,12 +281,12 @@ fn rejects_request_text_when_methodology_declares_an_unsupported_request_version
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "unsupported-request-version-run".to_string(),
+            agent_name: "unsupported-request-version-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: Vec::new(),
         },
         SessionInvocation {
@@ -329,12 +325,12 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "mixed-env-run".to_string(),
+            agent_name: "mixed-env-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -381,12 +377,12 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "unset-work-unit-run".to_string(),
+            agent_name: "unset-work-unit-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "success-without-work-unit".to_string(),
@@ -425,12 +421,12 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "failure-run".to_string(),
+            agent_name: "failure-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -475,12 +471,12 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "failure-run-125".to_string(),
+            agent_name: "failure-run-125".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -526,12 +522,12 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "comma-methodology-run".to_string(),
+            agent_name: "comma-methodology-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -585,7 +581,7 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "readonly-mount-run".to_string(),
+            agent_name: "readonly-mount-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
@@ -594,7 +590,7 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
                 target: PathBuf::from("/home/readonly-mount-run/.claude"),
                 read_only: true,
             }],
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "verify-read-only-mount".to_string(),
@@ -653,7 +649,7 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "readwrite-mount-run".to_string(),
+            agent_name: "readwrite-mount-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
@@ -662,7 +658,7 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
                 target: PathBuf::from("/home/readwrite-mount-run/.runa"),
                 read_only: false,
             }],
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "write-read-write-mount".to_string(),
@@ -725,7 +721,7 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "nested-home-mount-run".to_string(),
+            agent_name: "nested-home-mount-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
@@ -734,7 +730,7 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
                 target: PathBuf::from("/home/nested-home-mount-run/.config/claude"),
                 read_only: false,
             }],
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "write-nested-home-mount".to_string(),
@@ -776,12 +772,12 @@ fn preserves_session_user_access_to_preexisting_home_content() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "preexisting-home-run".to_string(),
+            agent_name: "preexisting-home-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "write-preexisting-home-file".to_string(),
@@ -818,12 +814,12 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "audit-success-run".to_string(),
+            agent_name: "audit-success-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "write-repo-audit-state".to_string(),
@@ -852,13 +848,24 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
             .expect("execution record should persist"),
         "{\"protocols\":[\"begin\"],\"postconditions\":[\"passed\"]}\n"
     );
+    assert_eq!(
+        fs::read_to_string(record_dir.join("runa/calls.log"))
+            .expect("runa call log should persist"),
+        "init --methodology /agentd/methodology/manifest.toml\nrun --work-unit issue-76 --agent-command -- site-builder exec\n"
+    );
+    let runa_config = fs::read_to_string(record_dir.join("runa/config.toml"))
+        .expect("runa config should persist");
+    assert!(
+        !runa_config.contains("[agent]"),
+        "agentd-managed runa config must not contain an [agent] section: {runa_config}"
+    );
 
     let metadata: Value = serde_json::from_str(
         &fs::read_to_string(record_dir.join("agentd/session.json"))
             .expect("session metadata should persist"),
     )
     .expect("session metadata should be valid json");
-    assert_eq!(metadata["profile"], "audit-success-run");
+    assert_eq!(metadata["agent"], "audit-success-run");
     assert_eq!(metadata["repo_url"], fixture.repo_url());
     assert_eq!(metadata["work_unit"], "issue-76");
     assert_eq!(metadata["outcome"], "success");
@@ -907,12 +914,12 @@ fn preserves_host_readability_for_restrictive_container_written_audit_entries_af
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "audit-restrictive-modes-run".to_string(),
+            agent_name: "audit-restrictive-modes-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "write-restrictive-repo-audit-state".to_string(),
@@ -1005,7 +1012,7 @@ fn refuses_hard_linked_audit_entries_without_mutating_operator_mount_file_modes(
         &audit_root,
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "audit-hard-link-run".to_string(),
+            agent_name: "audit-hard-link-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: audit_root.clone(),
@@ -1014,7 +1021,7 @@ fn refuses_hard_linked_audit_entries_without_mutating_operator_mount_file_modes(
                 target: PathBuf::from("/home/audit-hard-link-run/shared"),
                 read_only: false,
             }],
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "sleep-short".to_string(),
@@ -1083,12 +1090,12 @@ fn preserves_failing_audit_trail_for_post_mortem_reconstruction() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "audit-failure-run".to_string(),
+            agent_name: "audit-failure-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
                 value: "write-failing-audit-trail".to_string(),
@@ -1150,12 +1157,12 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            profile_name: "timeout-run".to_string(),
+            agent_name: "timeout-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
             mounts: Vec::new(),
-            command: vec!["site-builder".to_string(), "exec".to_string()],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
                 ResolvedEnvironmentVariable {
                     name: "GITHUB_TOKEN".to_string(),
@@ -1202,12 +1209,12 @@ fn releases_session_secret_after_container_reaches_running_state() {
             &audit_root,
             SessionSpec {
                 daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-                profile_name: "running-secret-run".to_string(),
+                agent_name: "running-secret-run".to_string(),
                 base_image: image,
                 methodology_dir,
                 audit_root: audit_root.clone(),
                 mounts: Vec::new(),
-                command: vec!["site-builder".to_string(), "exec".to_string()],
+                agent_command: vec!["site-builder".to_string(), "exec".to_string()],
                 environment: vec![
                     ResolvedEnvironmentVariable {
                         name: "GITHUB_TOKEN".to_string(),
@@ -1244,21 +1251,21 @@ fn releases_session_secret_after_container_reaches_running_state() {
 
 struct SessionFixture {
     root: PathBuf,
-    profile_name: String,
+    agent_name: String,
     baseline_runner_secret_names: BTreeSet<String>,
     repo_server: RepoHttpServer,
 }
 
 impl SessionFixture {
-    fn new(profile_name: &str) -> Self {
-        Self::new_with_repo_server(profile_name, &format!("agentd-runner-{profile_name}"))
+    fn new(agent_name: &str) -> Self {
+        Self::new_with_repo_server(agent_name, &format!("agentd-runner-{agent_name}"))
     }
 
-    fn new_with_root_prefix(profile_name: &str, root_prefix: &str) -> Self {
-        Self::new_with_repo_server(profile_name, root_prefix)
+    fn new_with_root_prefix(agent_name: &str, root_prefix: &str) -> Self {
+        Self::new_with_repo_server(agent_name, root_prefix)
     }
 
-    fn new_with_repo_server(profile_name: &str, root_prefix: &str) -> Self {
+    fn new_with_repo_server(agent_name: &str, root_prefix: &str) -> Self {
         let root = unique_temp_dir(root_prefix);
         fs::create_dir_all(&root).expect("fixture root should be created");
 
@@ -1276,7 +1283,7 @@ impl SessionFixture {
 
         Self {
             root,
-            profile_name: profile_name.to_string(),
+            agent_name: agent_name.to_string(),
             baseline_runner_secret_names: list_runner_secret_names(),
             repo_server: RepoHttpServer::start(repo_root),
         }
@@ -1291,9 +1298,9 @@ impl SessionFixture {
     }
 
     fn only_session_record_dir(&self) -> PathBuf {
-        let profile_root = self.audit_root().join(&self.profile_name);
-        let entries = fs::read_dir(&profile_root)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", profile_root.display()))
+        let agent_root = self.audit_root().join(&self.agent_name);
+        let entries = fs::read_dir(&agent_root)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", agent_root.display()))
             .map(|entry| {
                 entry
                     .expect("session record entry should be readable")
@@ -1305,7 +1312,7 @@ impl SessionFixture {
             entries.len(),
             1,
             "expected exactly one session record under {}",
-            profile_root.display()
+            agent_root.display()
         );
         entries[0].clone()
     }
@@ -1346,6 +1353,7 @@ impl SessionFixture {
 
         fs::write(context_dir.join("site-builder"), SITE_BUILDER_STUB)
             .expect("site-builder stub should be written");
+        fs::write(context_dir.join("runa"), RUNA_STUB).expect("runa stub should be written");
         fs::write(context_dir.join("entrypoint.sh"), ENTRYPOINT_SH)
             .expect("entrypoint script should be written");
         let mut containerfile = work_unit
@@ -1360,7 +1368,7 @@ impl SessionFixture {
         fs::write(context_dir.join("Containerfile"), containerfile)
             .expect("containerfile should be written");
 
-        let tag = format!("agentd-runner-test:{}", self.profile_name);
+        let tag = format!("agentd-runner-test:{}", self.agent_name);
         let status = Command::new("podman")
             .args(["build", "--tag", &tag, context_dir.to_str().unwrap()])
             .stdout(Stdio::inherit())
@@ -1384,7 +1392,7 @@ impl SessionFixture {
         );
 
         let names = String::from_utf8(output.stdout).expect("podman ps output should be utf-8");
-        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.profile_name);
+        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.agent_name);
         assert!(
             !names.lines().any(|name| name.starts_with(&expected_prefix)),
             "runner left container behind with prefix {expected_prefix}: {names}"
@@ -1406,7 +1414,7 @@ impl SessionFixture {
 
     fn wait_for_runner_container_to_be_running(&self, timeout: Duration) -> String {
         let deadline = Instant::now() + timeout;
-        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.profile_name);
+        let expected_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{}-", self.agent_name);
 
         loop {
             let running_container_names = list_running_container_names();
@@ -1430,7 +1438,7 @@ impl SessionFixture {
         let expected_secret_prefix = format!("agentd-{TEST_DAEMON_INSTANCE_ID}-{session_id}-");
         let expected_container_prefix = format!(
             "agentd-{TEST_DAEMON_INSTANCE_ID}-{}-{session_id}",
-            self.profile_name
+            self.agent_name
         );
 
         loop {
@@ -1607,8 +1615,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends findutils git gosu passwd \
     && rm -rf /var/lib/apt/lists/*
 COPY site-builder /usr/local/bin/site-builder
+COPY runa /usr/local/bin/runa
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /usr/local/bin/site-builder /entrypoint.sh
+RUN chmod +x /usr/local/bin/site-builder /usr/local/bin/runa /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 "#;
 
@@ -1617,6 +1626,85 @@ set -eu
 
 echo "image entrypoint should not run" >&2
 exit 97
+"#;
+
+const RUNA_STUB: &str = r#"#!/bin/sh
+set -eu
+
+subcommand="${1:-}"
+if [ "$#" -gt 0 ]; then
+    shift
+fi
+
+case "$subcommand" in
+    init)
+        methodology=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --methodology)
+                    shift
+                    methodology="${1:-}"
+                    ;;
+                *)
+                    echo "unexpected runa init argument: $1" >&2
+                    exit 97
+                    ;;
+            esac
+            shift
+        done
+        [ "$methodology" = "/agentd/methodology/manifest.toml" ]
+        [ -f "$methodology" ]
+        mkdir -p .runa/workspace .runa/store
+        cat > .runa/config.toml <<EOF
+methodology = "$methodology"
+EOF
+        printf 'initialized = true\n' > .runa/state.toml
+        printf 'init --methodology %s\n' "$methodology" >> .runa/calls.log
+        if grep -F '[agent]' .runa/config.toml >/dev/null; then
+            echo "runa config unexpectedly contains [agent]" >&2
+            exit 96
+        fi
+        ;;
+    run)
+        work_unit=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --work-unit)
+                    shift
+                    work_unit="${1:-}"
+                    ;;
+                --agent-command)
+                    shift
+                    if [ "${1:-}" = "--" ]; then
+                        shift
+                    fi
+                    if [ "$#" -eq 0 ]; then
+                        echo "missing agent command" >&2
+                        exit 95
+                    fi
+                    if [ -n "$work_unit" ]; then
+                        export AGENTD_WORK_UNIT="$work_unit"
+                        printf 'run --work-unit %s --agent-command -- %s\n' "$work_unit" "$*" >> .runa/calls.log
+                    else
+                        printf 'run --agent-command -- %s\n' "$*" >> .runa/calls.log
+                    fi
+                    exec "$@"
+                    ;;
+                *)
+                    echo "unexpected runa run argument: $1" >&2
+                    exit 94
+                    ;;
+            esac
+            shift
+        done
+        echo "missing --agent-command" >&2
+        exit 93
+        ;;
+    *)
+        echo "unexpected runa subcommand: $subcommand" >&2
+        exit 92
+        ;;
+esac
 "#;
 
 struct RepoHttpServer {
@@ -1748,14 +1836,14 @@ shift
 case "$command_name" in
     exec)
         [ -f /agentd/methodology/manifest.toml ]
-        [ "${PROFILE_NAME:-}" != "" ]
+        [ "${AGENT_NAME:-}" != "" ]
         if [ "${GITHUB_TOKEN+set}" = "set" ]; then
             [ "${GITHUB_TOKEN}" = "test-token" ]
         fi
         [ "$(id -u)" != "0" ]
-        [ "$(id -un)" = "${PROFILE_NAME}" ]
-        [ "${HOME:-}" = "/home/${PROFILE_NAME}" ]
-        [ "$(pwd)" = "/home/${PROFILE_NAME}/repo" ]
+        [ "$(id -un)" = "${AGENT_NAME}" ]
+        [ "${HOME:-}" = "/home/${AGENT_NAME}" ]
+        [ "$(pwd)" = "/home/${AGENT_NAME}/repo" ]
         [ -w "${HOME}" ]
         [ -w "${HOME}/repo" ]
         [ -f "${HOME}/repo/README.md" ]

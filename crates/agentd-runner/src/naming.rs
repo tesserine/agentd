@@ -5,7 +5,7 @@ pub(crate) const SESSION_ID_LEN: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContainerNameParts<'a> {
     pub(crate) daemon_instance_id: &'a str,
-    pub(crate) profile_name: &'a str,
+    pub(crate) agent_name: &'a str,
     pub(crate) session_id: &'a str,
 }
 
@@ -18,10 +18,10 @@ pub(crate) struct SecretNameParts<'a> {
 
 pub(crate) fn format_container_name(
     daemon_instance_id: &str,
-    profile_name: &str,
+    agent_name: &str,
     session_id: &str,
 ) -> String {
-    format!("{PODMAN_RESOURCE_PREFIX}{daemon_instance_id}-{profile_name}-{session_id}")
+    format!("{PODMAN_RESOURCE_PREFIX}{daemon_instance_id}-{agent_name}-{session_id}")
 }
 
 pub(crate) fn format_secret_name(
@@ -35,14 +35,14 @@ pub(crate) fn format_secret_name(
 pub(crate) fn parse_container_name(name: &str) -> Option<ContainerNameParts<'_>> {
     let suffix = name.strip_prefix(PODMAN_RESOURCE_PREFIX)?;
     let (daemon_instance_id, remainder) = suffix.split_once('-')?;
-    let (profile_name, session_id) = remainder.rsplit_once('-')?;
+    let (agent_name, session_id) = remainder.rsplit_once('-')?;
 
     (is_daemon_instance_id(daemon_instance_id)
-        && !profile_name.is_empty()
+        && !agent_name.is_empty()
         && is_session_id(session_id))
     .then_some(ContainerNameParts {
         daemon_instance_id,
-        profile_name,
+        agent_name,
         session_id,
     })
 }

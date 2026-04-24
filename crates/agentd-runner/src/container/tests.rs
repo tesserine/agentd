@@ -23,7 +23,7 @@ fn test_audit_record() -> SessionAuditRecord {
             "/tmp/audit/site-builder/0123456789abcdef/agentd/session.json",
         ),
         session_id: "0123456789abcdef".to_string(),
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: VALID_REMOTE_REPO_URL.to_string(),
         work_unit: None,
         start_timestamp: "2026-04-16T00:00:00Z".to_string(),
@@ -267,11 +267,16 @@ fn build_container_script_disables_git_terminal_prompts() {
 }
 
 #[test]
-fn build_container_script_creates_home_workspace_and_execs_profile_command_from_repo_as_unprivileged_user()
- {
+fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent_command() {
     let script = build_container_script(
         &crate::SessionSpec {
-            profile_name: "myprofile".to_string(),
+            agent_name: "myagent".to_string(),
+            agent_command: vec![
+                "site-builder".to_string(),
+                "exec".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+            ],
             ..test_session_spec()
         },
         &SessionInvocation {
@@ -284,61 +289,63 @@ fn build_container_script_creates_home_workspace_and_execs_profile_command_from_
         None,
     );
 
-    assert!(script.contains("useradd --create-home --home-dir '/home/myprofile' --shell /bin/sh --user-group 'myprofile'"));
-    assert!(script.contains("\nmkdir -p '/home/myprofile/.agentd/audit'\n"));
     assert!(script.contains(
-        "\nfind '/home/myprofile' -mindepth 0 \\( -path '/home/myprofile/.agentd/audit/runa' -o -path '/home/myprofile/repo' \\) -prune -o -exec chown 'myprofile:myprofile' {} +\n"
+        "useradd --create-home --home-dir '/home/myagent' --shell /bin/sh --user-group 'myagent'"
+    ));
+    assert!(script.contains("\nmkdir -p '/home/myagent/.agentd/audit'\n"));
+    assert!(script.contains(
+        "\nfind '/home/myagent' -mindepth 0 \\( -path '/home/myagent/.agentd/audit/runa' -o -path '/home/myagent/repo' \\) -prune -o -exec chown 'myagent:myagent' {} +\n"
     ));
     assert!(script.contains(
-        "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/myprofile/repo'"
+        "git clone --no-hardlinks -- 'https://example.com/agentd.git' '/home/myagent/repo'"
     ));
-    assert!(script.contains("\ncd '/home/myprofile/repo'\n"));
-    assert!(script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile/repo'\n"));
+    assert!(script.contains("\ncd '/home/myagent/repo'\n"));
+    assert!(script.contains("\nchown -R 'myagent:myagent' '/home/myagent/repo'\n"));
     assert!(
         script.contains(
-            "if [ -e '/home/myprofile/repo/.runa' ] || [ -L '/home/myprofile/repo/.runa' ]; then"
+            "if [ -e '/home/myagent/repo/.runa' ] || [ -L '/home/myagent/repo/.runa' ]; then"
         ),
         "{script}"
     );
     assert!(
-        script.contains(
-            "\nln -s '/home/myprofile/.agentd/audit/runa' '/home/myprofile/repo/.runa'\n"
-        )
+        script.contains("\nln -s '/home/myagent/.agentd/audit/runa' '/home/myagent/repo/.runa'\n")
     );
-    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile'\n"));
-    assert!(!script.contains("\nchown -R 'myprofile:myprofile' '/home/myprofile'\n"));
-    assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
-    assert!(script.contains("\nexport AGENTD_WORK_UNIT='task-42'\n"));
-    assert!(script.contains("exec gosu 'myprofile:myprofile' 'site-builder' 'exec'"));
-    assert!(!script.contains("runa init"));
+    assert!(!script.contains("\nchown 'myagent:myagent' '/home/myagent'\n"));
+    assert!(!script.contains("\nchown -R 'myagent:myagent' '/home/myagent'\n"));
+    assert!(script.contains("\nexport HOME='/home/myagent'\n"));
+    assert!(script.contains(
+        "\ngosu 'myagent:myagent' runa init --methodology '/agentd/methodology/manifest.toml'\n"
+    ));
     assert!(!script.contains(".runa/config.toml"));
-    assert!(!script.contains("runa run"));
+    assert!(script.contains(
+        "\nexec gosu 'myagent:myagent' runa run --work-unit 'task-42' --agent-command -- 'site-builder' 'exec' '--sandbox' 'workspace-write'"
+    ));
 }
 
 #[test]
 fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_targets() {
     let script = build_container_script(
         &crate::SessionSpec {
-            profile_name: "myprofile".to_string(),
+            agent_name: "myagent".to_string(),
             mounts: vec![
                 crate::BindMount {
                     source: PathBuf::from("/srv/claude"),
-                    target: PathBuf::from("/home/myprofile/.claude"),
+                    target: PathBuf::from("/home/myagent/.claude"),
                     read_only: true,
                 },
                 crate::BindMount {
                     source: PathBuf::from("/srv/claude-config"),
-                    target: PathBuf::from("/home/myprofile/.config/claude workspace"),
+                    target: PathBuf::from("/home/myagent/.config/claude workspace"),
                     read_only: false,
                 },
                 crate::BindMount {
                     source: PathBuf::from("/srv/git-config"),
-                    target: PathBuf::from("/home/myprofile/.config/git (session)"),
+                    target: PathBuf::from("/home/myagent/.config/git (session)"),
                     read_only: false,
                 },
                 crate::BindMount {
                     source: PathBuf::from("/srv/deep-tree"),
-                    target: PathBuf::from("/home/myprofile/a/b/c"),
+                    target: PathBuf::from("/home/myagent/a/b/c"),
                     read_only: false,
                 },
                 crate::BindMount {
@@ -361,12 +368,12 @@ fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_t
 
     assert!(
         script.contains(
-            "\nfind '/home/myprofile' -mindepth 0 \\( -path '/home/myprofile/.claude' -o -path '/home/myprofile/.config/claude workspace' -o -path '/home/myprofile/.config/git (session)' -o -path '/home/myprofile/a/b/c' -o -path '/home/myprofile/.agentd/audit/runa' -o -path '/home/myprofile/repo' \\) -prune -o -exec chown 'myprofile:myprofile' {} +\n"
+            "\nfind '/home/myagent' -mindepth 0 \\( -path '/home/myagent/.claude' -o -path '/home/myagent/.config/claude workspace' -o -path '/home/myagent/.config/git (session)' -o -path '/home/myagent/a/b/c' -o -path '/home/myagent/.agentd/audit/runa' -o -path '/home/myagent/repo' \\) -prune -o -exec chown 'myagent:myagent' {} +\n"
         ),
         "home ownership should be repaired with one find traversal that prunes mounts and the repo: {script}"
     );
     assert_eq!(
-        script.matches("-path '/home/myprofile/repo'").count(),
+        script.matches("-path '/home/myagent/repo'").count(),
         1,
         "the repo prune should be emitted exactly once"
     );
@@ -380,16 +387,16 @@ fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_t
 fn build_container_script_does_not_emit_intermediate_home_chown_commands() {
     let script = build_container_script(
         &crate::SessionSpec {
-            profile_name: "myprofile".to_string(),
+            agent_name: "myagent".to_string(),
             mounts: vec![
                 crate::BindMount {
                     source: PathBuf::from("/srv/claude"),
-                    target: PathBuf::from("/home/myprofile/.config/claude"),
+                    target: PathBuf::from("/home/myagent/.config/claude"),
                     read_only: true,
                 },
                 crate::BindMount {
                     source: PathBuf::from("/srv/git-config"),
-                    target: PathBuf::from("/home/myprofile/.config/git"),
+                    target: PathBuf::from("/home/myagent/.config/git"),
                     read_only: false,
                 },
             ],
@@ -405,12 +412,12 @@ fn build_container_script_does_not_emit_intermediate_home_chown_commands() {
         None,
     );
 
-    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile'\n"));
-    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.config'\n"));
-    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.config/claude'\n"));
-    assert!(!script.contains("\nchown 'myprofile:myprofile' '/home/myprofile/.config/git'\n"));
+    assert!(!script.contains("\nchown 'myagent:myagent' '/home/myagent'\n"));
+    assert!(!script.contains("\nchown 'myagent:myagent' '/home/myagent/.config'\n"));
+    assert!(!script.contains("\nchown 'myagent:myagent' '/home/myagent/.config/claude'\n"));
+    assert!(!script.contains("\nchown 'myagent:myagent' '/home/myagent/.config/git'\n"));
     assert!(
-        script.contains("\nfind '/home/myprofile' -mindepth 0 "),
+        script.contains("\nfind '/home/myagent' -mindepth 0 "),
         "the find traversal should replace standalone home ownership chown lines: {script}"
     );
 }
@@ -419,7 +426,7 @@ fn build_container_script_does_not_emit_intermediate_home_chown_commands() {
 fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
     let script = build_container_script(
         &crate::SessionSpec {
-            profile_name: "myprofile".to_string(),
+            agent_name: "myagent".to_string(),
             ..test_session_spec()
         },
         &SessionInvocation {
@@ -432,9 +439,11 @@ fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
         None,
     );
 
-    assert!(script.contains("\nexport HOME='/home/myprofile'\n"));
+    assert!(script.contains("\nexport HOME='/home/myagent'\n"));
     assert!(script.contains("\nunset AGENTD_WORK_UNIT\n"));
-    assert!(script.contains("\nexec gosu 'myprofile:myprofile' 'site-builder' 'exec'"));
+    assert!(script.contains(
+        "\nexec gosu 'myagent:myagent' runa run --agent-command -- 'site-builder' 'exec'"
+    ));
 }
 
 #[test]
@@ -979,11 +988,11 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let fixture = FakePodmanFixture::new();
     fixture.install(&FakePodmanScenario::new());
-    let profile_name = "myprofile";
+    let agent_name = "myagent";
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
-        profile_name: profile_name.to_string(),
+        agent_name: agent_name.to_string(),
         methodology_dir,
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
@@ -1015,10 +1024,10 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
         .expect("secret create should include a secret name");
 
     let daemon_instance_id = test_session_spec().daemon_instance_id;
-    let container_prefix = format!("agentd-{daemon_instance_id}-{profile_name}-");
+    let container_prefix = format!("agentd-{daemon_instance_id}-{agent_name}-");
     let session_id = container_name
         .strip_prefix(&container_prefix)
-        .expect("container name should include daemon and profile prefix");
+        .expect("container name should include daemon and agent prefix");
     let stage_suffix = stage_dir_name
         .strip_prefix("agentd-session-stage-")
         .expect("staging dir should include session stage prefix");

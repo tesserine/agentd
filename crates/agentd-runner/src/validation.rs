@@ -2,7 +2,7 @@
 //!
 //! All validation runs before any filesystem or podman interaction, so invalid
 //! inputs are rejected without side effects. The public validators
-//! ([`validate_profile_name`], [`validate_environment_name`], and
+//! ([`validate_agent_name`], [`validate_environment_name`], and
 //! [`validate_mount_target`], [`validate_mount_overlap`]) are also used by the
 //! configuration layer in the `agentd` crate.
 
@@ -10,16 +10,16 @@ use crate::input::INVOCATION_INPUT_MOUNT_PATH;
 use crate::naming::is_daemon_instance_id;
 use crate::session_paths::{session_home_dir, session_internal_agentd_dir, session_repo_dir};
 use crate::types::{
-    BindMount, EnvironmentNameValidationError, MountOverlapError, MountTargetValidationError,
-    ProfileNameValidationError, RunnerError, SessionInvocation, SessionSpec,
+    AgentNameValidationError, BindMount, EnvironmentNameValidationError, MountOverlapError,
+    MountTargetValidationError, RunnerError, SessionInvocation, SessionSpec,
 };
 use std::collections::HashSet;
 use std::path::Path;
 
-const PROFILE_NAME_ENV: &str = "PROFILE_NAME";
+const AGENT_NAME_ENV: &str = "AGENT_NAME";
 const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
 pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
-const RESERVED_PROFILE_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
+const RESERVED_AGENT_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
@@ -28,8 +28,8 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if !is_daemon_instance_id(&spec.daemon_instance_id) {
         return Err(RunnerError::InvalidDaemonInstanceId);
     }
-    if validate_profile_name(&spec.profile_name).is_err() {
-        return Err(RunnerError::InvalidProfileName);
+    if validate_agent_name(&spec.agent_name).is_err() {
+        return Err(RunnerError::InvalidAgentName);
     }
     if spec.base_image.trim().is_empty() || spec.base_image != spec.base_image.trim() {
         return Err(RunnerError::InvalidBaseImage);
@@ -39,7 +39,7 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
             path: spec.audit_root.clone(),
         });
     }
-    if spec.command.is_empty() || spec.command.iter().any(|arg| arg.is_empty()) {
+    if spec.agent_command.is_empty() || spec.agent_command.iter().any(|arg| arg.is_empty()) {
         return Err(RunnerError::InvalidCommand);
     }
 
@@ -50,7 +50,7 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
                 path: mount.source.clone(),
             });
         }
-        match validate_mount_target(&mount.target, &spec.profile_name) {
+        match validate_mount_target(&mount.target, &spec.agent_name) {
             Ok(()) => {}
             Err(MountTargetValidationError::Invalid { path }) => {
                 return Err(RunnerError::InvalidMountTarget { path });
@@ -93,10 +93,10 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
 /// Rejects targets that are not absolute, contain `.` or `..` components,
 /// contain `,`, end with `/`, contain `find -path` metacharacters, or collide
 /// with runner-managed paths such as `/agentd/methodology`,
-/// `/home/{profile}`, or `/home/{profile}/repo`.
+/// `/home/{agent}`, or `/home/{agent}/repo`.
 pub fn validate_mount_target(
     target: &Path,
-    profile_name: &str,
+    agent_name: &str,
 ) -> Result<(), MountTargetValidationError> {
     if !target.is_absolute()
         || has_relative_mount_target_component(target)
@@ -108,7 +108,7 @@ pub fn validate_mount_target(
             path: target.to_path_buf(),
         });
     }
-    if is_reserved_mount_target(target, profile_name) {
+    if is_reserved_mount_target(target, agent_name) {
         return Err(MountTargetValidationError::Reserved {
             target: target.to_path_buf(),
         });
@@ -120,7 +120,7 @@ pub fn validate_mount_target(
 /// Validates that declared bind-mount targets are pairwise non-overlapping.
 ///
 /// Rejects distinct targets when one is a component-aware prefix of the other,
-/// such as `/home/{profile}/.config` and `/home/{profile}/.config/claude`.
+/// such as `/home/{agent}/.config` and `/home/{agent}/.config/claude`.
 pub fn validate_mount_overlap(mounts: &[BindMount]) -> Result<(), MountOverlapError> {
     for (index, mount) in mounts.iter().enumerate() {
         for other in mounts.iter().skip(index + 1) {
@@ -161,7 +161,7 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
 /// Validates an environment variable name against naming rules.
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
-/// runner-managed names (currently `PROFILE_NAME`, `AGENTD_WORK_UNIT`, and
+/// runner-managed names (currently `AGENT_NAME`, `AGENTD_WORK_UNIT`, and
 /// `AGENTD_REPO_TOKEN`). Used both by
 /// [`run_session`](crate::run_session) during spec validation and by the
 /// configuration layer for credential name validation.
@@ -176,19 +176,19 @@ pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValida
     Ok(())
 }
 
-/// Validates a profile name against unix username rules and reserved names.
+/// Validates an agent name against unix username rules and reserved names.
 ///
 /// The name must start with a lowercase ASCII letter, contain only lowercase
 /// letters, digits, `_`, or `-`, and be at most 32 characters. Names matching
 /// reserved system usernames (`root`, `nobody`, `daemon`, `bin`, `sys`, `man`,
 /// `mail`) are also rejected. Used both by [`run_session`](crate::run_session)
 /// during spec validation and by the configuration layer.
-pub fn validate_profile_name(name: &str) -> Result<(), ProfileNameValidationError> {
+pub fn validate_agent_name(name: &str) -> Result<(), AgentNameValidationError> {
     if !is_valid_unix_username(name) {
-        return Err(ProfileNameValidationError::Invalid);
+        return Err(AgentNameValidationError::Invalid);
     }
-    if is_reserved_profile_name(name) {
-        return Err(ProfileNameValidationError::Reserved);
+    if is_reserved_agent_name(name) {
+        return Err(AgentNameValidationError::Reserved);
     }
 
     Ok(())
@@ -220,7 +220,7 @@ pub fn validate_repo_url(repo_url: &str) -> Result<(), RunnerError> {
 /// These names are reserved — callers cannot use them in
 /// [`SessionSpec::environment`] because the runner injects them directly.
 pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1] {
-    [(PROFILE_NAME_ENV, &spec.profile_name)]
+    [(AGENT_NAME_ENV, &spec.agent_name)]
 }
 
 fn is_supported_repo_url(repo_url: &str) -> bool {
@@ -281,17 +281,17 @@ fn repo_token_requires_https_error() -> RunnerError {
 }
 
 fn is_reserved_environment_name(name: &str) -> bool {
-    matches!(name, PROFILE_NAME_ENV | WORK_UNIT_ENV | REPO_TOKEN_ENV)
+    matches!(name, AGENT_NAME_ENV | WORK_UNIT_ENV | REPO_TOKEN_ENV)
 }
 
-fn is_reserved_profile_name(name: &str) -> bool {
-    RESERVED_PROFILE_NAMES.contains(&name)
+fn is_reserved_agent_name(name: &str) -> bool {
+    RESERVED_AGENT_NAMES.contains(&name)
 }
 
-fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
-    let home_dir = session_home_dir(profile_name);
-    let internal_agentd_dir = session_internal_agentd_dir(profile_name);
-    let repo_dir = session_repo_dir(profile_name);
+fn is_reserved_mount_target(target: &Path, agent_name: &str) -> bool {
+    let home_dir = session_home_dir(agent_name);
+    let internal_agentd_dir = session_internal_agentd_dir(agent_name);
+    let repo_dir = session_repo_dir(agent_name);
     let methodology_dir = Path::new(METHODOLOGY_MOUNT_PATH);
     let invocation_input_dir = Path::new(INVOCATION_INPUT_MOUNT_PATH);
 
@@ -311,8 +311,8 @@ fn is_reserved_mount_target(target: &Path, profile_name: &str) -> bool {
     }
 
     // Target and runner-owned repo path must be disjoint by path components:
-    // neither may be a prefix of the other. This keeps `/home/{profile}/repo-cache`
-    // valid while reserving `/home/{profile}/repo`, its descendants, and its
+    // neither may be a prefix of the other. This keeps `/home/{agent}/repo-cache`
+    // valid while reserving `/home/{agent}/repo`, its descendants, and its
     // ancestors.
     if target.starts_with(&repo_dir) || repo_dir.starts_with(target) {
         return true;
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn validate_spec_rejects_reserved_environment_names() {
-        for reserved_name in ["PROFILE_NAME", WORK_UNIT_ENV, REPO_TOKEN_ENV] {
+        for reserved_name in ["AGENT_NAME", WORK_UNIT_ENV, REPO_TOKEN_ENV] {
             let error = validate_spec(&SessionSpec {
                 environment: vec![ResolvedEnvironmentVariable {
                     name: reserved_name.to_string(),
@@ -1035,8 +1035,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_spec_accepts_valid_unix_profile_names() {
-        for profile_name in [
+    fn validate_spec_accepts_valid_unix_agent_names() {
+        for agent_name in [
             "site-builder",
             "site-builder-01",
             "site-builder_01",
@@ -1044,33 +1044,31 @@ mod tests {
             &"a".repeat(32),
         ] {
             validate_spec(&SessionSpec {
-                profile_name: profile_name.to_string(),
+                agent_name: agent_name.to_string(),
                 ..test_session_spec()
             })
-            .unwrap_or_else(|error| {
-                panic!("expected {profile_name:?} to be accepted, got {error}")
-            });
+            .unwrap_or_else(|error| panic!("expected {agent_name:?} to be accepted, got {error}"));
         }
     }
 
     #[test]
-    fn validate_profile_name_accepts_valid_unix_profile_names() {
-        for profile_name in [
+    fn validate_agent_name_accepts_valid_unix_agent_names() {
+        for agent_name in [
             "site-builder",
             "site-builder-01",
             "site-builder_01",
             "site-builder-name_01",
             &"a".repeat(32),
         ] {
-            validate_profile_name(profile_name).unwrap_or_else(|error| {
-                panic!("expected {profile_name:?} to be accepted, got {error:?}")
+            validate_agent_name(agent_name).unwrap_or_else(|error| {
+                panic!("expected {agent_name:?} to be accepted, got {error:?}")
             });
         }
     }
 
     #[test]
-    fn validate_profile_name_rejects_invalid_unix_usernames() {
-        for profile_name in [
+    fn validate_agent_name_rejects_invalid_unix_usernames() {
+        for agent_name in [
             "",
             "   ",
             "Site-Builder 01",
@@ -1080,50 +1078,50 @@ mod tests {
             "site-builder__name!",
             &format!("a{}", "b".repeat(32)),
         ] {
-            let error = validate_profile_name(profile_name)
+            let error = validate_agent_name(agent_name)
                 .expect_err("invalid unix usernames should be rejected");
 
             assert_eq!(
                 error,
-                ProfileNameValidationError::Invalid,
-                "expected Invalid for {profile_name:?}, got {error:?}"
+                AgentNameValidationError::Invalid,
+                "expected Invalid for {agent_name:?}, got {error:?}"
             );
         }
     }
 
     #[test]
-    fn validate_profile_name_rejects_reserved_names() {
-        for profile_name in ["root", "nobody", "daemon", "bin", "sys", "man", "mail"] {
+    fn validate_agent_name_rejects_reserved_names() {
+        for agent_name in ["root", "nobody", "daemon", "bin", "sys", "man", "mail"] {
             let error =
-                validate_profile_name(profile_name).expect_err("reserved names should be rejected");
+                validate_agent_name(agent_name).expect_err("reserved names should be rejected");
 
             assert_eq!(
                 error,
-                ProfileNameValidationError::Reserved,
-                "expected Reserved for {profile_name:?}, got {error:?}"
+                AgentNameValidationError::Reserved,
+                "expected Reserved for {agent_name:?}, got {error:?}"
             );
         }
     }
 
     #[test]
-    fn validate_spec_maps_invalid_or_reserved_profile_names_to_runner_error() {
-        for profile_name in ["123site-builder", "root"] {
+    fn validate_spec_maps_invalid_or_reserved_agent_names_to_runner_error() {
+        for agent_name in ["123site-builder", "root"] {
             let error = validate_spec(&SessionSpec {
-                profile_name: profile_name.to_string(),
+                agent_name: agent_name.to_string(),
                 ..test_session_spec()
             })
-            .expect_err("invalid profile names should be rejected");
+            .expect_err("invalid agent names should be rejected");
 
             assert!(
-                matches!(error, RunnerError::InvalidProfileName),
-                "expected InvalidProfileName for {profile_name:?}, got {error:?}"
+                matches!(error, RunnerError::InvalidAgentName),
+                "expected InvalidAgentName for {agent_name:?}, got {error:?}"
             );
         }
     }
 
     #[test]
-    fn invalid_profile_name_error_mentions_format_and_reserved_names() {
-        let message = RunnerError::InvalidProfileName.to_string();
+    fn invalid_agent_name_error_mentions_format_and_reserved_names() {
+        let message = RunnerError::InvalidAgentName.to_string();
 
         assert!(
             message.contains("must already be a unix username"),
@@ -1407,10 +1405,10 @@ mod tests {
     }
 
     #[test]
-    fn run_session_rejects_reserved_profile_name_before_methodology_validation() {
+    fn run_session_rejects_reserved_agent_name_before_methodology_validation() {
         let error = crate::run_session(
             SessionSpec {
-                profile_name: "root".to_string(),
+                agent_name: "root".to_string(),
                 methodology_dir: PathBuf::from("/tmp/does-not-exist"),
                 ..test_session_spec()
             },
@@ -1422,11 +1420,11 @@ mod tests {
                 timeout: None,
             },
         )
-        .expect_err("reserved profile name should be rejected before setup");
+        .expect_err("reserved agent name should be rejected before setup");
 
         assert!(
-            matches!(error, RunnerError::InvalidProfileName),
-            "expected InvalidProfileName, got {error:?}"
+            matches!(error, RunnerError::InvalidAgentName),
+            "expected InvalidAgentName, got {error:?}"
         );
     }
 }

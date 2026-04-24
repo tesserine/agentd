@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
-/// Static configuration for a session, derived from a profile.
+/// Static configuration for a session, derived from an agent.
 ///
-/// Describes the profile identity, container image, methodology, command, and
+/// Describes the agent identity, container image, methodology, command, and
 /// caller-resolved environment variables. Validated by
 /// [`run_session`](crate::run_session) before any resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,34 +23,34 @@ pub struct SessionSpec {
     /// resource names so startup reconciliation can scope ownership to one
     /// daemon instance.
     pub daemon_instance_id: String,
-    /// Profile identity string. Doubles as the in-container unix username, a
-    /// component of the container name, and the value of the `PROFILE_NAME`
+    /// Agent identity string. Doubles as the in-container unix username, a
+    /// component of the container name, and the value of the `AGENT_NAME`
     /// environment variable. Must pass
-    /// [`validate_profile_name`](crate::validate_profile_name).
-    pub profile_name: String,
+    /// [`validate_agent_name`](crate::validate_agent_name).
+    pub agent_name: String,
     /// Container image reference. The image must provide `/bin/sh`, `git`,
     /// `find`, and the setup/session binaries required by the configured
-    /// profile command in `PATH`, including `useradd` and `gosu`.
+    /// agent command in `PATH`, including `useradd` and `gosu`.
     pub base_image: String,
     /// Host-side path to the methodology directory. Mounted read-only into
     /// the container at `/agentd/methodology`. Must contain `manifest.toml`.
     pub methodology_dir: PathBuf,
     /// Host-side root where persistent audit records are created. The runner
-    /// stores each session under `<audit_root>/<profile>/<session_id>/`.
+    /// stores each session under `<audit_root>/<agent>/<session_id>/`.
     pub audit_root: PathBuf,
-    /// Additional host bind mounts declared by the selected profile.
+    /// Additional host bind mounts declared by the selected agent.
     pub mounts: Vec<BindMount>,
     /// Command array executed directly from the cloned repository after
-    /// workspace setup. Not a shell command unless the profile explicitly
+    /// workspace setup. Not a shell command unless the agent explicitly
     /// configures one (for example, `["/bin/sh", "-lc", "..."]`).
-    pub command: Vec<String>,
+    pub agent_command: Vec<String>,
     /// Caller-resolved environment variables injected into the container.
     /// Non-empty values are passed via ephemeral podman secrets; empty values
     /// are passed as direct `--env` assignments.
     pub environment: Vec<ResolvedEnvironmentVariable>,
 }
 
-/// A host bind mount declared by a session profile.
+/// A host bind mount declared by a session agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindMount {
     /// Host-side source path to bind into the container.
@@ -69,7 +69,7 @@ pub struct BindMount {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedEnvironmentVariable {
     /// Variable name. Must not be empty, contain `,` or `=`, or collide with
-    /// runner-managed names (currently `PROFILE_NAME`).
+    /// runner-managed names (currently `AGENT_NAME`).
     pub name: String,
     /// Variable value. Empty values are legal and are injected as direct
     /// `--env NAME=` assignments rather than podman secrets, which reject
@@ -107,12 +107,13 @@ pub struct SessionInvocation {
     /// request for `https://` repository URLs. This token is not passed
     /// through to the agent runtime.
     pub repo_token: Option<String>,
-    /// Optional work unit identifier exposed to the session command through
-    /// the runner-managed `AGENTD_WORK_UNIT` environment variable when set.
+    /// Optional work unit identifier passed to `runa run --work-unit` and
+    /// exposed through the runner-managed `AGENTD_WORK_UNIT` environment
+    /// variable when set.
     /// Mutually exclusive with [`Self::input`].
     pub work_unit: Option<String>,
     /// Optional operator-supplied input to materialize into the repo
-    /// workspace before the session command runs. Artifact names supplied
+    /// workspace after `runa init` and before `runa run`. Artifact names supplied
     /// through [`InvocationInput::Artifact`] must each be a single path
     /// segment. Mutually exclusive with [`Self::work_unit`].
     pub input: Option<InvocationInput>,
@@ -250,7 +251,7 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StartupReconciliationReport {
     /// Stale runner-managed session containers matching
-    /// `agentd-{daemon8}-{profile}-{session16}` that were removed during startup.
+    /// `agentd-{daemon8}-{agent}-{session16}` that were removed during startup.
     pub removed_container_names: Vec<String>,
     /// Orphaned runner-managed secrets matching `agentd-{daemon8}-{session16}-{suffix}`
     /// that were removed during startup.
@@ -268,10 +269,10 @@ pub enum EnvironmentNameValidationError {
     Reserved,
 }
 
-/// Error returned by [`validate_profile_name`](crate::validate_profile_name)
+/// Error returned by [`validate_agent_name`](crate::validate_agent_name)
 /// when a name violates naming rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProfileNameValidationError {
+pub enum AgentNameValidationError {
     /// The name is not a valid unix username: must start with a lowercase
     /// letter, contain only lowercase letters, digits, `_`, or `-`, and be
     /// at most 32 characters.
@@ -304,7 +305,7 @@ pub struct MountOverlapError {
 
 /// Errors produced during session execution.
 ///
-/// Validation errors ([`InvalidProfileName`](Self::InvalidProfileName),
+/// Validation errors ([`InvalidAgentName`](Self::InvalidAgentName),
 /// [`InvalidBaseImage`](Self::InvalidBaseImage), etc.) are returned before
 /// any resources are allocated. Resource and execution errors
 /// ([`MissingMethodologyManifest`](Self::MissingMethodologyManifest),
@@ -318,9 +319,9 @@ pub enum RunnerError {
     /// The methodology directory does not contain `manifest.toml`. Produced
     /// during resource allocation, after spec and invocation validation pass.
     MissingMethodologyManifest { path: PathBuf },
-    /// The profile name fails unix username rules or matches a reserved system
+    /// The agent name fails unix username rules or matches a reserved system
     /// name. Produced during spec validation.
-    InvalidProfileName,
+    InvalidAgentName,
     /// The base image string is empty or has surrounding whitespace. Produced
     /// during spec validation.
     InvalidBaseImage,
@@ -385,9 +386,9 @@ impl fmt::Display for RunnerError {
                     path.display()
                 )
             }
-            RunnerError::InvalidProfileName => write!(
+            RunnerError::InvalidAgentName => write!(
                 f,
-                "profile_name must already be a unix username starting with a lowercase letter, containing only lowercase letters, digits, '_', or '-', be at most 32 characters, and not be one of the reserved system names root, nobody, daemon, bin, sys, man, or mail"
+                "agent_name must already be a unix username starting with a lowercase letter, containing only lowercase letters, digits, '_', or '-', be at most 32 characters, and not be one of the reserved system names root, nobody, daemon, bin, sys, man, or mail"
             ),
             RunnerError::InvalidBaseImage => write!(f, "base_image must not be empty"),
             RunnerError::InvalidAuditRoot { path } => {

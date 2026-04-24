@@ -8,13 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 
-- `agentd run` no longer reads `agentd.toml`: it now accepts `--socket-path <PATH>`, otherwise discovers the daemon socket through `$XDG_RUNTIME_DIR/agentd/agentd.sock` first when `XDG_RUNTIME_DIR` is set; for rootless XDG-unset clients it falls back to `/tmp/agentd-$UID/agentd.sock` with ownership and `0700` checks before `/run/agentd/agentd.sock`, while root XDG-unset clients use `/run/agentd/agentd.sock` directly; profile lookup and default-repo resolution now happen daemon-side.
-- `agentd run` now accepts one per-invocation work surface without profile edits: `--work-unit <id>`, `--request <text>`, or `--artifact-type <type> --artifact-file <path>`. Request text is synthesized into `.runa/workspace/request/operator-input.json`, while artifact-file input places validated JSON at `.runa/workspace/<type>/<file-stem>.json`.
+- Agent configuration is now declarative and uses `[[agents]]` with `[agents.command].argv`; the old profile-table vocabulary and shell-wrapper command shape are removed as a pre-1.0 breaking change. agentd now composes `runa init` and `runa run --agent-command -- <argv>` itself, leaving runa-owned `.runa/` config formats to runa.
+- `agentd run` no longer reads `agentd.toml`: it now accepts `--socket-path <PATH>`, otherwise discovers the daemon socket through `$XDG_RUNTIME_DIR/agentd/agentd.sock` first when `XDG_RUNTIME_DIR` is set; for rootless XDG-unset clients it falls back to `/tmp/agentd-$UID/agentd.sock` with ownership and `0700` checks before `/run/agentd/agentd.sock`, while root XDG-unset clients use `/run/agentd/agentd.sock` directly; agent lookup and default-repo resolution now happen daemon-side.
+- `agentd run` now accepts one per-invocation work surface without agent edits: `--work-unit <id>`, `--request <text>`, or `--artifact-type <type> --artifact-file <path>`. Request text is synthesized into `.runa/workspace/request/operator-input.json`, while artifact-file input places validated JSON at `.runa/workspace/<type>/<file-stem>.json`.
 - `agentd-runner` now declares its real platform contract at compile time: the crate targets Linux only, and downstream non-Linux builds now fail explicitly instead of compiling dead fallback code into a non-functional binary.
 - Session outcomes now follow the shared `commons` exit-code convention across `agentd` and `agentd-runner`: outcomes carry semantic labels plus raw exit codes, daemon and CLI surfaces report labels such as `blocked` and `generic_failure`, `agentd run` exits successfully for normal terminal states (`success`, `blocked`, `nothing_ready`), and timeout remains an agentd-layer outcome outside the shared exit-code vocabulary.
-- Additional bind mounts now reserve only runner-owned targets (`/agentd/methodology`, `/home/{profile}`, and `/home/{profile}/repo` plus descendants), allowing supported read-only and read-write mounts elsewhere under `$HOME` without runner setup mutating host-backed data.
-- Profile-declared bind mounts now reject overlapping container targets within the same profile, so nested targets fail validation before startup instead of reaching the container setup script.
-- Persistent audit records now default to `$XDG_STATE_HOME/tesserine/audit/<profile>/<session_id>/`, falling back to `$HOME/.local/state/tesserine/audit/<profile>/<session_id>/` for rootless installs, with `daemon.audit_root` available as an explicit override for root-owned system installs such as `/var/lib/tesserine/audit/`.
+- Additional bind mounts now reserve only runner-owned targets (`/agentd/methodology`, `/home/{agent}`, and `/home/{agent}/repo` plus descendants), allowing supported read-only and read-write mounts elsewhere under `$HOME` without runner setup mutating host-backed data.
+- Agent-declared bind mounts now reject overlapping container targets within the same agent, so nested targets fail validation before startup instead of reaching the container setup script.
+- Persistent audit records now default to `$XDG_STATE_HOME/tesserine/audit/<agent>/<session_id>/`, falling back to `$HOME/.local/state/tesserine/audit/<agent>/<session_id>/` for rootless installs, with `daemon.audit_root` available as an explicit override for root-owned system installs such as `/var/lib/tesserine/audit/`.
 - Completed audit records now seal directories to `0555` and non-symlink entries to `0444`, skip symlinks while sealing, and update `agentd/session.json` through atomic temp-file replacement instead of truncate-and-write.
 - `agentd_runner::SessionSpec` now requires an explicit `audit_root` field, making the audit-record destination part of the runner API instead of an implicit process-environment override.
 
@@ -48,16 +49,16 @@ methodology governance.
 ### Operator interface
 
 - Unix socket API for session dispatch.
-- `agentd run <profile>` for manual single-session execution.
-- Optional `repo` argument overrides the profile's configured default.
+- `agentd run <agent>` for manual single-session execution.
+- Optional `repo` argument overrides the agent's configured default.
 
-### Profiles
+### Agents
 
 - Static TOML configuration: base image, methodology directory, credentials,
-  and session command per profile.
-- Profile names validated as safe unix usernames (used for in-container
+  and session command per agent.
+- Agent names validated as safe unix usernames (used for in-container
   unprivileged execution via `gosu`).
-- Optional profile-level `repo` default and cron `schedule` for automated
+- Optional agent-level `repo` default and cron `schedule` for automated
   dispatch.
 - `methodology_dir` paths resolve relative to the config file's directory.
 
@@ -69,7 +70,7 @@ methodology governance.
 - Fresh repository clone into the container workspace. HTTPS-only URL
   validation; SSH and local paths rejected.
 - Unprivileged execution: session command runs as a non-root user via
-  `gosu`, with the profile name as the unix username.
+  `gosu`, with the agent name as the unix username.
 - Optional per-session timeout with forced teardown on expiry.
 
 ### Credentials
@@ -83,6 +84,6 @@ methodology governance.
 
 ### Scheduling
 
-- Cron-based profile scheduling evaluated in daemon-local time.
+- Cron-based agent scheduling evaluated in daemon-local time.
 - Scheduled sessions dispatch through the daemon's Unix socket, sharing the
   same execution path as manual `agentd run` invocations.

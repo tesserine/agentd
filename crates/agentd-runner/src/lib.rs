@@ -28,13 +28,13 @@ pub(crate) mod test_support;
 
 pub use reconcile::reconcile_startup_resources;
 pub use types::{
-    BindMount, EnvironmentNameValidationError, InvocationInput, MountOverlapError,
-    MountTargetValidationError, ProfileNameValidationError, ResolvedEnvironmentVariable,
-    RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+    AgentNameValidationError, BindMount, EnvironmentNameValidationError, InvocationInput,
+    MountOverlapError, MountTargetValidationError, ResolvedEnvironmentVariable, RunnerError,
+    SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
 };
 pub use validation::{
-    validate_environment_name, validate_mount_overlap, validate_mount_target,
-    validate_profile_name, validate_repo_url,
+    validate_agent_name, validate_environment_name, validate_mount_overlap, validate_mount_target,
+    validate_repo_url,
 };
 
 use audit::{SessionAuditCompletion, finalize_session_audit_record, prepare_session_audit_record};
@@ -74,11 +74,11 @@ pub fn run_session(
     let session_id = unique_suffix()?;
 
     let container_name =
-        format_container_name(&spec.daemon_instance_id, &spec.profile_name, &session_id);
+        format_container_name(&spec.daemon_instance_id, &spec.agent_name, &session_id);
     log_session_started(
         &session_id,
         &container_name,
-        &spec.profile_name,
+        &spec.agent_name,
         invocation.work_unit.is_some(),
         invocation.timeout,
     );
@@ -292,10 +292,10 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    fn only_session_record_dir(audit_root: &Path, profile_name: &str) -> PathBuf {
-        let profile_root = audit_root.join(profile_name);
-        let entries = fs::read_dir(&profile_root)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", profile_root.display()))
+    fn only_session_record_dir(audit_root: &Path, agent_name: &str) -> PathBuf {
+        let agent_root = audit_root.join(agent_name);
+        let entries = fs::read_dir(&agent_root)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", agent_root.display()))
             .map(|entry| {
                 entry
                     .expect("session record entry should be readable")
@@ -307,7 +307,7 @@ mod tests {
             entries.len(),
             1,
             "expected exactly one session record under {}",
-            profile_root.display()
+            agent_root.display()
         );
         entries[0].clone()
     }
@@ -965,12 +965,12 @@ file find -P {root} ! -type d ! -type l ! -path {metadata_path} -exec chmod 444 
 
     fn wait_for_only_session_record_dir(
         audit_root: &Path,
-        profile_name: &str,
+        agent_name: &str,
         deadline: Instant,
     ) -> PathBuf {
         loop {
-            let profile_root = audit_root.join(profile_name);
-            if let Ok(entries) = fs::read_dir(&profile_root) {
+            let agent_root = audit_root.join(agent_name);
+            if let Ok(entries) = fs::read_dir(&agent_root) {
                 let entries = entries
                     .map(|entry| {
                         entry
@@ -987,7 +987,7 @@ file find -P {root} ! -type d ! -type l ! -path {metadata_path} -exec chmod 444 
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for session record under {}",
-                profile_root.display()
+                agent_root.display()
             );
             thread::sleep(Duration::from_millis(25));
         }

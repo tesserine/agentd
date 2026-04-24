@@ -27,7 +27,7 @@ pub(crate) struct SessionAuditRecord {
     pub(crate) runa_dir: PathBuf,
     pub(crate) metadata_path: PathBuf,
     pub(crate) session_id: String,
-    pub(crate) profile: String,
+    pub(crate) agent: String,
     pub(crate) repo_url: String,
     pub(crate) work_unit: Option<String>,
     pub(crate) start_timestamp: String,
@@ -42,7 +42,7 @@ pub(crate) enum SessionAuditCompletion<'a> {
 struct SessionAuditMetadata<'a> {
     schema_version: u32,
     session_id: &'a str,
-    profile: &'a str,
+    agent: &'a str,
     repo_url: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     work_unit: Option<&'a str>,
@@ -69,8 +69,8 @@ fn prepare_session_audit_record_at(
     spec: &SessionSpec,
     invocation: &SessionInvocation,
 ) -> Result<SessionAuditRecord, RunnerError> {
-    let profile_dir = host_root.join(&spec.profile_name);
-    let record_dir = profile_dir.join(session_id);
+    let agent_dir = host_root.join(&spec.agent_name);
+    let record_dir = agent_dir.join(session_id);
     let runa_dir = record_dir.join("runa");
     let agentd_dir = record_dir.join("agentd");
     let metadata_path = agentd_dir.join("session.json");
@@ -79,7 +79,7 @@ fn prepare_session_audit_record_at(
     fs::create_dir_all(&agentd_dir)?;
 
     rollback_record_dir_on_error(&record_dir, || {
-        set_active_audit_directory_permissions(&profile_dir)?;
+        set_active_audit_directory_permissions(&agent_dir)?;
         set_active_audit_directory_permissions(&record_dir)?;
         set_active_audit_directory_permissions(&agentd_dir)?;
         set_active_runa_permissions(&runa_dir)?;
@@ -90,7 +90,7 @@ fn prepare_session_audit_record_at(
             runa_dir: runa_dir.clone(),
             metadata_path: metadata_path.clone(),
             session_id: session_id.to_string(),
-            profile: spec.profile_name.clone(),
+            agent: spec.agent_name.clone(),
             repo_url: invocation.repo_url.clone(),
             work_unit: invocation.work_unit.clone(),
             start_timestamp,
@@ -156,7 +156,7 @@ fn write_session_audit_metadata_with_mode(
     let metadata = SessionAuditMetadata {
         schema_version: METADATA_SCHEMA_VERSION,
         session_id: &record.session_id,
-        profile: &record.profile,
+        agent: &record.agent,
         repo_url: &record.repo_url,
         work_unit: record.work_unit.as_deref(),
         start_timestamp: &record.start_timestamp,
@@ -518,7 +518,7 @@ mod tests {
 
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["session_id"], "0123456789abcdef");
-        assert_eq!(json["profile"], "site-builder");
+        assert_eq!(json["agent"], "site-builder");
         assert_eq!(json["repo_url"], "https://example.com/agentd.git");
         assert_eq!(json["work_unit"], "issue-76");
         assert!(json.get("end_timestamp").is_none());
@@ -646,13 +646,13 @@ mod tests {
     fn prepare_session_audit_record_normalizes_runner_managed_audit_dirs_to_host_traversable_modes()
     {
         let root = unique_test_dir("agentd-audit-dir-normalization");
-        let profile_root = root.join("site-builder");
-        let record_dir = profile_root.join("dir-normalization");
+        let agent_root = root.join("site-builder");
+        let record_dir = agent_root.join("dir-normalization");
         let agentd_dir = record_dir.join("agentd");
 
         fs::create_dir_all(&agentd_dir).expect("audit dir tree should be created");
-        fs::set_permissions(&profile_root, fs::Permissions::from_mode(0o700))
-            .expect("profile dir should become private");
+        fs::set_permissions(&agent_root, fs::Permissions::from_mode(0o700))
+            .expect("agent dir should become private");
         fs::set_permissions(&record_dir, fs::Permissions::from_mode(0o700))
             .expect("record dir should become private");
         fs::set_permissions(&agentd_dir, fs::Permissions::from_mode(0o700))
@@ -672,8 +672,8 @@ mod tests {
         )
         .expect("audit record should be created");
 
-        let profile_mode = fs::metadata(&profile_root)
-            .expect("profile dir metadata should exist")
+        let agent_mode = fs::metadata(&agent_root)
+            .expect("agent dir metadata should exist")
             .permissions()
             .mode();
         let record_mode = fs::metadata(&record.record_dir)
@@ -689,7 +689,7 @@ mod tests {
             .permissions()
             .mode();
 
-        assert_eq!(profile_mode & 0o777, 0o755);
+        assert_eq!(agent_mode & 0o777, 0o755);
         assert_eq!(record_mode & 0o777, 0o755);
         assert_eq!(agentd_mode & 0o777, 0o755);
         assert_eq!(runa_mode & 0o777, 0o777);
