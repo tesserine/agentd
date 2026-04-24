@@ -25,7 +25,7 @@ nothing more.
 
 ## Status
 
-v0.1.0 — early development.
+v0.1.1 — early development.
 
 The session lifecycle works end-to-end: agent configuration, foreground daemon
 startup, operator-triggered sessions, ephemeral Podman containers, credential
