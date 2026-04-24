@@ -11,7 +11,7 @@ use crate::config::{Config, ConfigError};
 /// Parameters for a daemon run request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
-    pub profile: String,
+    pub agent: String,
     pub repo_url: Option<String>,
     /// Optional manual work-unit target. Mutually exclusive with `input`.
     pub work_unit: Option<String>,
@@ -22,14 +22,14 @@ pub struct RunRequest {
 /// Errors produced while mapping a run request into a runner session.
 #[derive(Debug)]
 pub enum DispatchError {
-    UnknownProfile {
-        profile: String,
+    UnknownAgent {
+        agent: String,
     },
     MissingRepo {
-        profile: String,
+        agent: String,
     },
     MissingCredentialSource {
-        profile: String,
+        agent: String,
         credential: String,
         source: String,
     },
@@ -40,18 +40,18 @@ pub enum DispatchError {
 impl fmt::Display for DispatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownProfile { profile } => write!(f, "unknown profile '{profile}'"),
-            Self::MissingRepo { profile } => write!(
+            Self::UnknownAgent { agent } => write!(f, "unknown agent '{agent}'"),
+            Self::MissingRepo { agent } => write!(
                 f,
-                "profile '{profile}' requires a repo argument or configured profile repo"
+                "agent '{agent}' requires a repo argument or configured agent repo"
             ),
             Self::MissingCredentialSource {
-                profile,
+                agent,
                 credential,
                 source,
             } => write!(
                 f,
-                "profile '{profile}' credential '{credential}' requires daemon environment variable '{source}'"
+                "agent '{agent}' credential '{credential}' requires daemon environment variable '{source}'"
             ),
             Self::Config(error) => write!(f, "{error}"),
             Self::Runner(error) => write!(f, "{error}"),
@@ -104,35 +104,34 @@ impl SessionExecutor for RunnerSessionExecutor {
     }
 }
 
-/// Resolve a named profile plus run request into a runner session and run it.
+/// Resolve a named agent plus run request into a runner session and run it.
 pub fn dispatch_run(
     config: &Config,
     request: &RunRequest,
     executor: &impl SessionExecutor,
 ) -> Result<SessionOutcome, DispatchError> {
-    let profile =
-        config
-            .profile(&request.profile)
-            .ok_or_else(|| DispatchError::UnknownProfile {
-                profile: request.profile.clone(),
-            })?;
+    let agent = config
+        .agent(&request.agent)
+        .ok_or_else(|| DispatchError::UnknownAgent {
+            agent: request.agent.clone(),
+        })?;
     let repo_url = request
         .repo_url
         .clone()
-        .or_else(|| profile.repo().map(str::to_owned));
+        .or_else(|| agent.repo().map(str::to_owned));
     let repo_url = repo_url.ok_or_else(|| DispatchError::MissingRepo {
-        profile: profile.name().to_string(),
+        agent: agent.name().to_string(),
     })?;
     let daemon_instance_id = config.daemon().daemon_instance_id()?;
     let audit_root = prepare_audit_root(config.daemon())?;
 
-    let environment = profile
+    let environment = agent
         .credentials()
         .iter()
         .map(|credential| {
             let value = std::env::var(credential.source()).map_err(|_| {
                 DispatchError::MissingCredentialSource {
-                    profile: profile.name().to_string(),
+                    agent: agent.name().to_string(),
                     credential: credential.name().to_string(),
                     source: credential.source().to_string(),
                 }
@@ -145,7 +144,7 @@ pub fn dispatch_run(
         })
         .collect::<Result<Vec<_>, DispatchError>>()?;
 
-    let repo_token = profile
+    let repo_token = agent
         .repo_token_source()
         .and_then(|source| std::env::var(source).ok())
         .filter(|value| !value.is_empty());
@@ -154,16 +153,16 @@ pub fn dispatch_run(
         .run_session(
             SessionSpec {
                 daemon_instance_id,
-                profile_name: profile.name().to_string(),
-                base_image: profile.base_image().to_string(),
-                methodology_dir: profile.methodology_dir().to_path_buf(),
+                agent_name: agent.name().to_string(),
+                base_image: agent.base_image().to_string(),
+                methodology_dir: agent.methodology_dir().to_path_buf(),
                 audit_root,
-                mounts: profile
+                mounts: agent
                     .mounts()
                     .iter()
                     .map(|mount| mount.to_runner_mount())
                     .collect(),
-                command: profile.command().to_vec(),
+                agent_command: agent.agent_command().to_vec(),
                 environment,
             },
             SessionInvocation {

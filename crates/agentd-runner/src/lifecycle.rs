@@ -58,7 +58,7 @@ pub(crate) fn log_lifecycle_failure<E>(
 pub(crate) fn log_session_started(
     session_id: &str,
     container_name: &str,
-    profile_name: &str,
+    agent_name: &str,
     work_unit_present: bool,
     timeout: Option<Duration>,
 ) {
@@ -66,7 +66,7 @@ pub(crate) fn log_session_started(
         event = "runner.session_started",
         session_id = session_id,
         container_name = container_name,
-        profile_name = profile_name,
+        agent_name = agent_name,
         work_unit_present = work_unit_present,
         timeout_ms = timeout.map(|value| value.as_millis() as u64),
         "runner session started"

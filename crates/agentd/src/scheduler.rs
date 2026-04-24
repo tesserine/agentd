@@ -3,8 +3,8 @@ use std::sync::atomic::AtomicBool;
 use std::thread::{self, JoinHandle};
 
 use agentd_scheduler::{
-    Clock, DispatchError, Dispatcher, ScheduledProfile, ScheduledRunRequest, Scheduler,
-    SystemClock, run_until_shutdown,
+    Clock, DispatchError, Dispatcher, ScheduledAgent, ScheduledRunRequest, Scheduler, SystemClock,
+    run_until_shutdown,
 };
 
 use crate::RunRequest;
@@ -15,8 +15,8 @@ pub(crate) fn spawn_scheduler_thread(
     config: &Config,
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<Option<JoinHandle<()>>> {
-    let scheduled_profiles = scheduled_profiles_from_config(config);
-    if scheduled_profiles.is_empty() {
+    let scheduled_agents = scheduled_agents_from_config(config);
+    if scheduled_agents.is_empty() {
         return Ok(None);
     }
 
@@ -25,7 +25,7 @@ pub(crate) fn spawn_scheduler_thread(
         .name("agentd-scheduler".to_string())
         .spawn(move || {
             let clock = SystemClock;
-            let mut scheduler = Scheduler::new(scheduled_profiles, clock.now())
+            let mut scheduler = Scheduler::new(scheduled_agents, clock.now())
                 .expect("config validation should guarantee valid schedules");
             let dispatcher = SocketDispatcher { daemon_config };
             run_until_shutdown(&mut scheduler, &dispatcher, &clock, shutdown.as_ref());
@@ -46,17 +46,17 @@ pub(crate) fn join_scheduler_thread(handle: Option<JoinHandle<()>>) {
     }
 }
 
-fn scheduled_profiles_from_config(config: &Config) -> Vec<ScheduledProfile> {
+fn scheduled_agents_from_config(config: &Config) -> Vec<ScheduledAgent> {
     config
-        .profiles()
+        .agents()
         .iter()
-        .filter_map(|profile| {
-            let schedule = profile.schedule()?;
-            let repo = profile
+        .filter_map(|agent| {
+            let schedule = agent.schedule()?;
+            let repo = agent
                 .repo()
-                .expect("config validation should guarantee scheduled profiles declare repo");
+                .expect("config validation should guarantee scheduled agents declare repo");
             Some(
-                ScheduledProfile::new(profile.name().to_string(), repo.to_string(), schedule)
+                ScheduledAgent::new(agent.name().to_string(), repo.to_string(), schedule)
                     .expect("config validation should guarantee valid schedules"),
             )
         })
@@ -72,12 +72,12 @@ impl Dispatcher for SocketDispatcher {
     fn dispatch(&self, request: ScheduledRunRequest) -> Result<(), DispatchError> {
         let daemon_config = self.daemon_config.clone();
         thread::Builder::new()
-            .name(format!("agentd-scheduled-dispatch-{}", request.profile))
+            .name(format!("agentd-scheduled-dispatch-{}", request.agent))
             .spawn(move || {
                 if let Err(error) = request_run_without_waiting(
                     daemon_config.socket_path(),
                     &RunRequest {
-                        profile: request.profile.clone(),
+                        agent: request.agent.clone(),
                         repo_url: Some(request.repo_url.clone()),
                         work_unit: None,
                         input: None,
@@ -85,7 +85,7 @@ impl Dispatcher for SocketDispatcher {
                 ) {
                     tracing::warn!(
                         event = "agentd.scheduled_run_dispatch_failed",
-                        profile = request.profile,
+                        agent = request.agent,
                         error = %error,
                         "scheduled run dispatch failed"
                     );
@@ -166,36 +166,38 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_profiles_ignore_profiles_without_schedule() {
+    fn scheduled_agents_ignore_agents_without_schedule() {
         let config = Config::from_str(
             r#"
 [daemon]
 socket_path = "/tmp/agentd.sock"
 pid_file = "/tmp/agentd.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "https://example.com/site.git"
 schedule = "*/15 * * * *"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles]]
+[[agents]]
 name = "code-reviewer"
 base_image = "ghcr.io/example/code-reviewer:latest"
 methodology_dir = "../groundwork"
 repo = "https://example.com/review.git"
 
-command = ["code-reviewer", "exec"]
+[agents.command]
+argv = ["code-reviewer", "exec"]
 "#,
         )
         .expect("config should parse");
 
-        let scheduled_profiles = scheduled_profiles_from_config(&config);
+        let scheduled_agents = scheduled_agents_from_config(&config);
 
-        assert_eq!(scheduled_profiles.len(), 1);
+        assert_eq!(scheduled_agents.len(), 1);
     }
 
     #[test]
@@ -207,13 +209,14 @@ command = ["code-reviewer", "exec"]
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "https://example.com/site.git"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
             socket_path = runtime_dir.join("agentd.sock").display(),
             pid_file = runtime_dir.join("agentd.pid").display(),
@@ -233,7 +236,7 @@ command = ["site-builder", "exec"]
         };
         dispatcher
             .dispatch(ScheduledRunRequest {
-                profile: "site-builder".to_string(),
+                agent: "site-builder".to_string(),
                 repo_url: "https://example.com/site.git".to_string(),
             })
             .expect("dispatch should spawn a socket client");
@@ -272,13 +275,14 @@ command = ["site-builder", "exec"]
 socket_path = "{socket_path}"
 pid_file = "{pid_file}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo = "https://example.com/site.git"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
             socket_path = socket_path.display(),
             pid_file = runtime_dir.join("agentd.pid").display(),
@@ -290,7 +294,7 @@ command = ["site-builder", "exec"]
 
         dispatcher
             .dispatch(ScheduledRunRequest {
-                profile: "site-builder".to_string(),
+                agent: "site-builder".to_string(),
                 repo_url: "https://example.com/site.git".to_string(),
             })
             .expect("dispatch should spawn a socket client");
@@ -309,7 +313,7 @@ command = ["site-builder", "exec"]
             serde_json::from_str::<serde_json::Value>(&line).expect("request should be valid json"),
             serde_json::json!({
                 "type": "run",
-                "profile": "site-builder",
+                "agent": "site-builder",
                 "repo_url": "https://example.com/site.git",
                 "work_unit": null,
                 "input": null,

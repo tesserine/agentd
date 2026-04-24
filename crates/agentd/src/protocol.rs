@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum RequestMessage {
     Ping,
     Run {
-        profile: String,
+        agent: String,
         repo_url: Option<String>,
         work_unit: Option<String>,
         input: Option<InvocationInput>,

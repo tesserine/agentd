@@ -24,8 +24,8 @@ mapping semantics are all part of the supported execution model.
 
 ### Terminology
 
-- **Profile**: a named, reusable environment specification in the daemon config — base image, methodology, optional default repo, optional schedule, credentials, and command. What the operator declares.
-- **Session**: a single execution created from a profile plus invocation parameters (repo, work unit, timeout). What the runner manages.
+- **Agent**: a named, reusable environment specification in the daemon config — base image, methodology, optional default repo, optional schedule, credentials, and command. What the operator declares.
+- **Session**: a single execution created from an agent plus invocation parameters (repo, work unit, timeout). What the runner manages.
 
 ## 2. Agent Capability Needs
 
@@ -41,13 +41,13 @@ Every structural decision in the workspace traces to a capability an agent sessi
 
 **Need:** agents authenticate to those external services.
 
-**Constraint:** credentials are injected at session setup and remain scoped to the owning profile.
+**Constraint:** credentials are injected at session setup and remain scoped to the owning agent.
 
 ### Identity
 
 **Need:** agents know who they are and can be distinguished clearly per session.
 
-**Constraint:** each session receives stable identity variables and a profile-derived container name inside an ephemeral runtime.
+**Constraint:** each session receives stable identity variables and an agent-derived container name inside an ephemeral runtime.
 
 ### Mission
 
@@ -81,11 +81,11 @@ The workspace contains three crates because there are three distinct rates of ch
 
 ## 4. Session Lifecycle
 
-A session is one execution created from a profile, spanning trigger to teardown.
+A session is one execution created from an agent, spanning trigger to teardown.
 
 Before the daemon accepts any session trigger, it first reconciles stale
 runner-managed Podman resources from prior runs of the same daemon instance.
-Dead session containers named `agentd-{daemon8}-{profile}-{session16}` are
+Dead session containers named `agentd-{daemon8}-{agent}-{session16}` are
 removed, then orphaned runner-managed secrets named
 `agentd-{daemon8}-{session16}-{suffix}` whose session container no longer
 exists are removed. The daemon instance id is derived from the configured
@@ -112,7 +112,7 @@ before `/run/agentd/agentd.sock`; for root XDG-unset clients it bypasses the
 and mode `0700`. A default candidate is selected only after it answers the
 agentd socket protocol `Ping` request with `Pong`; unrelated listeners and
 ambiguous probe failures are skipped so later defaults can be considered.
-Profile lookup and default-repo resolution happen daemon-side after the socket
+Agent lookup and default-repo resolution happen daemon-side after the socket
 request is received, so client and daemon responsibility boundaries stay clean.
 
 Operational visibility for that lifecycle uses structured tracing events written
@@ -126,7 +126,7 @@ environment configuration.
 ### Phase 1: Scheduling (`agentd-scheduler`)
 
 The scheduler determines when a session should run. Today it evaluates each
-profile's optional cron schedule in daemon-local time. When scheduling decides
+agent's optional cron schedule in daemon-local time. When scheduling decides
 to start a session, the scheduler is a socket client: it dispatches a run
 request through the daemon's Unix socket, using the same intake path as manual
 CLI invocation. The scheduler does not call the runner directly. Missed
@@ -137,20 +137,21 @@ do not influence later schedule evaluation.
 
 The runner prepares the execution environment:
 
-1. Creates an ephemeral Podman container from the profile's configured base image. That image must provide a POSIX-compatible shell at `/bin/sh` because the runner's container entrypoint executes through that path.
-2. Sets identity inside the container, including `PROFILE_NAME` and a unique container name derived from the profile.
+1. Creates an ephemeral Podman container from the agent's configured base image. That image must provide a POSIX-compatible shell at `/bin/sh` because the runner's container entrypoint executes through that path.
+2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only.
-5. Creates an unprivileged unix user whose username is the configured profile name, with home directory `/home/{username}`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before the session command starts. Base images that lack `/bin/sh`, `find`, `git`, `useradd`, or `gosu` are not supported.
-6. Resolves the host audit root, creates it if needed, and probes writability before accepting work. The default for rootless deployments is `$XDG_STATE_HOME/tesserine/audit`, falling back to `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset. Operators may override that with `daemon.audit_root`; root-owned system installs should typically point it at `/var/lib/tesserine/audit`. After resolution, the runner allocates a host audit record at `{audit_root}/{profile}/{session_id}/`, writes start metadata to `agentd/session.json`, and bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa` before the runtime initializes runa state.
+5. Creates an unprivileged unix user whose username is the configured agent name, with home directory `/home/{username}`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before `runa init` and the agent command start. Base images that lack `/bin/sh`, `find`, `git`, `useradd`, `gosu`, or `runa` are not supported.
+6. Resolves the host audit root, creates it if needed, and probes writability before accepting work. The default for rootless deployments is `$XDG_STATE_HOME/tesserine/audit`, falling back to `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset. Operators may override that with `daemon.audit_root`; root-owned system installs should typically point it at `/var/lib/tesserine/audit`. After resolution, the runner allocates a host audit record at `{audit_root}/{agent}/{session_id}/`, writes start metadata to `agentd/session.json`, and bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa` before the runtime initializes runa state.
 7. Recursively transfers ownership of pre-existing content under `/home/{username}` while pruning host-backed bind-mount targets, the runner-owned audit leaf `/home/{username}/.agentd/audit/runa`, and `/home/{username}/repo`, then transfers ownership of `/home/{username}/repo` after the clone, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready. The runner reserves `/home/{username}` itself, `/home/{username}/.agentd` plus its descendants, and `/home/{username}/repo` plus its descendants so host-backed bind mounts cannot collide with runner-managed paths.
 8. When manual invocation includes operator input, reads the active methodology's `manifest.toml` plus `schemas/<type>.schema.json` on the host, validates the input there, stages the final JSON under a runner-managed bind mount at `/agentd/invocation-input`, and rejects unsupported request canonical versions before any container is created. In `v0.1.x`, request-text input supports canonical request version `1.0.0` only, keyed by `x-tesserine-canonical.version`.
-9. Creates `/home/{username}/repo/.runa` as a symlink to `/home/{username}/.agentd/audit/runa`. This is a runner-owned repo contract: cloned repositories must not contain a `.runa` entry at repo root. If the clone already contains one, setup fails explicitly rather than overwriting repository content.
-10. When staged invocation input is present, copies it into `.runa/workspace/<type>/<id>.json` before dropping privileges and launching the profile command.
+9. Creates `/home/{username}/repo/.runa` as a symlink to `/home/{username}/.agentd/audit/runa`, then makes the audit-backed runa directory writable by the session user. This is a runner-owned repo contract: cloned repositories must not contain a `.runa` entry at repo root. If the clone already contains one, setup fails explicitly rather than overwriting repository content.
+10. Invokes `runa init --methodology /agentd/methodology/manifest.toml` as the session user. Runa owns `.runa/` file formats; agentd does not write `.runa/config.toml` or an `[agent]` section.
+11. When staged invocation input is present, copies it into `.runa/workspace/<type>/<id>.json` after runa initialization and before launching the agent command.
 
 ### Phase 3: Execution (`agentd-runner`)
 
-The runner drops privileges with `gosu` and launches the profile's configured session command as the unprivileged session user from `/home/{username}/repo`, exporting `AGENTD_WORK_UNIT` when the invocation includes one, then supervises the container until natural completion or an optional timeout. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
+The runner drops privileges with `gosu` and launches `runa run [--work-unit <id>] --agent-command -- <argv>` as the unprivileged session user from `/home/{username}/repo`. The argv comes from the declarative agent command, and `runa run` owns protocol execution from there. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
 
 ### Phase 4: Teardown (`agentd-runner`)
 
@@ -162,7 +163,7 @@ read-only on the host, then publishes a read-only `session.json` as the final
 commit point. Ancestor directories remain writable because the atomic replace
 requires a writable parent directory. The ephemeral container workspace still
 disappears, but the host audit record remains at
-`{audit_root}/{profile}/{session_id}/`.
+`{audit_root}/{agent}/{session_id}/`.
 
 If agentd is interrupted after writing start metadata but before finalization,
 if teardown cleanup fails before finalization can begin, or if audit
@@ -186,9 +187,9 @@ agentd runs sessions in ephemeral Podman containers so agents remain separated f
 | Mount or Injection | Purpose | Need Served |
 |---|---|---|
 | Read-only methodology directory | Expose the configured methodology manifest and protocol assets without allowing mutation | Context |
-| Read-only invocation input mount at `/agentd/invocation-input` | Carry validated operator-supplied JSON into the container so the runner can materialize it in `.runa/workspace` before the profile command starts | Mission |
+| Read-only invocation input mount at `/agentd/invocation-input` | Carry validated operator-supplied JSON into the container so the runner can materialize it in `.runa/workspace` after `runa init` and before `runa run` | Mission |
 | Runner-owned audit bind mount at `/home/{username}/.agentd/audit/runa` | Persist runa state on the host while keeping agentd metadata distinct in the same session record | Context, Mission |
-| Profile-declared bind mounts | Expose host-managed state such as subscription auth or persistent artifact storage with per-mount read-only vs read-write policy | Context, Credentials |
+| Agent-declared bind mounts | Expose host-managed state such as subscription auth or persistent artifact storage with per-mount read-only vs read-write policy | Context, Credentials |
 | Credentials | Authenticate to external systems without baking secrets into images | Credentials |
 | Home workspace at `/home/{username}` with repo at `/home/{username}/repo` | Give the session a writable standard Linux home and a clean project workspace that starts fresh each run | Mission, Tool Availability, Identity |
 
@@ -198,14 +199,14 @@ From inside the environment, an agent should see:
 - a read-only methodology mount rooted at `manifest.toml`
 - a read-only invocation-input mount at `/agentd/invocation-input` when manual input is supplied
 - a runner-managed audit bridge at `/home/{username}/repo/.runa -> /home/{username}/.agentd/audit/runa`
-- any additional bind mounts declared by the selected profile
+- any additional bind mounts declared by the selected agent
 - a fresh writable repository checkout at `/home/{username}/repo`
-- any runtime-managed state the configured session command creates inside the repo or home directory
+- any runtime-managed state runa or the configured agent command creates inside the repo or home directory
 - the tools and runtime configuration needed for its assigned work
 
-Additional bind mounts are declared in profile configuration as `source`,
+Additional bind mounts are declared in agent configuration as `source`,
 `target`, and `read_only`. agentd validates absolute container targets plus a
-per-profile disjointness invariant: target paths must be unique and no target
+per-agent disjointness invariant: target paths must be unique and no target
 may be a path-component prefix of another. It then stages canonical host
 sources through runner-managed symlinks before calling Podman so host paths
 containing commas remain mountable. Subscription auth is the first read-only
@@ -216,7 +217,7 @@ container-compatible context.
 
 The invocation-input mount is runner-owned, not operator-owned. Its target
 `/agentd/invocation-input` is reserved alongside `/agentd/methodology`, so
-profile-declared mounts cannot collide with the pre-command input-materialization
+agent-declared mounts cannot collide with the pre-command input-materialization
 path.
 
 The internal audit mount is different from operator-declared mounts. It is
@@ -227,17 +228,17 @@ mounted into the container; it stays host-only so runa-written state and
 agentd-written metadata are distinguishable on disk without disambiguation.
 
 Host audit records live under the resolved audit root, by default
-`$XDG_STATE_HOME/tesserine/audit/<profile>/<session_id>/` or
-`$HOME/.local/state/tesserine/audit/<profile>/<session_id>/` when
+`$XDG_STATE_HOME/tesserine/audit/<agent>/<session_id>/` or
+`$HOME/.local/state/tesserine/audit/<agent>/<session_id>/` when
 `XDG_STATE_HOME` is unset. Root-owned system installs should set
 `daemon.audit_root = "/var/lib/tesserine/audit"`. Each record has this
 layout:
 
 - `runa/` — preserved runa state written naturally by the runtime
-- `agentd/session.json` — agentd-written metadata (`session_id`, `profile`,
-  `repo_url`, optional `work_unit`, timestamps, outcome, exit code when
-  applicable) written by atomic temp-file replacement within the record
-  directory
+- `agentd/session.json` — agentd-written metadata (`schema_version: 2`,
+  `session_id`, `agent`, `repo_url`, optional `work_unit`, timestamps, outcome,
+  exit code when applicable) written by atomic temp-file replacement within the
+  record directory
 
 Coverage is intentionally scoped to the repo-root `.runa/` tree. That captures
 `runa`'s non-configurable `.runa/store/` and `.runa/workspace/`, so persisted
@@ -268,7 +269,7 @@ model. If probe-file creation succeeds but probe-file removal fails, the audit
 root can retain that uniquely named probe file as leftover cruft.
 
 Session ids are 16 lowercase hex characters generated from `getrandom`, giving
-roughly `2^64` possible values per profile and a birthday bound near `2^32`
+roughly `2^64` possible values per agent and a birthday bound near `2^32`
 sessions before collisions become materially likely. On collision,
 `create_dir_all` would silently reuse the existing directory tree and merge two
 records. That is not an operational concern at current scale, but operators
@@ -277,26 +278,26 @@ risk envelope.
 
 ## 6. Credential Flow
 
-Credentials are declared by profile configuration as daemon-side environment variable names. For each configured credential, the daemon resolves `source` with `std::env::var(source)` from its own process environment before calling `agentd-runner`. Operators provide those values through normal host mechanisms such as systemd `EnvironmentFile=`, shell exports, or container environment injection. During session setup, the runner receives only the already-resolved credential values, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
+Credentials are declared by agent configuration as daemon-side environment variable names. For each configured credential, the daemon resolves `source` with `std::env::var(source)` from its own process environment before calling `agentd-runner`. Operators provide those values through normal host mechanisms such as systemd `EnvironmentFile=`, shell exports, or container environment injection. During session setup, the runner receives only the already-resolved credential values, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
 
 Because startup reconciliation is scoped per daemon instance rather than to the
 whole Podman namespace, the daemon removes only runner-managed resources whose
 names carry its own derived daemon id: dead
-`agentd-{daemon8}-{profile}-{session16}` containers are removed first, then
+`agentd-{daemon8}-{agent}-{session16}` containers are removed first, then
 orphaned `agentd-{daemon8}-{session16}-{suffix}` secrets whose session
 container is gone.
 
-Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When a profile declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before the session command starts so the token does not persist in git config or the agent runtime environment.
+Repository clone authentication is a separate invocation concern rather than an agent runtime credential. When an agent declares `repo_token_source`, the daemon resolves that environment variable at dispatch time and, when the resolved value is non-empty, maps it to `SessionInvocation.repo_token`. The runner then injects that bearer token through its own ephemeral secret, uses it only for the `git clone` invocation, and unsets the internal token variable before `runa init` or the agent command starts so the token does not persist in git config or the agent runtime environment.
 
-Isolation is per profile: one profile receives only its own declared credentials. Sharing access to the same external service still requires separate credential declarations per profile so compromise remains scoped.
+Isolation is per agent: one agent receives only its own declared credentials. Sharing access to the same external service still requires separate credential declarations per agent so compromise remains scoped.
 
 ## 7. Verification Matrix
 
 | Need | Architectural Decision | Workspace Evidence | Failure if Violated |
 |---|---|---|---|
 | Network | Session environments receive deployment-controlled network access | `agentd-runner` owns session setup | Agents cannot reach external services |
-| Credentials | Secrets are injected at launch, not stored in code or images | `agentd` resolves configured environment-variable sources and `agentd-runner` accepts the resolved values | Sessions cannot authenticate or credentials leak across profiles |
-| Identity | Each session receives stable in-container identity variables and container naming | `agentd-runner` session contract and Podman lifecycle | Operators cannot distinguish which profile a session belongs to |
+| Credentials | Secrets are injected at launch, not stored in code or images | `agentd` resolves configured environment-variable sources and `agentd-runner` accepts the resolved values | Sessions cannot authenticate or credentials leak across agents |
+| Identity | Each session receives stable in-container identity variables and container naming | `agentd-runner` session contract and Podman lifecycle | Operators cannot distinguish which agent a session belongs to |
 | Mission | Scheduling or CLI invocation hands repo and optional work unit into session launch | `agentd-scheduler` plus `agentd-runner` boundary | Agents run without a reason or target |
 | Tool Availability | Tools are provided through the environment; MCP remains a runtime concern | Three-crate workspace with no transport crate | agentd would absorb protocol work it does not need |
 | Context | Methodology assets are mounted read-only into sessions and the repo is freshly cloned per run | `agentd-runner` boundary and crate intent | Agents operate without local awareness |

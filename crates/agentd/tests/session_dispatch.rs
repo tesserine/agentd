@@ -70,15 +70,16 @@ impl SessionExecutor for RecordingExecutor {
 fn config_with_repo_token_source(repo_token_source: &str) -> Config {
     Config::from_str(&format!(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 repo_token_source = "{repo_token_source}"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#
@@ -92,14 +93,15 @@ fn config_with_audit_root(audit_root: &str) -> Config {
 [daemon]
 audit_root = "{audit_root}"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.credentials]]
+[[agents.credentials]]
 name = "GITHUB_TOKEN"
 source = "AGENTD_GITHUB_TOKEN"
 "#
@@ -110,19 +112,20 @@ source = "AGENTD_GITHUB_TOKEN"
 fn config_with_mounts() -> Config {
     Config::from_str(
         r#"
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/home/core/.claude"
 target = "/home/site-builder/.claude"
 read_only = true
 
-[[profiles.mounts]]
+[[agents.mounts]]
 source = "/var/lib/tesserine/audit"
 target = "/home/site-builder/.runa"
 read_only = false
@@ -142,7 +145,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
     }
     let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: Some("task-42".to_string()),
         input: None,
@@ -163,7 +166,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
         .as_ref()
         .expect("executor should receive invocation");
 
-    assert_eq!(spec.profile_name, "site-builder");
+    assert_eq!(spec.agent_name, "site-builder");
     assert_eq!(spec.base_image, "ghcr.io/example/site-builder:latest");
     assert_eq!(spec.methodology_dir, Path::new("../groundwork"));
     assert_eq!(
@@ -181,7 +184,7 @@ fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environmen
             .expect("audit root should resolve")
     );
     assert_eq!(
-        spec.command,
+        spec.agent_command,
         vec!["site-builder".to_string(), "exec".to_string()]
     );
     assert_eq!(
@@ -217,7 +220,7 @@ fn dispatch_run_forwards_resolved_audit_root_into_session_spec() {
             .expect("temporary audit root should be valid utf-8"),
     );
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: None,
         input: None,
@@ -266,7 +269,7 @@ fn dispatch_run_rejects_an_unwritable_audit_root_before_session_execution() {
             .expect("temporary audit root should be valid utf-8"),
     );
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: None,
         input: None,
@@ -304,7 +307,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_missing() {
     }
     let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: None,
         input: None,
@@ -337,7 +340,7 @@ fn dispatch_run_omits_repo_token_when_source_env_var_is_empty() {
     }
     let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: None,
         input: None,
@@ -371,7 +374,7 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
     }
     let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: None,
         input: None,
@@ -384,11 +387,11 @@ fn dispatch_run_errors_when_runtime_credential_source_is_missing() {
 
     match error {
         DispatchError::MissingCredentialSource {
-            profile,
+            agent,
             credential,
             source,
         } => {
-            assert_eq!(profile, "site-builder");
+            assert_eq!(agent, "site-builder");
             assert_eq!(credential, "GITHUB_TOKEN");
             assert_eq!(source, "AGENTD_GITHUB_TOKEN");
         }
@@ -408,17 +411,18 @@ fn dispatch_run_rejects_relative_daemon_runtime_paths_as_config_errors() {
 socket_path = "runtime/agentd.sock"
 pid_file = "runtime/agentd.pid"
 
-[[profiles]]
+[[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
 
-command = ["site-builder", "exec"]
+[agents.command]
+argv = ["site-builder", "exec"]
 "#,
     )
     .expect("config should parse");
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: None,
         input: None,
@@ -439,10 +443,10 @@ command = ["site-builder", "exec"]
 }
 
 #[test]
-fn dispatch_run_forwards_profile_mounts_into_session_spec() {
+fn dispatch_run_forwards_agent_mounts_into_session_spec() {
     let config = config_with_mounts();
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: None,
         input: None,
@@ -484,7 +488,7 @@ fn dispatch_run_forwards_typed_invocation_input_into_session_invocation() {
     }
     let config = config_with_repo_token_source("SITE_BUILDER_REPO_TOKEN");
     let request = RunRequest {
-        profile: "site-builder".to_string(),
+        agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
         work_unit: None,
         input: Some(InvocationInput::Artifact {

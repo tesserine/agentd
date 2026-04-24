@@ -3,7 +3,7 @@
 //! Manages the podman container lifecycle: building the entrypoint script,
 //! assembling `podman create` arguments, running the container in attached
 //! mode, and classifying the exit result. The container runs as root (UID 0)
-//! for privileged setup, then drops to an unprivileged profile user via `gosu`
+//! for privileged setup, then drops to an unprivileged agent user via `gosu`
 //! before executing the command. Exit code 125 from `podman start
 //! --attach` is ambiguous (podman infrastructure error vs. container process)
 //! and requires container state inspection to disambiguate.
@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 const ATTACHED_STDERR_TAIL_LIMIT: usize = 64 * 1024;
 const ATTACHED_STDERR_TRUNCATION_NOTICE: &str = "[stderr truncated to last 65536 bytes]\n";
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
+const METHODOLOGY_MANIFEST_PATH: &str = "/agentd/methodology/manifest.toml";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
 
 pub(crate) fn create_container(
@@ -146,19 +147,19 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 
 // Generates the shell script passed as the container entrypoint via
 // `/bin/sh -lc`. The script runs as root (UID 0) to perform privileged setup:
-// creating the profile's unix user, recursively re-owning pre-existing home
+// creating the agent's unix user, recursively re-owning pre-existing home
 // content while preserving host-backed mount targets, cloning the repository,
 // and transferring repository ownership. It then drops privileges permanently
 // via `gosu`
-// and `exec`s the configured session command as the unprivileged profile user
-// from the cloned repository. `set -eu` at the top ensures any setup failure
-// aborts immediately rather than continuing with a broken workspace.
+// then invokes runa as the unprivileged agent user. `set -eu` at the top
+// ensures any setup failure aborts immediately rather than continuing with a
+// broken workspace.
 fn build_container_script(
     spec: &SessionSpec,
     invocation: &SessionInvocation,
     resolved_input: Option<&ResolvedInvocationInput>,
 ) -> String {
-    let username = &spec.profile_name;
+    let username = &spec.agent_name;
     let home_dir_path = session_home_dir(username);
     let home_dir = home_dir_path.display().to_string();
     let internal_audit_dir_path = session_internal_audit_dir(username);
@@ -207,6 +208,22 @@ fn build_container_script(
     script.push_str(&shell_quote(&internal_audit_runa_dir));
     script.push(' ');
     script.push_str(&shell_quote(&repo_runa_dir));
+    script.push_str("\nchown -R ");
+    script.push_str(&shell_quote(&user_group));
+    script.push(' ');
+    script.push_str(&shell_quote(&internal_audit_runa_dir));
+    script.push_str("\nexport HOME=");
+    script.push_str(&shell_quote(&home_dir));
+    if let Some(work_unit) = &invocation.work_unit {
+        script.push_str("\nexport AGENTD_WORK_UNIT=");
+        script.push_str(&shell_quote(work_unit));
+    } else {
+        script.push_str("\nunset AGENTD_WORK_UNIT");
+    }
+    script.push_str("\ngosu ");
+    script.push_str(&shell_quote(&user_group));
+    script.push_str(" runa init --methodology ");
+    script.push_str(&shell_quote(METHODOLOGY_MANIFEST_PATH));
     if let Some(resolved_input) = resolved_input {
         let workspace_dir = format!("{repo_runa_dir}/workspace/{}", resolved_input.artifact_type);
         let artifact_path = format!("{workspace_dir}/{}.json", resolved_input.artifact_id);
@@ -222,18 +239,15 @@ fn build_container_script(
         script.push(' ');
         script.push_str(&shell_quote(&workspace_dir));
     }
-    script.push_str("\nexport HOME=");
-    script.push_str(&shell_quote(&home_dir));
-    if let Some(work_unit) = &invocation.work_unit {
-        script.push_str("\nexport AGENTD_WORK_UNIT=");
-        script.push_str(&shell_quote(work_unit));
-    } else {
-        script.push_str("\nunset AGENTD_WORK_UNIT");
-    }
     script.push_str("\nexec gosu ");
     script.push_str(&shell_quote(&user_group));
-    script.push(' ');
-    script.push_str(&shell_join(&spec.command));
+    script.push_str(" runa run");
+    if let Some(work_unit) = &invocation.work_unit {
+        script.push_str(" --work-unit ");
+        script.push_str(&shell_quote(work_unit));
+    }
+    script.push_str(" --agent-command -- ");
+    script.push_str(&shell_join(&spec.agent_command));
 
     script
 }

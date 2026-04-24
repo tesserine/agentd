@@ -107,7 +107,7 @@ enum Command {
     Daemon(DaemonArgs),
     /// Trigger a manual session through the running daemon.
     Run {
-        profile: String,
+        agent: String,
         repo: Option<String>,
         #[arg(long)]
         socket_path: Option<PathBuf>,
@@ -153,7 +153,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             resolve_daemon_config_path(cli.config.as_deref(), daemon_args.config.as_deref())?,
         )?),
         Some(Command::Run {
-            profile,
+            agent,
             repo,
             socket_path,
             work_unit,
@@ -169,7 +169,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             run_client(
                 socket_path.as_deref(),
-                profile,
+                agent,
                 repo,
                 work_unit,
                 request,
@@ -214,7 +214,7 @@ fn register_termination_handlers(shutdown: Arc<AtomicBool>) -> Result<(), std::i
 
 fn run_client(
     explicit_socket_path: Option<&std::path::Path>,
-    profile: String,
+    agent: String,
     repo: Option<String>,
     work_unit: Option<String>,
     request: Option<String>,
@@ -232,7 +232,7 @@ fn run_client(
     let outcome = request_run(
         &socket_path,
         &RunRequest {
-            profile,
+            agent,
             repo_url: repo,
             work_unit,
             input,
