@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-const METADATA_SCHEMA_VERSION: u32 = 1;
+const METADATA_SCHEMA_VERSION: u32 = 2;
 const ACTIVE_AUDIT_DIRECTORY_MODE: u32 = 0o755;
 const SEALED_FILE_MODE: u32 = 0o444;
 const SEALED_DIRECTORY_MODE: u32 = 0o555;
@@ -516,7 +516,7 @@ mod tests {
             .expect("initial session metadata should be readable");
         let json: Value = serde_json::from_str(&payload).expect("metadata should be valid json");
 
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["session_id"], "0123456789abcdef");
         assert_eq!(json["agent"], "site-builder");
         assert_eq!(json["repo_url"], "https://example.com/agentd.git");

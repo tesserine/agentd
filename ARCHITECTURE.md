@@ -235,10 +235,10 @@ Host audit records live under the resolved audit root, by default
 layout:
 
 - `runa/` — preserved runa state written naturally by the runtime
-- `agentd/session.json` — agentd-written metadata (`session_id`, `agent`,
-  `repo_url`, optional `work_unit`, timestamps, outcome, exit code when
-  applicable) written by atomic temp-file replacement within the record
-  directory
+- `agentd/session.json` — agentd-written metadata (`schema_version: 2`,
+  `session_id`, `agent`, `repo_url`, optional `work_unit`, timestamps, outcome,
+  exit code when applicable) written by atomic temp-file replacement within the
+  record directory
 
 Coverage is intentionally scoped to the repo-root `.runa/` tree. That captures
 `runa`'s non-configurable `.runa/store/` and `.runa/workspace/`, so persisted

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Additional bind mounts now reserve only runner-owned targets (`/agentd/methodology`, `/home/{agent}`, and `/home/{agent}/repo` plus descendants), allowing supported read-only and read-write mounts elsewhere under `$HOME` without runner setup mutating host-backed data.
 - Agent-declared bind mounts now reject overlapping container targets within the same agent, so nested targets fail validation before startup instead of reaching the container setup script.
 - Persistent audit records now default to `$XDG_STATE_HOME/tesserine/audit/<agent>/<session_id>/`, falling back to `$HOME/.local/state/tesserine/audit/<agent>/<session_id>/` for rootless installs, with `daemon.audit_root` available as an explicit override for root-owned system installs such as `/var/lib/tesserine/audit/`.
+- Audit metadata now uses `schema_version: 2` for the breaking identity field rename from `profile` to `agent`.
 - Completed audit records now seal directories to `0555` and non-symlink entries to `0444`, skip symlinks while sealing, and update `agentd/session.json` through atomic temp-file replacement instead of truncate-and-write.
 - `agentd_runner::SessionSpec` now requires an explicit `audit_root` field, making the audit-record destination part of the runner API instead of an implicit process-environment override.
 
