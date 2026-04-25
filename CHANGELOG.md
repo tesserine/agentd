@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 
+- `agentd --version` and `agentd run --version` now report the crate release
+  version for operator deployment checks.
 - Agent configuration is now declarative and uses `[[agents]]` with `[agents.command].argv`; the old profile-table vocabulary and shell-wrapper command shape are removed as a pre-1.0 breaking change. agentd now composes `runa init` and `runa run --agent-command -- <argv>` itself, leaving runa-owned `.runa/` config formats to runa.
 - `agentd run` no longer reads `agentd.toml`: it now accepts `--socket-path <PATH>`, otherwise discovers the daemon socket through `$XDG_RUNTIME_DIR/agentd/agentd.sock` first when `XDG_RUNTIME_DIR` is set; for rootless XDG-unset clients it falls back to `/tmp/agentd-$UID/agentd.sock` with ownership and `0700` checks before `/run/agentd/agentd.sock`, while root XDG-unset clients use `/run/agentd/agentd.sock` directly; agent lookup and default-repo resolution now happen daemon-side.
 - `agentd run` now accepts one per-invocation work surface without agent edits: `--work-unit <id>`, `--request <text>`, or `--artifact-type <type> --artifact-file <path>`. Request text is synthesized into `.runa/workspace/request/operator-input.json`, while artifact-file input places validated JSON at `.runa/workspace/<type>/<file-stem>.json`.

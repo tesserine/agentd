@@ -87,7 +87,7 @@ impl fmt::Display for RunCommandError {
 impl Error for RunCommandError {}
 
 #[derive(Parser, Debug)]
-#[command(name = "agentd")]
+#[command(name = "agentd", version, propagate_version = true)]
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
@@ -106,6 +106,7 @@ enum Command {
     /// Start the foreground daemon.
     Daemon(DaemonArgs),
     /// Trigger a manual session through the running daemon.
+    #[command(display_name = "agentd")]
     Run {
         agent: String,
         repo: Option<String>,
