@@ -1,19 +1,8 @@
-use std::ffi::CString;
 use std::fmt;
-use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use crate::protocol::{RequestMessage, ResponseMessage};
 
 const SOCKET_BASENAME: &str = "agentd.sock";
 const PID_BASENAME: &str = "agentd.pid";
-const REQUIRED_TMP_MODE: u32 = 0o700;
-const SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonRuntimePaths {
@@ -32,191 +21,104 @@ impl DaemonRuntimePaths {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClientSocketPathError {
-    InsecureTemporaryRuntimeDir { path: PathBuf, message: String },
-    DaemonNotDiscovered { last_path: PathBuf },
+pub enum RuntimePathError {
+    XdgRuntimeDirUnavailable,
+    XdgRuntimeDirMustBeAbsolute { path: PathBuf },
+}
+
+impl fmt::Display for RuntimePathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::XdgRuntimeDirUnavailable => write!(
+                f,
+                "XDG_RUNTIME_DIR is not set; set XDG_RUNTIME_DIR or configure explicit daemon runtime paths"
+            ),
+            Self::XdgRuntimeDirMustBeAbsolute { path } => write!(
+                f,
+                "XDG_RUNTIME_DIR must be an absolute path: {}; set XDG_RUNTIME_DIR to an absolute runtime directory or configure explicit daemon runtime paths",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RuntimePathError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientSocketPathError {
+    source: RuntimePathError,
+}
+
+impl ClientSocketPathError {
+    fn new(source: RuntimePathError) -> Self {
+        Self { source }
+    }
 }
 
 impl fmt::Display for ClientSocketPathError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InsecureTemporaryRuntimeDir { path, message } => {
-                write!(
-                    f,
-                    "{message}: {}. Use --socket-path to override.",
-                    path.display()
-                )
-            }
-            Self::DaemonNotDiscovered { last_path } => {
-                write!(f, "agentd is not running (socket {})", last_path.display())
-            }
+        match &self.source {
+            RuntimePathError::XdgRuntimeDirUnavailable => write!(
+                f,
+                "XDG_RUNTIME_DIR is not set; set XDG_RUNTIME_DIR or use --socket-path to override"
+            ),
+            RuntimePathError::XdgRuntimeDirMustBeAbsolute { path } => write!(
+                f,
+                "XDG_RUNTIME_DIR must be an absolute path: {}; set XDG_RUNTIME_DIR to an absolute runtime directory or use --socket-path to override",
+                path.display()
+            ),
         }
     }
 }
 
-impl std::error::Error for ClientSocketPathError {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TemporaryRuntimeDirError {
-    path: PathBuf,
-    message: String,
-}
-
-impl TemporaryRuntimeDirError {
-    fn new(path: &Path, message: impl Into<String>) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for TemporaryRuntimeDirError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.message, self.path.display())
-    }
-}
-
-impl std::error::Error for TemporaryRuntimeDirError {}
-
-impl From<TemporaryRuntimeDirError> for ClientSocketPathError {
-    fn from(error: TemporaryRuntimeDirError) -> Self {
-        Self::InsecureTemporaryRuntimeDir {
-            path: error.path,
-            message: error.message,
-        }
+impl std::error::Error for ClientSocketPathError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimePathLayout {
-    uid: u32,
-    xdg_runtime_dir: Option<PathBuf>,
-    tmp_runtime_dir: PathBuf,
-    system_runtime_dir: PathBuf,
+    xdg_runtime_dir: PathBuf,
 }
 
 impl RuntimePathLayout {
-    fn detect() -> Self {
-        let uid = unsafe { libc::geteuid() };
-        Self {
-            uid,
-            xdg_runtime_dir: std::env::var_os("XDG_RUNTIME_DIR")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute()),
-            tmp_runtime_dir: tmp_runtime_dir_for_uid(uid),
-            system_runtime_dir: PathBuf::from("/run/agentd"),
-        }
-    }
+    fn detect() -> Result<Self, RuntimePathError> {
+        let Some(path) = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        else {
+            return Err(RuntimePathError::XdgRuntimeDirUnavailable);
+        };
 
-    fn client_socket_path(&self) -> Result<PathBuf, ClientSocketPathError> {
-        if let Some(runtime_dir) = &self.xdg_runtime_dir {
-            let candidate = runtime_dir.join("agentd").join(SOCKET_BASENAME);
-            if socket_candidate_is_ready(&candidate) {
-                return Ok(candidate);
-            }
+        if !path.is_absolute() {
+            return Err(RuntimePathError::XdgRuntimeDirMustBeAbsolute { path });
         }
 
-        if self.uid != 0 {
-            let tmp_socket_path = self.tmp_runtime_dir.join(SOCKET_BASENAME);
-            match fs::symlink_metadata(&self.tmp_runtime_dir) {
-                Ok(_) => {
-                    validate_tmp_runtime_dir(&self.tmp_runtime_dir, self.uid)?;
-                    if socket_candidate_is_ready(&tmp_socket_path) {
-                        return Ok(tmp_socket_path);
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(TemporaryRuntimeDirError::new(
-                        &self.tmp_runtime_dir,
-                        format!("failed to inspect temporary runtime directory ({error})"),
-                    )
-                    .into());
-                }
-            }
-        }
-
-        let system_socket_path = self.system_runtime_dir.join(SOCKET_BASENAME);
-        if socket_candidate_is_ready(&system_socket_path) {
-            return Ok(system_socket_path);
-        }
-
-        Err(ClientSocketPathError::DaemonNotDiscovered {
-            last_path: system_socket_path,
+        Ok(Self {
+            xdg_runtime_dir: path,
         })
     }
 
-    fn daemon_runtime_paths(&self) -> DaemonRuntimePaths {
-        let runtime_dir = if let Some(runtime_dir) = &self.xdg_runtime_dir {
-            runtime_dir.join("agentd")
-        } else if self.uid == 0 {
-            self.system_runtime_dir.clone()
-        } else {
-            self.tmp_runtime_dir.clone()
-        };
+    fn client_socket_path(&self) -> PathBuf {
+        self.runtime_dir().join(SOCKET_BASENAME)
+    }
 
+    fn daemon_runtime_paths(&self) -> DaemonRuntimePaths {
+        let runtime_dir = self.runtime_dir();
         DaemonRuntimePaths {
             socket_path: runtime_dir.join(SOCKET_BASENAME),
             pid_file: runtime_dir.join(PID_BASENAME),
         }
     }
-}
 
-fn socket_candidate_is_ready(path: &Path) -> bool {
-    if !path.exists() {
-        return false;
-    }
-
-    match UnixStream::connect(path) {
-        Ok(stream) => socket_candidate_answers_agentd_ping(stream),
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::ENOENT) | Some(libc::ECONNREFUSED)
-            ) =>
-        {
-            false
-        }
-        Err(_) => false,
+    fn runtime_dir(&self) -> PathBuf {
+        self.xdg_runtime_dir.join("agentd")
     }
 }
 
-fn socket_candidate_answers_agentd_ping(mut stream: UnixStream) -> bool {
-    if stream.set_read_timeout(Some(SOCKET_PROBE_TIMEOUT)).is_err() {
-        return false;
-    }
-
-    if stream
-        .set_write_timeout(Some(SOCKET_PROBE_TIMEOUT))
-        .is_err()
-    {
-        return false;
-    }
-
-    let payload = match serde_json::to_vec(&RequestMessage::Ping) {
-        Ok(payload) => payload,
-        Err(_) => return false,
-    };
-
-    if stream.write_all(&payload).is_err()
-        || stream.write_all(b"\n").is_err()
-        || stream.flush().is_err()
-    {
-        return false;
-    }
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(0) | Err(_) => false,
-        Ok(_) => matches!(serde_json::from_str(&line), Ok(ResponseMessage::Pong)),
-    }
-}
-
-pub fn default_daemon_runtime_paths() -> DaemonRuntimePaths {
-    RuntimePathLayout::detect().daemon_runtime_paths()
+pub fn default_daemon_runtime_paths() -> Result<DaemonRuntimePaths, RuntimePathError> {
+    RuntimePathLayout::detect().map(|layout| layout.daemon_runtime_paths())
 }
 
 pub fn resolve_client_socket_path(
@@ -226,741 +128,113 @@ pub fn resolve_client_socket_path(
         return Ok(path.to_path_buf());
     }
 
-    RuntimePathLayout::detect().client_socket_path()
-}
-
-pub(crate) fn current_user_tmp_runtime_dir() -> PathBuf {
-    tmp_runtime_dir_for_uid(unsafe { libc::geteuid() })
-}
-
-pub(crate) fn ensure_tmp_runtime_dir(
-    path: &Path,
-    expected_uid: u32,
-) -> Result<(), TemporaryRuntimeDirError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => validate_tmp_runtime_dir(path, expected_uid),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            before_tmp_runtime_dir_create(path);
-            create_tmp_runtime_dir(path)?;
-            validate_tmp_runtime_dir(path, expected_uid)
-        }
-        Err(error) => Err(TemporaryRuntimeDirError::new(
-            path,
-            format!("failed to inspect temporary runtime directory ({error})"),
-        )),
-    }
-}
-
-fn create_tmp_runtime_dir(path: &Path) -> Result<(), TemporaryRuntimeDirError> {
-    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        TemporaryRuntimeDirError::new(
-            path,
-            "temporary runtime directory path contains an interior NUL byte",
-        )
-    })?;
-
-    let result = unsafe { libc::mkdir(c_path.as_ptr(), REQUIRED_TMP_MODE as libc::mode_t) };
-    if result == 0 {
-        return Ok(());
-    }
-
-    let error = io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(libc::EEXIST)) {
-        return Ok(());
-    }
-
-    Err(TemporaryRuntimeDirError::new(
-        path,
-        format!("failed to create temporary runtime directory ({error})"),
-    ))
-}
-
-#[cfg(test)]
-type TmpRuntimeDirCreateHook = Option<(PathBuf, fn(&Path))>;
-
-#[cfg(test)]
-static BEFORE_TMP_RUNTIME_DIR_CREATE_HOOK: std::sync::Mutex<TmpRuntimeDirCreateHook> =
-    std::sync::Mutex::new(None);
-
-#[cfg(test)]
-fn set_before_tmp_runtime_dir_create_hook(path: &Path, hook: fn(&Path)) {
-    *BEFORE_TMP_RUNTIME_DIR_CREATE_HOOK
-        .lock()
-        .expect("tmp runtime dir create hook lock should not be poisoned") =
-        Some((path.to_path_buf(), hook));
-}
-
-#[cfg(test)]
-fn clear_before_tmp_runtime_dir_create_hook() {
-    *BEFORE_TMP_RUNTIME_DIR_CREATE_HOOK
-        .lock()
-        .expect("tmp runtime dir create hook lock should not be poisoned") = None;
-}
-
-#[cfg(test)]
-fn before_tmp_runtime_dir_create(path: &Path) {
-    let hook = BEFORE_TMP_RUNTIME_DIR_CREATE_HOOK
-        .lock()
-        .expect("tmp runtime dir create hook lock should not be poisoned")
-        .as_ref()
-        .and_then(|(hook_path, hook)| (hook_path == path).then_some(*hook));
-
-    if let Some(hook) = hook {
-        hook(path);
-    }
-}
-
-#[cfg(not(test))]
-fn before_tmp_runtime_dir_create(_path: &Path) {}
-
-fn tmp_runtime_dir_for_uid(uid: u32) -> PathBuf {
-    PathBuf::from(format!("/tmp/agentd-{uid}"))
-}
-
-fn validate_tmp_runtime_dir(
-    path: &Path,
-    expected_uid: u32,
-) -> Result<(), TemporaryRuntimeDirError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        TemporaryRuntimeDirError::new(
-            path,
-            format!("failed to inspect temporary runtime directory ({error})"),
-        )
-    })?;
-
-    if !metadata.is_dir() {
-        return Err(TemporaryRuntimeDirError::new(
-            path,
-            "temporary runtime path exists but is not a directory",
-        ));
-    }
-
-    let mode = metadata.mode() & 0o777;
-    if mode != REQUIRED_TMP_MODE {
-        return Err(TemporaryRuntimeDirError::new(
-            path,
-            format!(
-                "temporary runtime directory must have mode 0700, found {:04o}",
-                mode
-            ),
-        ));
-    }
-
-    let owner = metadata.uid();
-    if owner != expected_uid {
-        return Err(TemporaryRuntimeDirError::new(
-            path,
-            format!(
-                "temporary runtime directory must be owned by uid {expected_uid}, found uid {owner}"
-            ),
-        ));
-    }
-
-    Ok(())
+    RuntimePathLayout::detect()
+        .map(|layout| layout.client_socket_path())
+        .map_err(ClientSocketPathError::new)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
-    use std::thread;
-    use std::time::Duration;
+    use std::sync::{Mutex, OnceLock};
 
-    fn test_layout(
-        uid: u32,
-        xdg_runtime_dir: Option<PathBuf>,
-        tmp_runtime_dir: PathBuf,
-        system_runtime_dir: PathBuf,
-    ) -> RuntimePathLayout {
-        RuntimePathLayout {
-            uid,
-            xdg_runtime_dir,
-            tmp_runtime_dir,
-            system_runtime_dir,
-        }
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn test_layout(xdg_runtime_dir: PathBuf) -> RuntimePathLayout {
+        RuntimePathLayout { xdg_runtime_dir }
     }
 
     fn unique_dir(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
+        std::env::temp_dir().join(format!(
             "agentd-runtime-paths-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time should be after epoch")
                 .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).expect("test directory should be created");
-        path
-    }
-
-    fn spawn_agentd_ping_responder(path: &Path) -> thread::JoinHandle<()> {
-        let listener = UnixListener::bind(path).expect("agentd responder socket should bind");
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("probe connection should arrive");
-            let mut line = String::new();
-            BufReader::new(&mut stream)
-                .read_line(&mut line)
-                .expect("ping should be readable");
-            assert_eq!(line, "{\"type\":\"ping\"}\n");
-            stream
-                .write_all(b"{\"type\":\"pong\"}\n")
-                .expect("pong should be writable");
-        })
-    }
-
-    fn spawn_wrong_protocol_responder(path: &Path) -> thread::JoinHandle<()> {
-        let listener = UnixListener::bind(path).expect("wrong-protocol socket should bind");
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("probe connection should arrive");
-            let mut line = String::new();
-            let _ = BufReader::new(&mut stream).read_line(&mut line);
-            let _ = stream.write_all(b"{\"type\":\"error\",\"message\":\"not agentd\"}\n");
-        })
-    }
-
-    fn spawn_silent_responder(path: &Path) -> thread::JoinHandle<()> {
-        let listener = UnixListener::bind(path).expect("silent socket should bind");
-        thread::spawn(move || {
-            let (_stream, _) = listener.accept().expect("probe connection should arrive");
-            thread::sleep(Duration::from_millis(500));
-        })
+        ))
     }
 
     #[test]
-    fn client_socket_path_prefers_xdg_runtime_dir_when_it_answers_agentd_ping() {
-        let root = unique_dir("client-xdg");
-        let xdg_runtime_dir = root.join("xdg-runtime");
-        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
-        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
-        let responder = spawn_agentd_ping_responder(&xdg_agentd_dir.join("agentd.sock"));
-
-        let layout = test_layout(
-            1000,
-            Some(xdg_runtime_dir),
-            PathBuf::from("/tmp/agentd-1000"),
-            PathBuf::from("/run/agentd"),
-        );
+    fn client_socket_path_resolves_xdg_path_without_probing_for_a_daemon() {
+        let xdg_runtime_dir = unique_dir("client-xdg-no-probe");
+        let layout = test_layout(xdg_runtime_dir.clone());
 
         assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("xdg path should resolve"),
-            xdg_agentd_dir.join("agentd.sock")
-        );
-        responder.join().expect("agentd responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_falls_through_to_tmp_when_xdg_socket_is_missing() {
-        let xdg_root = unique_dir("client-xdg-fallback-to-tmp-xdg");
-        let xdg_runtime_dir = xdg_root.join("xdg-runtime");
-        std::fs::create_dir_all(xdg_runtime_dir.join("agentd"))
-            .expect("xdg runtime dir should be created");
-        let root = unique_dir("client-xdg-fallback-to-tmp");
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o700))
-            .expect("permissions should be set");
-        let responder = spawn_agentd_ping_responder(&tmp_runtime_dir.join("agentd.sock"));
-
-        let uid = unsafe { libc::geteuid() };
-        let layout = test_layout(
-            uid,
-            Some(xdg_runtime_dir),
-            tmp_runtime_dir.clone(),
-            root.join("run-agentd"),
-        );
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("tmp path should resolve"),
-            tmp_runtime_dir.join("agentd.sock")
-        );
-        responder.join().expect("tmp responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_ignores_insecure_tmp_dir_when_xdg_socket_is_available() {
-        let root = unique_dir("xdg-ignore-bad-tmp");
-        let xdg_runtime_dir = root.join("xdg-runtime");
-        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
-        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
-        let responder = spawn_agentd_ping_responder(&xdg_agentd_dir.join("agentd.sock"));
-
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("permissions should be set");
-
-        let uid = unsafe { libc::geteuid() };
-        let layout = test_layout(
-            uid,
-            Some(xdg_runtime_dir),
-            tmp_runtime_dir,
-            root.join("run-agentd"),
-        );
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("xdg path should resolve before tmp validation"),
-            xdg_agentd_dir.join("agentd.sock")
-        );
-        responder.join().expect("agentd responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_prefers_xdg_runtime_dir_for_root_when_present() {
-        let root = unique_dir("client-root-xdg");
-        let xdg_runtime_dir = root.join("xdg-runtime");
-        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
-        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
-        let responder = spawn_agentd_ping_responder(&xdg_agentd_dir.join("agentd.sock"));
-
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("permissions should be set");
-
-        let layout = test_layout(
-            0,
-            Some(xdg_runtime_dir),
-            tmp_runtime_dir,
-            root.join("run-agentd"),
-        );
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("xdg path should resolve before root system fallback"),
-            xdg_agentd_dir.join("agentd.sock")
-        );
-        responder.join().expect("agentd responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_falls_through_to_system_when_earlier_candidates_are_unavailable() {
-        let root = unique_dir("client-system-fallback");
-        let xdg_runtime_dir = root.join("xdg-runtime");
-        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
-        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
-        let xdg_listener =
-            UnixListener::bind(xdg_agentd_dir.join("agentd.sock")).expect("xdg socket should bind");
-        drop(xdg_listener);
-
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o700))
-            .expect("permissions should be set");
-        let tmp_listener = UnixListener::bind(tmp_runtime_dir.join("agentd.sock"))
-            .expect("tmp socket should bind");
-        drop(tmp_listener);
-
-        let system_runtime_dir = root.join("run-agentd");
-        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
-        let responder = spawn_agentd_ping_responder(&system_runtime_dir.join("agentd.sock"));
-
-        let uid = unsafe { libc::geteuid() };
-        let layout = test_layout(
-            uid,
-            Some(xdg_runtime_dir),
-            tmp_runtime_dir,
-            system_runtime_dir.clone(),
-        );
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("system path should resolve"),
-            system_runtime_dir.join("agentd.sock")
-        );
-        responder.join().expect("system responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_falls_through_when_xdg_socket_does_not_speak_agentd() {
-        let root = unique_dir("xdg-wrong");
-        let xdg_runtime_dir = root.join("xdg-runtime");
-        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
-        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
-        let xdg_responder = spawn_wrong_protocol_responder(&xdg_agentd_dir.join("agentd.sock"));
-
-        let system_runtime_dir = root.join("run-agentd");
-        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
-        let system_responder = spawn_agentd_ping_responder(&system_runtime_dir.join("agentd.sock"));
-
-        let layout = test_layout(
-            0,
-            Some(xdg_runtime_dir),
-            root.join("tmp-runtime"),
-            system_runtime_dir.clone(),
-        );
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("system path should resolve after wrong protocol"),
-            system_runtime_dir.join("agentd.sock")
-        );
-        xdg_responder
-            .join()
-            .expect("wrong-protocol responder should finish");
-        system_responder
-            .join()
-            .expect("system responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_falls_through_when_xdg_socket_does_not_answer_ping() {
-        let root = unique_dir("xdg-silent");
-        let xdg_runtime_dir = root.join("xdg-runtime");
-        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
-        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
-        let xdg_responder = spawn_silent_responder(&xdg_agentd_dir.join("agentd.sock"));
-
-        let system_runtime_dir = root.join("run-agentd");
-        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
-        let system_responder = spawn_agentd_ping_responder(&system_runtime_dir.join("agentd.sock"));
-
-        let layout = test_layout(
-            0,
-            Some(xdg_runtime_dir),
-            root.join("tmp-runtime"),
-            system_runtime_dir.clone(),
-        );
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("system path should resolve after silent socket"),
-            system_runtime_dir.join("agentd.sock")
-        );
-        xdg_responder
-            .join()
-            .expect("silent responder should finish");
-        system_responder
-            .join()
-            .expect("system responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_falls_through_when_candidate_connect_error_is_unclassified() {
-        let root = unique_dir("xdg-unknown");
-        let xdg_runtime_dir = root.join("x".repeat(96));
-        let xdg_agentd_dir = xdg_runtime_dir.join("agentd");
-        std::fs::create_dir_all(&xdg_agentd_dir).expect("xdg runtime dir should be created");
-        let xdg_socket_path = xdg_agentd_dir.join("agentd.sock");
-        std::fs::write(&xdg_socket_path, "").expect("candidate path should exist");
-
-        let system_runtime_dir = root.join("run-agentd");
-        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
-        let system_responder = spawn_agentd_ping_responder(&system_runtime_dir.join("agentd.sock"));
-
-        let layout = test_layout(
-            0,
-            Some(xdg_runtime_dir),
-            root.join("tmp-runtime"),
-            system_runtime_dir.clone(),
-        );
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("system path should resolve after unclassified connect error"),
-            system_runtime_dir.join("agentd.sock")
-        );
-        system_responder
-            .join()
-            .expect("system responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_rejects_insecure_tmp_dir_before_falling_through_to_system() {
-        let root = unique_dir("sys-reject-bad-tmp");
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o700))
-            .expect("permissions should be set");
-        let system_runtime_dir = root.join("run-agentd");
-        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
-
-        let layout = test_layout(
-            unsafe { libc::geteuid() + 1 },
-            None,
-            tmp_runtime_dir.clone(),
-            system_runtime_dir,
-        );
-
-        let error = layout
-            .client_socket_path()
-            .expect_err("insecure tmp runtime dir should halt discovery");
-        assert!(error.to_string().contains("owned by uid"));
-        assert!(
-            error
-                .to_string()
-                .contains(tmp_runtime_dir.to_string_lossy().as_ref())
+            layout.client_socket_path(),
+            xdg_runtime_dir.join("agentd/agentd.sock")
         );
     }
 
     #[test]
-    fn client_socket_path_rejects_tmp_runtime_dir_with_wrong_mode() {
-        let root = unique_dir("client-tmp-bad-mode");
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("permissions should be set");
-
-        let uid = unsafe { libc::geteuid() };
-        let layout = test_layout(uid, None, tmp_runtime_dir.clone(), root.join("run-agentd"));
-
-        let error = layout
-            .client_socket_path()
-            .expect_err("insecure tmp runtime dir should be rejected");
-        assert!(error.to_string().contains("mode 0700"));
-        assert!(
-            error
-                .to_string()
-                .contains(tmp_runtime_dir.to_string_lossy().as_ref())
-        );
-    }
-
-    #[test]
-    fn client_socket_path_skips_tmp_validation_for_root_without_xdg() {
-        let root = unique_dir("client-root-skip-insecure-tmp");
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("permissions should be set");
-
-        let system_runtime_dir = root.join("run-agentd");
-        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
-        let responder = spawn_agentd_ping_responder(&system_runtime_dir.join("agentd.sock"));
-
-        let layout = test_layout(0, None, tmp_runtime_dir, system_runtime_dir.clone());
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("root should resolve the system socket"),
-            system_runtime_dir.join("agentd.sock")
-        );
-        responder.join().expect("system responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_reports_undiscovered_daemon_when_no_default_socket_is_available() {
-        let root = unique_dir("client-run-fallback");
-        let layout = test_layout(
-            1000,
-            None,
-            root.join("missing-tmp-runtime"),
-            root.join("run-agentd"),
-        );
-
-        let error = layout
-            .client_socket_path()
-            .expect_err("exhausted discovery should report no daemon");
-        match error {
-            ClientSocketPathError::DaemonNotDiscovered { last_path } => {
-                assert_eq!(last_path, root.join("run-agentd/agentd.sock"));
-            }
-            other => panic!("expected daemon-not-discovered error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn client_socket_path_reports_undiscovered_daemon_when_final_system_socket_fails_probe() {
-        let root = unique_dir("client-system-wrong-final");
-        let system_runtime_dir = root.join("run-agentd");
-        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
-        let responder = spawn_wrong_protocol_responder(&system_runtime_dir.join("agentd.sock"));
-
-        let layout = test_layout(
-            1000,
-            None,
-            root.join("missing-tmp-runtime"),
-            system_runtime_dir.clone(),
-        );
-
-        let error = layout
-            .client_socket_path()
-            .expect_err("failed final probe should report no daemon");
-        match error {
-            ClientSocketPathError::DaemonNotDiscovered { last_path } => {
-                assert_eq!(last_path, system_runtime_dir.join("agentd.sock"));
-                assert_eq!(
-                    ClientSocketPathError::DaemonNotDiscovered { last_path }.to_string(),
-                    format!(
-                        "agentd is not running (socket {})",
-                        system_runtime_dir.join("agentd.sock").display()
-                    )
-                );
-            }
-            other => panic!("expected daemon-not-discovered error, got {other:?}"),
-        }
-        responder
-            .join()
-            .expect("wrong-protocol responder should finish");
-    }
-
-    #[test]
-    fn client_socket_path_ignores_tmp_socket_for_root_without_xdg() {
-        let root = unique_dir("client-root-ignore-tmp-socket");
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o700))
-            .expect("permissions should be set");
-        let _tmp_listener = UnixListener::bind(tmp_runtime_dir.join("agentd.sock"))
-            .expect("tmp runtime socket should bind");
-
-        let system_runtime_dir = root.join("run-agentd");
-        std::fs::create_dir_all(&system_runtime_dir).expect("system runtime dir should be created");
-        let responder = spawn_agentd_ping_responder(&system_runtime_dir.join("agentd.sock"));
-
-        let layout = test_layout(0, None, tmp_runtime_dir, system_runtime_dir.clone());
-
-        assert_eq!(
-            layout
-                .client_socket_path()
-                .expect("root should prefer the system socket"),
-            system_runtime_dir.join("agentd.sock")
-        );
-        responder.join().expect("system responder should finish");
-    }
-
-    #[test]
-    fn ensure_tmp_runtime_dir_creates_a_private_directory_when_missing() {
-        let root = unique_dir("ensure-tmp-runtime-created");
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        let uid = unsafe { libc::geteuid() };
-
-        ensure_tmp_runtime_dir(&tmp_runtime_dir, uid)
-            .expect("missing tmp runtime directory should be created");
-
-        let metadata =
-            std::fs::metadata(&tmp_runtime_dir).expect("tmp runtime metadata should be readable");
-        assert!(metadata.is_dir(), "tmp runtime path should be a directory");
-        assert_eq!(
-            metadata.permissions().mode() & 0o777,
-            0o700,
-            "tmp runtime directory should be created with mode 0700"
-        );
-    }
-
-    #[test]
-    fn ensure_tmp_runtime_dir_rejects_preexisting_directory_with_wrong_mode() {
-        let root = unique_dir("ensure-tmp-runtime-bad-mode");
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        std::fs::create_dir(&tmp_runtime_dir).expect("tmp runtime dir should be created");
-        std::fs::set_permissions(&tmp_runtime_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("permissions should be set");
-
-        let uid = unsafe { libc::geteuid() };
-        let error = ensure_tmp_runtime_dir(&tmp_runtime_dir, uid)
-            .expect_err("preexisting directory with wrong mode should be rejected");
-
-        assert!(error.to_string().contains("mode 0700"));
-        assert!(
-            error
-                .to_string()
-                .contains(tmp_runtime_dir.to_string_lossy().as_ref())
-        );
-    }
-
-    #[test]
-    fn ensure_tmp_runtime_dir_rejects_symlink_substitution_without_changing_target_mode() {
-        fn replace_missing_tmp_runtime_dir_with_symlink(path: &Path) {
-            let target = path.with_file_name("attacker-target");
-            std::os::unix::fs::symlink(target, path)
-                .expect("substituted symlink should be created");
-        }
-
-        let root = unique_dir("ensure-tmp-runtime-symlink-race");
-        let tmp_runtime_dir = root.join("tmp-runtime");
-        let attacker_target = root.join("attacker-target");
-        std::fs::create_dir(&attacker_target).expect("attacker target should be created");
-        std::fs::set_permissions(&attacker_target, std::fs::Permissions::from_mode(0o755))
-            .expect("attacker target mode should be set");
-        let uid = unsafe { libc::geteuid() };
-
-        set_before_tmp_runtime_dir_create_hook(
-            &tmp_runtime_dir,
-            replace_missing_tmp_runtime_dir_with_symlink,
-        );
-        let error = ensure_tmp_runtime_dir(&tmp_runtime_dir, uid)
-            .expect_err("substituted symlink should be rejected");
-        clear_before_tmp_runtime_dir_create_hook();
-
-        assert!(error.to_string().contains("not a directory"));
-        let target_metadata = std::fs::metadata(&attacker_target)
-            .expect("attacker target metadata should be readable");
-        assert_eq!(
-            target_metadata.permissions().mode() & 0o777,
-            0o755,
-            "symlink target mode should not be changed through the public tmp path"
-        );
-    }
-
-    #[test]
-    fn daemon_runtime_paths_follow_xdg_runtime_dir_when_present() {
-        let layout = test_layout(
-            1000,
-            Some(PathBuf::from("/xdg/runtime")),
-            PathBuf::from("/tmp/agentd-1000"),
-            PathBuf::from("/run/agentd"),
-        );
+    fn daemon_runtime_paths_resolve_from_the_same_xdg_runtime_dir() {
+        let xdg_runtime_dir = unique_dir("daemon-xdg");
+        let layout = test_layout(xdg_runtime_dir.clone());
 
         let runtime_paths = layout.daemon_runtime_paths();
         assert_eq!(
             runtime_paths.socket_path(),
-            Path::new("/xdg/runtime/agentd/agentd.sock")
+            xdg_runtime_dir.join("agentd/agentd.sock")
         );
         assert_eq!(
             runtime_paths.pid_file(),
-            Path::new("/xdg/runtime/agentd/agentd.pid")
+            xdg_runtime_dir.join("agentd/agentd.pid")
         );
     }
 
     #[test]
-    fn daemon_runtime_paths_use_user_tmp_dir_when_xdg_is_unset_for_non_root() {
-        let layout = test_layout(
-            1000,
-            None,
-            PathBuf::from("/tmp/agentd-1000"),
-            PathBuf::from("/run/agentd"),
-        );
+    fn client_socket_path_requires_xdg_runtime_dir_when_no_override_is_given() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
 
-        let runtime_paths = layout.daemon_runtime_paths();
-        assert_eq!(
-            runtime_paths.socket_path(),
-            Path::new("/tmp/agentd-1000/agentd.sock")
-        );
-        assert_eq!(
-            runtime_paths.pid_file(),
-            Path::new("/tmp/agentd-1000/agentd.pid")
-        );
+        let error = resolve_client_socket_path(None)
+            .expect_err("missing xdg runtime dir should be actionable");
+
+        assert!(error.to_string().contains("XDG_RUNTIME_DIR"));
+        assert!(error.to_string().contains("--socket-path"));
     }
 
     #[test]
-    fn daemon_runtime_paths_use_system_dir_when_running_as_root_without_xdg() {
-        let layout = test_layout(
-            0,
-            None,
-            PathBuf::from("/tmp/agentd-0"),
-            PathBuf::from("/run/agentd"),
-        );
+    fn relative_xdg_runtime_dir_is_rejected() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", "runtime");
+        }
 
-        let runtime_paths = layout.daemon_runtime_paths();
+        let error = default_daemon_runtime_paths()
+            .expect_err("relative xdg runtime dir should be rejected");
+
+        assert!(error.to_string().contains("XDG_RUNTIME_DIR"));
+        assert!(error.to_string().contains("absolute"));
+        assert!(error.to_string().contains("runtime"));
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+    }
+
+    #[test]
+    fn explicit_client_socket_path_bypasses_xdg_resolution() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+        let explicit_path = Path::new("relative/debug.sock");
+
         assert_eq!(
-            runtime_paths.socket_path(),
-            Path::new("/run/agentd/agentd.sock")
-        );
-        assert_eq!(
-            runtime_paths.pid_file(),
-            Path::new("/run/agentd/agentd.pid")
+            resolve_client_socket_path(Some(explicit_path))
+                .expect("explicit socket path should be accepted unchanged"),
+            explicit_path
         );
     }
 }

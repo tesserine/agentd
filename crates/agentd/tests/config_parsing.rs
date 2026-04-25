@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
 
 use agentd::config::{Config, ConfigError, DaemonConfig};
-use agentd::default_daemon_runtime_paths;
+use agentd::{RuntimePathError, default_daemon_runtime_paths};
 use agentd_runner::MountTargetValidationError;
 
 fn env_lock() -> &'static Mutex<()> {
@@ -62,6 +62,21 @@ fn write_temp_config(name: &str, contents: &str) -> PathBuf {
     path
 }
 
+fn set_xdg_runtime_dir(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "agentd-xdg-runtime-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    unsafe {
+        std::env::set_var("XDG_RUNTIME_DIR", &path);
+    }
+    path
+}
+
 fn write_temp_config_under(base_dir: &Path, name: &str, contents: &str) -> PathBuf {
     let unique = format!(
         "agentd-config-test-{name}-{}-{}",
@@ -114,6 +129,10 @@ read_only = true
 
 #[test]
 fn parses_agents_with_declarative_command_argv() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("declarative-command");
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -134,10 +153,17 @@ argv = ["site-builder", "exec"]
     assert_eq!(config.agents().len(), 1);
     assert_eq!(agent.name(), "site-builder");
     assert_eq!(agent.agent_command(), ["site-builder", "exec"]);
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
 fn parses_example_config_into_static_agent_settings() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("example-config");
     let config = Config::from_str(&example_config()).expect("example config should parse");
     let site_builder = config
         .agent("site-builder")
@@ -147,7 +173,8 @@ fn parses_example_config_into_static_agent_settings() {
         .expect("code-reviewer agent should exist");
 
     assert_eq!(config.agents().len(), 2);
-    let runtime_paths = default_daemon_runtime_paths();
+    let runtime_paths =
+        default_daemon_runtime_paths().expect("xdg runtime dir should provide daemon defaults");
     assert_eq!(config.daemon().socket_path(), runtime_paths.socket_path());
     assert_eq!(config.daemon().pid_file(), runtime_paths.pid_file());
     assert_eq!(site_builder.name(), "site-builder");
@@ -197,10 +224,17 @@ fn parses_example_config_into_static_agent_settings() {
         "AGENTD_GITHUB_TOKEN"
     );
     assert!(code_reviewer.mounts().is_empty());
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
 fn loading_config_resolves_relative_methodology_path_from_file_location() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("relative-methodology");
     let path = write_temp_config(
         "relative-path",
         r#"
@@ -223,10 +257,17 @@ argv = ["site-builder", "exec"]
             .expect("config file should have a parent directory")
             .join("../groundwork")
     );
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
 fn loading_config_from_a_relative_path_resolves_methodology_dir_from_an_absolute_base_dir() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("relative-load-methodology");
     let current_dir = std::env::current_dir().expect("current directory should be available");
     let path = write_temp_config_under(
         &current_dir.join("target"),
@@ -258,6 +299,9 @@ argv = ["site-builder", "exec"]
         agent.methodology_dir().is_absolute(),
         "loaded methodology_dir should be absolute when loaded from a file"
     );
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
@@ -461,6 +505,10 @@ argv = ["site-builder", "exec"]
 
 #[test]
 fn parses_default_daemon_paths_when_daemon_section_is_omitted() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("config-defaults");
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -474,9 +522,41 @@ argv = ["site-builder", "exec"]
     )
     .expect("config should parse with daemon defaults");
 
-    let runtime_paths = default_daemon_runtime_paths();
+    let runtime_paths =
+        default_daemon_runtime_paths().expect("xdg runtime dir should provide daemon defaults");
     assert_eq!(config.daemon().socket_path(), runtime_paths.socket_path());
     assert_eq!(config.daemon().pid_file(), runtime_paths.pid_file());
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+}
+
+#[test]
+fn default_daemon_paths_require_xdg_runtime_dir_when_omitted() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    let error = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect_err("omitted daemon paths should require xdg runtime dir");
+
+    match error {
+        ConfigError::DefaultDaemonRuntimePaths(RuntimePathError::XdgRuntimeDirUnavailable) => {}
+        other => panic!("expected missing xdg runtime dir error, got {other}"),
+    }
 }
 
 #[test]
@@ -608,6 +688,7 @@ fn daemon_audit_root_uses_xdg_state_home_before_home_fallback() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("audit-xdg-state");
     unsafe {
         std::env::set_var("XDG_STATE_HOME", "/tmp/xdg-state-home");
         std::env::set_var("HOME", "/tmp/home-fallback");
@@ -635,6 +716,7 @@ argv = ["site-builder", "exec"]
     );
 
     unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
         std::env::remove_var("XDG_STATE_HOME");
         std::env::remove_var("HOME");
     }
@@ -645,6 +727,7 @@ fn daemon_audit_root_falls_back_to_home_local_state_when_xdg_state_home_is_unset
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("audit-home-fallback");
     unsafe {
         std::env::remove_var("XDG_STATE_HOME");
         std::env::set_var("HOME", "/tmp/home-fallback");
@@ -672,6 +755,7 @@ argv = ["site-builder", "exec"]
     );
 
     unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
         std::env::remove_var("HOME");
     }
 }
@@ -681,6 +765,7 @@ fn daemon_audit_root_requires_a_usable_default_when_not_explicitly_configured() 
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("audit-missing-default");
     unsafe {
         std::env::remove_var("XDG_STATE_HOME");
         std::env::remove_var("HOME");
@@ -708,10 +793,17 @@ argv = ["site-builder", "exec"]
         error.to_string().contains("audit root"),
         "expected audit-root error, got {error}"
     );
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
 fn parses_repo_token_source_as_optional_clone_auth_lookup_key() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("repo-token-source");
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -729,10 +821,17 @@ argv = ["site-builder", "exec"]
     let agent = config.agent("site-builder").expect("agent should exist");
 
     assert_eq!(agent.repo_token_source(), Some("SITE_BUILDER_REPO_TOKEN"));
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
 fn parses_agent_repo_as_optional_default_clone_url() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("agent-repo");
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -750,10 +849,17 @@ argv = ["site-builder", "exec"]
     let agent = config.agent("site-builder").expect("agent should exist");
 
     assert_eq!(agent.repo(), Some("https://example.com/agentd.git"));
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
 fn parses_agent_schedule_as_optional_cron_expression() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("agent-schedule");
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -772,10 +878,17 @@ argv = ["site-builder", "exec"]
     let agent = config.agent("site-builder").expect("agent should exist");
 
     assert_eq!(agent.schedule(), Some("*/15 * * * *"));
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
 fn parses_agent_mounts_as_operator_declared_bind_mounts() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("agent-mounts");
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -817,6 +930,9 @@ read_only = false
         Path::new("/home/site-builder/.runa")
     );
     assert!(!agent.mounts()[1].read_only());
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
@@ -1073,6 +1189,10 @@ fn rejects_agent_mount_targets_that_collide_with_repo_directory() {
 
 #[test]
 fn normalizes_empty_repo_token_source_to_none() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("empty-repo-token-source");
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -1090,6 +1210,9 @@ argv = ["site-builder", "exec"]
     let agent = config.agent("site-builder").expect("agent should exist");
 
     assert_eq!(agent.repo_token_source(), None);
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]
@@ -1608,6 +1731,10 @@ argv = ["site-builder", "exec"]
 
 #[test]
 fn loading_daemon_config_uses_defaults_when_daemon_section_is_omitted() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("daemon-config-defaults");
     let path = write_temp_config(
         "daemon-only-defaults",
         r#"
@@ -1623,9 +1750,13 @@ argv = ["site-builder", "exec"]
 
     let config = DaemonConfig::load(&path).expect("daemon config should parse");
 
-    let runtime_paths = default_daemon_runtime_paths();
+    let runtime_paths =
+        default_daemon_runtime_paths().expect("xdg runtime dir should provide daemon defaults");
     assert_eq!(config.socket_path(), runtime_paths.socket_path());
     assert_eq!(config.pid_file(), runtime_paths.pid_file());
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
 }
 
 #[test]

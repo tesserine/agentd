@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `agentd --version` and `agentd run --version` now report the crate release
   version for operator deployment checks.
 - Agent configuration is now declarative and uses `[[agents]]` with `[agents.command].argv`; the old profile-table vocabulary and shell-wrapper command shape are removed as a pre-1.0 breaking change. agentd now composes `runa init` and `runa run --agent-command -- <argv>` itself, leaving runa-owned `.runa/` config formats to runa.
-- `agentd run` no longer reads `agentd.toml`: it now accepts `--socket-path <PATH>`, otherwise discovers the daemon socket through `$XDG_RUNTIME_DIR/agentd/agentd.sock` first when `XDG_RUNTIME_DIR` is set; for rootless XDG-unset clients it falls back to `/tmp/agentd-$UID/agentd.sock` with ownership and `0700` checks before `/run/agentd/agentd.sock`, while root XDG-unset clients use `/run/agentd/agentd.sock` directly; agent lookup and default-repo resolution now happen daemon-side.
+- `agentd run` no longer reads `agentd.toml`: it now accepts `--socket-path <PATH>`, otherwise resolves the daemon socket deterministically as `$XDG_RUNTIME_DIR/agentd/agentd.sock`; the implicit `/tmp/agentd-$UID/agentd.sock` and `/run/agentd/agentd.sock` fallbacks are removed as a pre-1.0 breaking change, and agent lookup plus default-repo resolution now happen daemon-side.
 - `agentd run` now accepts one per-invocation work surface without agent edits: `--work-unit <id>`, `--request <text>`, or `--artifact-type <type> --artifact-file <path>`. Request text is synthesized into `.runa/workspace/request/operator-input.json`, while artifact-file input places validated JSON at `.runa/workspace/<type>/<file-stem>.json`.
 - `agentd-runner` now declares its real platform contract at compile time: the crate targets Linux only, and downstream non-Linux builds now fail explicitly instead of compiling dead fallback code into a non-functional binary.
 - Session outcomes now follow the shared `commons` exit-code convention across `agentd` and `agentd-runner`: outcomes carry semantic labels plus raw exit codes, daemon and CLI surfaces report labels such as `blocked` and `generic_failure`, `agentd run` exits successfully for normal terminal states (`success`, `blocked`, `nothing_ready`), and timeout remains an agentd-layer outcome outside the shared exit-code vocabulary.
@@ -24,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Default `agentd run` socket discovery now requires a candidate socket to
-  answer the agentd Ping/Pong protocol before selecting it, and ambiguous
-  connect/probe errors now fall through instead of being treated as ready.
+- Default socket resolution now fails explicitly when `XDG_RUNTIME_DIR` is
+  unset, empty, or relative instead of silently selecting a fallback path that
+  may belong to a different daemon.
 - Session teardown now skips audit finalization and sealing when cleanup fails, leaving `agentd/session.json` intentionally incomplete instead of marking a session complete while its audit bind mount may still be live.
 - Completed session outcomes now remain caller-visible when only audit finalization fails after teardown cleanup succeeds.
 - Audit sealing now refuses multi-linked entries before rewriting metadata, preventing host file mode changes through hard-linked audit aliases.

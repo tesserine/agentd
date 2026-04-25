@@ -155,14 +155,14 @@ agentd daemon --config /etc/agentd/agentd.toml
 The daemon runs in the foreground, reconciles stale resources from prior runs,
 and binds a Unix socket for operator control. When `daemon.socket_path` and
 `daemon.pid_file` are omitted, agentd chooses coordinated defaults from the
-current runtime context:
+current XDG runtime context:
 
-- `$XDG_RUNTIME_DIR/agentd/agentd.sock` and `$XDG_RUNTIME_DIR/agentd/agentd.pid`
-  when `XDG_RUNTIME_DIR` is set
-- `/tmp/agentd-$UID/agentd.sock` and `/tmp/agentd-$UID/agentd.pid` for
-  rootless environments without `XDG_RUNTIME_DIR`
-- `/run/agentd/agentd.sock` and `/run/agentd/agentd.pid` for root-owned system
-  installs
+- `$XDG_RUNTIME_DIR/agentd/agentd.sock`
+- `$XDG_RUNTIME_DIR/agentd/agentd.pid`
+
+`XDG_RUNTIME_DIR` must be set to an absolute path for daemon defaults. Operators
+using a non-XDG deployment, such as a system-owned daemon under `/run`, should
+configure `daemon.socket_path` and `daemon.pid_file` explicitly.
 
 On SIGINT or SIGTERM, the daemon stops accepting connections and drains
 in-flight sessions; a second signal exits immediately.
@@ -188,20 +188,12 @@ Manual invocation supports exactly one intent surface at a time:
 either:
 
 - explicit override with `--socket-path <PATH>`
-- default discovery by runtime context:
-  `$XDG_RUNTIME_DIR/agentd/agentd.sock` first when `XDG_RUNTIME_DIR` is set;
-  for rootless XDG-unset clients, `/tmp/agentd-$UID/agentd.sock` before
-  `/run/agentd/agentd.sock`; for root XDG-unset clients,
-  `/run/agentd/agentd.sock` directly
+- default XDG resolution to `$XDG_RUNTIME_DIR/agentd/agentd.sock`
 
-Default discovery treats a candidate socket as available only when it answers
-the agentd socket protocol `Ping` request with `Pong`; unrelated listeners,
-silent sockets, malformed responses, and ambiguous probe errors fall through
-to the next default candidate.
-
-When the `/tmp/agentd-$UID/` fallback exists, the client requires that
-directory to be user-owned and mode `0700`; otherwise it refuses with an
-actionable error instead of trusting an insecure `/tmp` path.
+Default resolution is deterministic: the client does not probe candidate
+sockets and does not fall back to `/tmp` or `/run`. When `XDG_RUNTIME_DIR` is
+unset, empty, or relative, `agentd run` exits with an actionable error pointing
+to either setting `XDG_RUNTIME_DIR` or using `--socket-path`.
 
 Agent lookup and default-repo resolution now happen daemon-side. The client
 may omit the positional repo argument when the named agent declares `repo`,

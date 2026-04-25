@@ -18,7 +18,6 @@ use agentd_runner::{
 use crate::audit_root::prepare_audit_root;
 use crate::config::{Config, ConfigError};
 use crate::protocol::{RequestMessage, ResponseMessage};
-use crate::runtime_paths::{current_user_tmp_runtime_dir, ensure_tmp_runtime_dir};
 use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
 use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 
@@ -628,17 +627,6 @@ impl Drop for DaemonRuntime {
 }
 
 fn prepare_runtime_directory(path: &Path) -> Result<(), DaemonError> {
-    let uid = unsafe { libc::geteuid() };
-    if path == current_user_tmp_runtime_dir() {
-        ensure_tmp_runtime_dir(path, uid).map_err(|error| {
-            DaemonError::Io(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                error.to_string(),
-            ))
-        })?;
-        return Ok(());
-    }
-
     let created = ensure_directory_exists(path)?;
     if created {
         restrict_directory_permissions(path, RUNTIME_DIR_MODE)?;

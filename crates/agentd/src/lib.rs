@@ -21,5 +21,6 @@ pub use logging::{
     LogFormat, LoggingError, ResolvedLoggingConfig, configure_tracing, resolve_logging_config,
 };
 pub use runtime_paths::{
-    ClientSocketPathError, default_daemon_runtime_paths, resolve_client_socket_path,
+    ClientSocketPathError, RuntimePathError, default_daemon_runtime_paths,
+    resolve_client_socket_path,
 };

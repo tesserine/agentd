@@ -23,7 +23,7 @@ use croner::parser::{CronParser, Seconds, Year};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::runtime_paths::default_daemon_runtime_paths;
+use crate::runtime_paths::{RuntimePathError, default_daemon_runtime_paths};
 
 /// Validated daemon and agent registry parsed from a TOML configuration file.
 ///
@@ -68,7 +68,7 @@ impl Config {
 
     fn parse(contents: &str, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(contents)?;
-        let daemon = DaemonConfig::parse(raw.daemon, base_dir)?;
+        let raw_daemon = raw.daemon;
 
         if raw.agents.is_empty() {
             return Err(ConfigError::NoAgents);
@@ -267,6 +267,8 @@ impl Config {
                 agent_command,
             });
         }
+
+        let daemon = DaemonConfig::parse(raw_daemon, base_dir)?;
 
         Ok(Self { daemon, agents })
     }
@@ -501,12 +503,39 @@ impl DaemonConfig {
     }
 
     fn parse(raw: RawDaemonConfig, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
-        validate_non_empty("daemon.socket_path", &raw.socket_path, None, None)?;
-        validate_non_empty("daemon.pid_file", &raw.pid_file, None, None)?;
+        let default_runtime_paths = if raw.socket_path.is_none() || raw.pid_file.is_none() {
+            Some(default_daemon_runtime_paths().map_err(ConfigError::DefaultDaemonRuntimePaths)?)
+        } else {
+            None
+        };
+
+        let socket_path = match raw.socket_path {
+            Some(path) => {
+                validate_non_empty("daemon.socket_path", &path, None, None)?;
+                resolve_config_path(base_dir, &path)
+            }
+            None => default_runtime_paths
+                .as_ref()
+                .expect("default runtime paths should be resolved when socket_path is omitted")
+                .socket_path()
+                .to_path_buf(),
+        };
+
+        let pid_file = match raw.pid_file {
+            Some(path) => {
+                validate_non_empty("daemon.pid_file", &path, None, None)?;
+                resolve_config_path(base_dir, &path)
+            }
+            None => default_runtime_paths
+                .as_ref()
+                .expect("default runtime paths should be resolved when pid_file is omitted")
+                .pid_file()
+                .to_path_buf(),
+        };
 
         Ok(Self {
-            socket_path: resolve_config_path(base_dir, &raw.socket_path),
-            pid_file: resolve_config_path(base_dir, &raw.pid_file),
+            socket_path,
+            pid_file,
             audit_root: raw
                 .audit_root
                 .as_deref()
@@ -564,6 +593,8 @@ pub enum ConfigError {
     RelativeDaemonAuditRootPath { path: PathBuf },
     /// No usable default audit-root environment was available.
     MissingDaemonAuditRootDefault,
+    /// No usable default daemon runtime-path environment was available.
+    DefaultDaemonRuntimePaths(RuntimePathError),
     /// The resolved daemon audit root could not be created or probed.
     AuditRootNotWritable {
         path: PathBuf,
@@ -675,6 +706,9 @@ impl fmt::Display for ConfigError {
                 f,
                 "daemon audit root could not be resolved; set absolute XDG_STATE_HOME, set absolute HOME, or configure daemon.audit_root explicitly"
             ),
+            ConfigError::DefaultDaemonRuntimePaths(error) => {
+                write!(f, "daemon runtime paths could not be resolved; {error}")
+            }
             ConfigError::AuditRootNotWritable { path, error } => {
                 write!(
                     f,
@@ -735,6 +769,7 @@ impl std::error::Error for ConfigError {
         match self {
             ConfigError::Io(error) => Some(error),
             ConfigError::Parse(error) => Some(error),
+            ConfigError::DefaultDaemonRuntimePaths(error) => Some(error),
             ConfigError::AuditRootNotWritable { error, .. } => Some(error),
             _ => None,
         }
@@ -771,24 +806,12 @@ struct RawDaemonOnlyConfig {
     _agents: Option<toml::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDaemonConfig {
-    #[serde(default = "default_daemon_socket_path")]
-    socket_path: String,
-    #[serde(default = "default_daemon_pid_file")]
-    pid_file: String,
+    socket_path: Option<String>,
+    pid_file: Option<String>,
     audit_root: Option<String>,
-}
-
-impl Default for RawDaemonConfig {
-    fn default() -> Self {
-        Self {
-            socket_path: default_daemon_socket_path(),
-            pid_file: default_daemon_pid_file(),
-            audit_root: None,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -826,20 +849,6 @@ struct RawMountConfig {
 struct RawCredentialConfig {
     name: String,
     source: String,
-}
-
-fn default_daemon_socket_path() -> String {
-    default_daemon_runtime_paths()
-        .socket_path()
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn default_daemon_pid_file() -> String {
-    default_daemon_runtime_paths()
-        .pid_file()
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn normalize_path_lexically(path: &Path) -> String {
