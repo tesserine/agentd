@@ -142,6 +142,8 @@ requires rootless Podman for container execution. Operational deployments also
 assume systemd user services and the SELinux considerations described in
 `ARCHITECTURE.md`.
 
+Confirm the deployed binary with `agentd --version`.
+
 Start the daemon:
 
 ```bash

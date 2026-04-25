@@ -203,6 +203,46 @@ fn start_recording_test_daemon(
 }
 
 #[test]
+fn binary_top_level_version_reports_crate_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .arg("--version")
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        output.status.success(),
+        "version command should exit successfully: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert_eq!(stdout, format!("agentd {}\n", env!("CARGO_PKG_VERSION")));
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn binary_run_version_reports_crate_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args(["run", "--version"])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        output.status.success(),
+        "run version command should exit successfully: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert_eq!(stdout, format!("agentd {}\n", env!("CARGO_PKG_VERSION")));
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert_eq!(stderr, "");
+}
+
+#[test]
 fn binary_daemon_subcommand_starts_daemon_mode() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-{}-{}",
