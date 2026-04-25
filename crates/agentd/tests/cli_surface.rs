@@ -421,6 +421,26 @@ fn binary_run_command_reports_clear_error_when_daemon_is_not_running() {
 }
 
 #[test]
+fn binary_run_command_requires_xdg_runtime_dir_without_socket_override() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args(["run", "site-builder"])
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        !output.status.success(),
+        "run command should fail without xdg runtime dir"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+    assert!(
+        stderr.contains("XDG_RUNTIME_DIR") && stderr.contains("--socket-path"),
+        "expected actionable xdg runtime error, got: {stderr}"
+    );
+}
+
+#[test]
 fn binary_run_command_rejects_root_level_config() {
     let runtime_dir = std::env::temp_dir().join(format!(
         "agentd-cli-runtime-root-config-rejected-{}-{}",

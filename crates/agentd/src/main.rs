@@ -6,8 +6,8 @@ use std::{error::Error, fmt};
 
 use agentd::config::Config;
 use agentd::{
-    ClientError, ClientSocketPathError, RunRequest, RunnerSessionExecutor, configure_tracing,
-    request_run, resolve_client_socket_path, run_daemon_until_shutdown,
+    RunRequest, RunnerSessionExecutor, configure_tracing, request_run, resolve_client_socket_path,
+    run_daemon_until_shutdown,
 };
 use agentd_runner::InvocationInput;
 use clap::{Args, Parser, Subcommand};
@@ -222,13 +222,7 @@ fn run_client(
     artifact_file: Option<PathBuf>,
     artifact_type: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = match resolve_client_socket_path(explicit_socket_path) {
-        Ok(path) => path,
-        Err(ClientSocketPathError::DaemonNotDiscovered { last_path }) => {
-            return Err(Box::new(ClientError::DaemonNotRunning { path: last_path }));
-        }
-        Err(error) => return Err(Box::new(error)),
-    };
+    let socket_path = resolve_client_socket_path(explicit_socket_path)?;
     let input = resolve_invocation_input(request, artifact_file, artifact_type)?;
     let outcome = request_run(
         &socket_path,
