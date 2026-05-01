@@ -1481,12 +1481,19 @@ impl Drop for SessionFixture {
 }
 
 fn skip_if_podman_unavailable(test_name: &str) -> bool {
-    if podman_available() {
-        return false;
+    if !podman_available() {
+        eprintln!("skipping {test_name}: podman is unavailable");
+        return true;
     }
 
-    eprintln!("skipping {test_name}: podman is unavailable");
-    true
+    if !direct_audit_sealing_available() {
+        eprintln!(
+            "skipping {test_name}: current UID cannot directly chmod session-written audit files"
+        );
+        return true;
+    }
+
+    false
 }
 
 fn podman_available() -> bool {
@@ -1500,6 +1507,58 @@ fn podman_available() -> bool {
         Ok(status) => status.success(),
         Err(_) => false,
     }
+}
+
+fn direct_audit_sealing_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let _guard = podman_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        probe_direct_audit_sealing()
+    })
+}
+
+fn probe_direct_audit_sealing() -> bool {
+    let audit_root = unique_temp_dir("agentd-runner-direct-audit-probe");
+    if fs::create_dir_all(&audit_root).is_err() {
+        return false;
+    }
+    if fs::set_permissions(&audit_root, fs::Permissions::from_mode(0o777)).is_err() {
+        let _ = fs::remove_dir_all(&audit_root);
+        return false;
+    }
+
+    let mount_arg = format!("{}:/audit:Z", audit_root.display());
+    // Real Podman lifecycle tests only model the supported direct-seal
+    // deployment when the host test process can chmod files written by the
+    // session user's mapped UID.
+    let status = Command::new("podman")
+        .args([
+            "run",
+            "--rm",
+            "--user",
+            "1000:1000",
+            "-v",
+            &mount_arg,
+            "docker.io/library/debian:bookworm-slim",
+            "sh",
+            "-lc",
+            "printf 'probe\\n' > /audit/probe-file",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let can_seal = status.is_ok_and(|status| status.success())
+        && fs::set_permissions(
+            audit_root.join("probe-file"),
+            fs::Permissions::from_mode(0o444),
+        )
+        .is_ok();
+
+    let _ = fs::remove_dir_all(&audit_root);
+    can_seal
 }
 
 fn podman_test_lock() -> &'static Mutex<()> {

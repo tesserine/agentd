@@ -27,7 +27,7 @@ nothing more.
 
 v0.1.1 — early development.
 
-The session lifecycle works end-to-end: agent configuration, foreground daemon
+The session lifecycle works end-to-end: agent configuration, containerized daemon
 startup, operator-triggered sessions, ephemeral Podman containers, credential
 injection, execution, and teardown. Startup reconciliation cleans stale
 resources from prior runs. Structured JSON tracing provides operational
@@ -135,34 +135,95 @@ fires are not backfilled after downtime. Persistent audit records default to
 `$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set
 `daemon.audit_root` to override that for system installations.
 
-## Running a Session
+## Deployment
 
-Build from source with `cargo build --release`. agentd targets Linux and
-requires rootless Podman for container execution. Operational deployments also
-assume systemd user services and the SELinux considerations described in
-`ARCHITECTURE.md`.
-
-Confirm the deployed binary with `agentd --version`.
-
-Start the daemon:
+The supported daemon deployment shape is a locally built container image run by
+Quadlet. Build the image on the target host or another trusted build host with
+access to the checked-out source or release tag:
 
 ```bash
-agentd daemon --config /etc/agentd/agentd.toml
+podman build --tag localhost/agentd:0.1.1 .
 ```
 
-`agentd` with no subcommand is equivalent to `agentd daemon`.
+The image's default command starts the daemon and reads
+`/etc/agentd/agentd.toml`. The image includes the `agentd` binary and the
+Podman client. The daemon container is a supervisor for ordinary agentd session
+containers; the session containers themselves are not Quadlets.
 
-The daemon runs in the foreground, reconciles stale resources from prior runs,
-and binds a Unix socket for operator control. When `daemon.socket_path` and
-`daemon.pid_file` are omitted, agentd chooses coordinated defaults from the
-current XDG runtime context:
+The daemon container talks to the host's rootless Podman service through a
+mounted Podman socket. The image expects that socket at
+`/run/podman/podman.sock` and sets `CONTAINER_HOST` accordingly. On a typical
+rootless host, mount the user's Podman socket from
+`$XDG_RUNTIME_DIR/podman/podman.sock` to that in-container path.
+
+Use explicit daemon runtime paths in the config so the socket can be mounted
+back to the host for `agentd run` clients:
+
+```toml
+[daemon]
+socket_path = "/run/agentd/agentd.sock"
+pid_file = "/run/agentd/agentd.pid"
+audit_root = "/var/lib/tesserine/audit"
+```
+
+Mount the host runtime directory that should hold the client socket to
+`/run/agentd` in the daemon container. With a host mount such as
+`$XDG_RUNTIME_DIR/agentd:/run/agentd`, host-side clients can use the normal
+default `$XDG_RUNTIME_DIR/agentd/agentd.sock` path, or pass the same host path
+with `--socket-path`.
+
+Path visibility matters because the daemon process and the host Podman service
+see different filesystems. The config file, socket path, PID file, credential
+environment, and mounted Podman socket must be reachable by the daemon process
+inside the daemon container. Session bind sources that the daemon opens and
+then forwards to host Podman must also be valid from the host Podman service's
+view: `methodology_dir`, each agent-declared `mounts.source`, `audit_root`, and
+the runner staging directory. This image sets `TMPDIR=/var/lib/agentd/tmp`, so
+the host must also expose that staging directory at `/var/lib/agentd/tmp` when
+using the image default. Mount host `/var/lib/agentd/tmp` to container
+`/var/lib/agentd/tmp`, or set `TMPDIR` to another path the operator can expose
+at the same absolute path on both the host and daemon container. In practice,
+mount all shared session source trees into the daemon container at the same
+absolute paths recorded in `agentd.toml` or used by `TMPDIR`.
+
+Audit sealing is performed by the daemon process with direct filesystem chmod
+operations; it does not enter Podman's user namespace during finalization. The
+startup probe verifies the daemon can create, chmod, restore, and remove its
+own probe entries under `audit_root`. That probe is necessary but not
+sufficient: deployment must also ensure files written by session containers are
+within the daemon's chmod authority. The primary supported contract is UID
+alignment. For a default rootless Podman map, session container UID `N > 0`
+appears on the host as `subuid_start + (N - 1)`, so the daemon's effective host
+identity must match the mapped writer UID for the unprivileged agent user, or
+the daemon must receive equivalent authority such as `CAP_FOWNER` over the
+audit tree. That same daemon identity still needs access to the mounted Podman
+socket and configured runtime paths.
+
+A host-installed `agentd` binary remains useful as a same-build CLI client for
+`agentd run`, but host-binary daemon supervision is out of band for supported
+deployments.
+
+Confirm the image contents with:
+
+```bash
+podman run --rm --entrypoint /usr/local/bin/agentd localhost/agentd:0.1.1 --version
+```
+
+## Running a Session
+
+The daemon runs in the container, reconciles stale resources from prior runs,
+and binds a Unix socket for operator control. `agentd` with no subcommand is
+equivalent to `agentd daemon`.
+
+When `daemon.socket_path` and `daemon.pid_file` are omitted, agentd chooses
+coordinated defaults from the current XDG runtime context:
 
 - `$XDG_RUNTIME_DIR/agentd/agentd.sock`
 - `$XDG_RUNTIME_DIR/agentd/agentd.pid`
 
-`XDG_RUNTIME_DIR` must be set to an absolute path for daemon defaults. Operators
-using a non-XDG deployment, such as a system-owned daemon under `/run`, should
-configure `daemon.socket_path` and `daemon.pid_file` explicitly.
+`XDG_RUNTIME_DIR` must be set to an absolute path for daemon defaults. Container
+deployments should configure `daemon.socket_path` and `daemon.pid_file`
+explicitly so the daemon socket location is also a deliberate host mount.
 
 On SIGINT or SIGTERM, the daemon stops accepting connections and drains
 in-flight sessions; a second signal exits immediately.

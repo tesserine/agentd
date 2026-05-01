@@ -22,6 +22,44 @@ failure is intentional and matches the runtime contract: rootless Podman,
 systemd user services, SELinux-aware host filesystem handling, and Linux UID
 mapping semantics are all part of the supported execution model.
 
+### Deployment Shape
+
+The supported daemon deployment is a Quadlet-managed container image. The
+containerized daemon is still the same foreground `agentd daemon` process: it
+parses one config file, owns the Unix socket intake, schedules work, and
+dispatches sessions into `agentd-runner`. Quadlet supervises the persistent
+daemon container only. Session containers remain normal short-lived
+agentd-runner Podman workloads and are not represented as Quadlet units.
+
+The daemon image includes the Podman client and talks to the host's rootless
+Podman service through a mounted Podman socket. In the repository image, the
+client is configured with `CONTAINER_HOST=unix:///run/podman/podman.sock`, so
+deployment mounts the host user's Podman socket to that in-container path. The
+daemon does not run a nested Podman service and does not own a second container
+storage graph.
+
+Path responsibilities split across the daemon container and the host Podman
+service:
+
+| Path class | Who opens it | Deployment requirement |
+|---|---|---|
+| Daemon config | daemon process | Mount the config at the documented in-image config path. |
+| Daemon socket and PID file | daemon process; host clients use the socket through the host mount | Configure explicit daemon runtime paths inside the container and mount their parent directory from the host runtime location. |
+| Host Podman socket | daemon process through the Podman client | Mount the host rootless Podman socket to the path named by `CONTAINER_HOST`. |
+| Credential sources | daemon process environment | Inject the environment variables named by agent credentials into the daemon container. |
+| `methodology_dir` and request/artifact schemas | daemon process reads; host Podman resolves staged bind sources | The path must exist for the daemon and be valid from the host Podman service's filesystem view. |
+| `audit_root` | daemon process creates/chmods; host Podman resolves staged bind sources; session containers write audit entries | Mount durable host storage at the configured audit root, with the daemon UID aligned to the session writer's mapped host UID or granted equivalent chmod authority. |
+| Agent-declared `mounts.source` | daemon process canonicalizes; host Podman resolves staged bind sources | Mount or expose each source so the daemon and host Podman agree on the source path. |
+| Runner staging directory | daemon process writes; host Podman resolves staged bind sources | The path named by `TMPDIR` must exist at the same absolute path for the daemon container and host Podman. The image default requires host `/var/lib/agentd/tmp` mounted to container `/var/lib/agentd/tmp`, or a changed `TMPDIR` exposed identically on both sides. |
+
+The path split follows directly from the current runner implementation. The
+daemon process validates and canonicalizes methodology, audit, additional
+mount, invocation-input, and staging paths, then sends bind-mount source
+strings to the host Podman service. Podman resolves those source strings on the
+host that owns the socket, not inside the daemon container. Any future
+host/container path translation would be a code change, not a deployment
+property.
+
 ### Terminology
 
 - **Agent**: a named, reusable environment specification in the daemon config — base image, methodology, optional default repo, optional schedule, credentials, and command. What the operator declares.
@@ -94,12 +132,14 @@ separate ownership scopes. Only after that cleanup succeeds does the daemon
 bind its Unix socket and begin accepting requests.
 
 The daemon's Unix socket is the single intake for all session triggers. Manual
-CLI invocation connects to that socket as a client. Scheduling policy also
-connects to that socket as a client when it decides work should start. The
-daemon accepts those run requests uniformly and dispatches them into session
-execution. In `v0.1.x` this socket protocol is internal and unversioned:
-daemon and CLI must be the same build, and replacing the binary requires a
-daemon restart before new CLI invocations are supported.
+CLI invocation connects to that socket as a client. In the supported
+containerized daemon deployment, the socket is created inside the daemon
+container at the configured path and exposed to the host through a bind mount.
+Scheduling policy also connects to that socket as a client when it decides work
+should start. The daemon accepts those run requests uniformly and dispatches
+them into session execution. In `v0.1.x` this socket protocol is internal and unversioned:
+daemon and CLI must be the same build, and replacing the daemon image requires
+restarting the daemon before new CLI invocations are supported.
 
 Manual CLI dispatch is intentionally decoupled from daemon-owned config files.
 `agentd run` resolves the daemon through a socket path rather than by reading
@@ -225,6 +265,24 @@ SELinux-enforcing hosts such as Fedora CoreOS. `agentd/session.json` is not
 mounted into the container; it stays host-only so runa-written state and
 agentd-written metadata are distinguishable on disk without disambiguation.
 
+Final audit sealing is daemon-local. agentd uses direct filesystem operations
+to refuse unsafe multi-linked entries and chmod completed audit records; it
+does not invoke a Podman user-namespace helper. The startup audit-root probe
+verifies the daemon can create, chmod, restore, and remove probe entries it owns
+under the resolved audit root. That probe catches local path and permission
+failures, but it does not prove authority over future session-written files.
+The deployment contract supplies that second half: files written by the session
+container's unprivileged agent user must be owned by an identity the daemon can
+chmod.
+
+The primary supported contract is UID alignment. With the default rootless
+Podman user namespace mapping, a session container UID `N > 0` is represented
+on the host as `subuid_start + (N - 1)`. The daemon container's effective host
+identity must match the mapped host UID for the session's unprivileged agent
+user, or deployment must grant equivalent host-level chmod authority such as
+`CAP_FOWNER` over the audit tree. That daemon identity must also retain access
+to the mounted Podman socket and the configured runtime paths.
+
 Host audit records live under the resolved audit root, by default
 `$XDG_STATE_HOME/tesserine/audit/<agent>/<session_id>/` or
 `$HOME/.local/state/tesserine/audit/<agent>/<session_id>/` when
@@ -258,13 +316,14 @@ completion, agentd seals directories to `0555` and non-symlink entries to
 deployments such as babbie, that tradeoff is acceptable; a multi-tenant host
 would need a different permission model before deployment.
 
-The startup writability probe is intentionally local-filesystem scoped. It
-verifies that the daemon can create and remove a file under the resolved audit
-root before dispatch begins. That catches ordinary permission and path errors
-early, but it does not validate network-filesystem behavior beyond the probe;
-NFS and similar targets can still fail later with semantics the probe does not
-model. If probe-file creation succeeds but probe-file removal fails, the audit
-root can retain that uniquely named probe file as leftover cruft.
+The startup audit-root probe is intentionally local-filesystem scoped. It
+verifies that the daemon can create, chmod, restore, and remove daemon-owned
+probe entries under the resolved audit root before dispatch begins. That catches
+ordinary permission and path errors early, but it does not validate authority
+over future session-written files or network-filesystem behavior beyond the
+probe; NFS and similar targets can still fail later with semantics the probe
+does not model. If probe cleanup fails, the audit root can retain that uniquely
+named probe tree as leftover cruft.
 
 Session ids are 16 lowercase hex characters generated from `getrandom`, giving
 roughly `2^64` possible values per agent and a birthday bound near `2^32`
@@ -276,7 +335,7 @@ risk envelope.
 
 ## 6. Credential Flow
 
-Credentials are declared by agent configuration as daemon-side environment variable names. For each configured credential, the daemon resolves `source` with `std::env::var(source)` from its own process environment before calling `agentd-runner`. Operators provide those values through normal host mechanisms such as systemd `EnvironmentFile=`, shell exports, or container environment injection. During session setup, the runner receives only the already-resolved credential values, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
+Credentials are declared by agent configuration as daemon-side environment variable names. For each configured credential, the daemon resolves `source` with `std::env::var(source)` from its own process environment before calling `agentd-runner`. Operators provide those values to the daemon container through normal container environment injection, such as Quadlet environment directives or mounted environment files. During session setup, the runner receives only the already-resolved credential values, creates Podman-managed ephemeral secrets for non-empty values, and injects those values into the execution environment as environment variables without placing the secret values on the Podman command line. Empty assignments are injected directly as `NAME=` because Podman secrets reject zero-byte payloads. Once the container reaches the running state, the runner removes the backing Podman secret objects and relies on the in-container environment copy for the rest of the session.
 
 Because startup reconciliation is scoped per daemon instance rather than to the
 whole Podman namespace, the daemon removes only runner-managed resources whose

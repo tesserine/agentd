@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 
+- The supported daemon deployment shape is now a locally built container image
+  for Quadlet-managed operation; host-installed daemon supervision is out of
+  band, while `agentd run` remains a host-side same-build client.
 - `agentd --version` and `agentd run --version` now report the crate release
   version for operator deployment checks.
 - Agent configuration is now declarative and uses `[[agents]]` with `[agents.command].argv`; the old profile-table vocabulary and shell-wrapper command shape are removed as a pre-1.0 breaking change. agentd now composes `runa init` and `runa run --agent-command -- <argv>` itself, leaving runa-owned `.runa/` config formats to runa.
@@ -30,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session teardown now skips audit finalization and sealing when cleanup fails, leaving `agentd/session.json` intentionally incomplete instead of marking a session complete while its audit bind mount may still be live.
 - Completed session outcomes now remain caller-visible when only audit finalization fails after teardown cleanup succeeds.
 - Audit sealing now refuses multi-linked entries before rewriting metadata, preventing host file mode changes through hard-linked audit aliases.
+- Audit sealing now uses daemon-local filesystem chmod operations only, avoiding remote Podman client failures during finalization and surfacing the required audit-root UID alignment at daemon startup.
 - Allocation rollback failure now preserves the incomplete audit-record signal instead of finalizing `agentd/session.json` after leaked cleanup state.
 - Manual request-text input now rejects methodologies that do not declare canonical request support or that advertise an unsupported canonical request version, instead of synthesizing unchecked workspace content.
 
