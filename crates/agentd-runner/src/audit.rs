@@ -1,4 +1,3 @@
-use crate::podman::run_podman_command;
 use crate::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use serde::Serialize;
 #[cfg(test)]
@@ -105,13 +104,7 @@ pub(crate) fn finalize_session_audit_record(
     record: &SessionAuditRecord,
     completion: SessionAuditCompletion<'_>,
 ) -> Result<(), RunnerError> {
-    match preflight_validate_sealable_tree(&record.record_dir) {
-        Ok(()) => {}
-        Err(RunnerError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            validate_sealable_tree_with_podman_unshare(&record.record_dir)?;
-        }
-        Err(error) => return Err(error),
-    }
+    preflight_validate_sealable_tree(&record.record_dir)?;
     let (outcome, exit_code) = match completion {
         SessionAuditCompletion::Outcome(outcome) => (Some(outcome.label()), outcome.exit_code()),
         SessionAuditCompletion::Error => (Some("error"), None),
@@ -204,13 +197,7 @@ fn set_active_audit_directory_permissions(path: &Path) -> Result<(), RunnerError
 }
 
 fn seal_session_audit_record(record: &SessionAuditRecord) -> Result<(), RunnerError> {
-    match seal_path_recursive(record, &record.record_dir) {
-        Ok(()) => Ok(()),
-        Err(RunnerError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            seal_with_podman_unshare(record)
-        }
-        Err(error) => Err(error),
-    }
+    seal_path_recursive(record, &record.record_dir)
 }
 
 fn preflight_validate_sealable_tree(path: &Path) -> Result<(), RunnerError> {
@@ -274,87 +261,6 @@ fn should_skip_sealing_path(record: &SessionAuditRecord, path: &Path) -> bool {
             .metadata_path
             .parent()
             .is_some_and(|metadata_dir| path == metadata_dir)
-}
-
-fn chmod_mode_arg(mode: u32) -> String {
-    format!("{mode:o}")
-}
-
-fn seal_with_podman_unshare(record: &SessionAuditRecord) -> Result<(), RunnerError> {
-    let record_root = record.record_dir.display().to_string();
-    let metadata_dir = record
-        .metadata_path
-        .parent()
-        .expect("metadata path should have a parent directory")
-        .display()
-        .to_string();
-    let metadata_path = record.metadata_path.display().to_string();
-
-    run_podman_command(vec![
-        "unshare".to_string(),
-        "find".to_string(),
-        "-P".to_string(),
-        record_root.clone(),
-        "-mindepth".to_string(),
-        "1".to_string(),
-        "-type".to_string(),
-        "d".to_string(),
-        "!".to_string(),
-        "-path".to_string(),
-        metadata_dir,
-        "-exec".to_string(),
-        "chmod".to_string(),
-        chmod_mode_arg(SEALED_DIRECTORY_MODE),
-        "{}".to_string(),
-        "+".to_string(),
-    ])?;
-    run_podman_command(vec![
-        "unshare".to_string(),
-        "find".to_string(),
-        "-P".to_string(),
-        record_root,
-        "!".to_string(),
-        "-type".to_string(),
-        "d".to_string(),
-        "!".to_string(),
-        "-type".to_string(),
-        "l".to_string(),
-        "!".to_string(),
-        "-path".to_string(),
-        metadata_path,
-        "-exec".to_string(),
-        "chmod".to_string(),
-        chmod_mode_arg(SEALED_FILE_MODE),
-        "{}".to_string(),
-        "+".to_string(),
-    ])
-    .map(|_| ())
-}
-
-fn validate_sealable_tree_with_podman_unshare(path: &Path) -> Result<(), RunnerError> {
-    let output = run_podman_command(vec![
-        "unshare".to_string(),
-        "find".to_string(),
-        "-P".to_string(),
-        path.display().to_string(),
-        "!".to_string(),
-        "-type".to_string(),
-        "d".to_string(),
-        "!".to_string(),
-        "-type".to_string(),
-        "l".to_string(),
-        "-links".to_string(),
-        "+1".to_string(),
-        "-print".to_string(),
-    ])?;
-
-    if let Some(first_path) = output.lines().find(|line| !line.trim().is_empty()) {
-        return Err(RunnerError::Io(std::io::Error::other(format!(
-            "refusing to seal multi-linked audit entry {first_path}"
-        ))));
-    }
-
-    Ok(())
 }
 
 fn write_atomic(path: &Path, payload: &[u8], file_mode: Option<u32>) -> Result<(), RunnerError> {
@@ -756,6 +662,10 @@ mod tests {
         .expect("audit record should be created");
         fs::write(record.runa_dir.join("artifact.txt"), "persisted\n")
             .expect("runa artifact should be writable before sealing");
+        let nested_dir = record.runa_dir.join("nested");
+        fs::create_dir_all(&nested_dir).expect("nested runa dir should be created");
+        fs::write(nested_dir.join("nested-artifact.txt"), "nested\n")
+            .expect("nested runa artifact should be writable before sealing");
 
         super::finalize_session_audit_record(
             &record,
@@ -779,8 +689,38 @@ mod tests {
             .expect("metadata file should exist")
             .permissions()
             .mode();
+        let artifact_mode = fs::metadata(record.runa_dir.join("artifact.txt"))
+            .expect("runa artifact metadata should exist")
+            .permissions()
+            .mode();
+        let nested_dir_mode = fs::metadata(&nested_dir)
+            .expect("nested runa dir metadata should exist")
+            .permissions()
+            .mode();
+        let nested_artifact_mode = fs::metadata(nested_dir.join("nested-artifact.txt"))
+            .expect("nested runa artifact metadata should exist")
+            .permissions()
+            .mode();
+        let metadata_dir_mode = fs::metadata(
+            record
+                .metadata_path
+                .parent()
+                .expect("metadata path should have parent"),
+        )
+        .expect("metadata dir metadata should exist")
+        .permissions()
+        .mode();
+        let record_dir_mode = fs::metadata(&record.record_dir)
+            .expect("record dir metadata should exist")
+            .permissions()
+            .mode();
         assert_eq!(runa_mode & 0o777, 0o555);
+        assert_eq!(artifact_mode & 0o777, 0o444);
+        assert_eq!(nested_dir_mode & 0o777, 0o555);
+        assert_eq!(nested_artifact_mode & 0o777, 0o444);
         assert_eq!(metadata_mode & 0o777, 0o444);
+        assert_eq!(metadata_dir_mode & 0o777, 0o755);
+        assert_eq!(record_dir_mode & 0o777, 0o755);
 
         make_tree_writable(&root);
 
@@ -930,5 +870,23 @@ mod tests {
         let timestamp = current_timestamp().expect("timestamp should format");
         assert!(timestamp.ends_with('Z'));
         assert!(timestamp.contains('T'));
+    }
+
+    #[test]
+    fn audit_finalization_has_no_unshare_subprocess_dependency() {
+        let source = include_str!("audit.rs");
+        let implementation_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("audit.rs should contain implementation before tests");
+
+        assert!(
+            !implementation_source.contains("run_podman_command"),
+            "audit finalization must use direct filesystem operations, not podman subprocesses"
+        );
+        assert!(
+            !implementation_source.contains("\"unshare\""),
+            "audit finalization must not invoke a user-namespace helper"
+        );
     }
 }

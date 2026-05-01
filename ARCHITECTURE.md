@@ -48,7 +48,7 @@ service:
 | Host Podman socket | daemon process through the Podman client | Mount the host rootless Podman socket to the path named by `CONTAINER_HOST`. |
 | Credential sources | daemon process environment | Inject the environment variables named by agent credentials into the daemon container. |
 | `methodology_dir` and request/artifact schemas | daemon process reads; host Podman resolves staged bind sources | The path must exist for the daemon and be valid from the host Podman service's filesystem view. |
-| `audit_root` | daemon process creates/writes; host Podman resolves staged bind sources | Mount durable host storage at the configured audit root. |
+| `audit_root` | daemon process creates/chmods; host Podman resolves staged bind sources; session containers write audit entries | Mount durable host storage at the configured audit root, with the daemon UID aligned to the session writer's mapped host UID or granted equivalent chmod authority. |
 | Agent-declared `mounts.source` | daemon process canonicalizes; host Podman resolves staged bind sources | Mount or expose each source so the daemon and host Podman agree on the source path. |
 | Runner staging directory | daemon process writes; host Podman resolves staged bind sources | The image sets `TMPDIR=/var/lib/agentd/tmp`; mount a host directory there. |
 
@@ -265,6 +265,24 @@ SELinux-enforcing hosts such as Fedora CoreOS. `agentd/session.json` is not
 mounted into the container; it stays host-only so runa-written state and
 agentd-written metadata are distinguishable on disk without disambiguation.
 
+Final audit sealing is daemon-local. agentd uses direct filesystem operations
+to refuse unsafe multi-linked entries and chmod completed audit records; it
+does not invoke a Podman user-namespace helper. The startup audit-root probe
+verifies the daemon can create, chmod, restore, and remove probe entries it owns
+under the resolved audit root. That probe catches local path and permission
+failures, but it does not prove authority over future session-written files.
+The deployment contract supplies that second half: files written by the session
+container's unprivileged agent user must be owned by an identity the daemon can
+chmod.
+
+The primary supported contract is UID alignment. With the default rootless
+Podman user namespace mapping, a session container UID `N > 0` is represented
+on the host as `subuid_start + (N - 1)`. The daemon container's effective host
+identity must match the mapped host UID for the session's unprivileged agent
+user, or deployment must grant equivalent host-level chmod authority such as
+`CAP_FOWNER` over the audit tree. That daemon identity must also retain access
+to the mounted Podman socket and the configured runtime paths.
+
 Host audit records live under the resolved audit root, by default
 `$XDG_STATE_HOME/tesserine/audit/<agent>/<session_id>/` or
 `$HOME/.local/state/tesserine/audit/<agent>/<session_id>/` when
@@ -298,13 +316,14 @@ completion, agentd seals directories to `0555` and non-symlink entries to
 deployments such as babbie, that tradeoff is acceptable; a multi-tenant host
 would need a different permission model before deployment.
 
-The startup writability probe is intentionally local-filesystem scoped. It
-verifies that the daemon can create and remove a file under the resolved audit
-root before dispatch begins. That catches ordinary permission and path errors
-early, but it does not validate network-filesystem behavior beyond the probe;
-NFS and similar targets can still fail later with semantics the probe does not
-model. If probe-file creation succeeds but probe-file removal fails, the audit
-root can retain that uniquely named probe file as leftover cruft.
+The startup audit-root probe is intentionally local-filesystem scoped. It
+verifies that the daemon can create, chmod, restore, and remove daemon-owned
+probe entries under the resolved audit root before dispatch begins. That catches
+ordinary permission and path errors early, but it does not validate authority
+over future session-written files or network-filesystem behavior beyond the
+probe; NFS and similar targets can still fail later with semantics the probe
+does not model. If probe cleanup fails, the audit root can retain that uniquely
+named probe tree as leftover cruft.
 
 Session ids are 16 lowercase hex characters generated from `getrandom`, giving
 roughly `2^64` possible values per agent and a birthday bound near `2^32`

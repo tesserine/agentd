@@ -834,35 +834,25 @@ mod tests {
     }
 
     #[test]
-    fn run_session_leaves_metadata_incomplete_when_podman_unshare_sealing_fails_after_preflight() {
+    fn run_session_finalizes_audit_without_invoking_namespace_helper() {
         let _guard = fake_podman_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fixture = FakePodmanFixture::new();
         fixture.install(
-            &FakePodmanScenario::new()
-                .with_start(CommandBehavior::from_outcome(
-                    CommandOutcome::new()
-                        .touch_file("start-blocked")
-                        .wait_for_file(
-                            "release-start",
-                            Duration::from_secs(5),
-                            "timed out waiting to release start",
-                            91,
-                        ),
-                ))
-                .with_unshare(CommandBehavior::sequence(vec![
-                    CommandOutcome::new()
-                        .append_args_with_prefix("unshare-commands.log", "validate"),
-                    CommandOutcome::new().append_args_with_prefix("unshare-commands.log", "dir"),
-                    CommandOutcome::new()
-                        .append_args_with_prefix("unshare-commands.log", "file")
-                        .stderr("podman unshare file chmod failed")
-                        .exit_code(61),
-                ])),
+            &FakePodmanScenario::new().with_start(CommandBehavior::from_outcome(
+                CommandOutcome::new()
+                    .touch_file("start-blocked")
+                    .wait_for_file(
+                        "release-start",
+                        Duration::from_secs(5),
+                        "timed out waiting to release start",
+                        91,
+                    ),
+            )),
         );
         let methodology_dir = fixture.create_methodology_dir("runner-methodology");
-        let audit_root = unique_temp_dir("runner-audit-unshare-finalization-failure");
+        let audit_root = unique_temp_dir("runner-audit-direct-finalization");
         fs::create_dir_all(&audit_root).expect("audit root should be created");
         let helper_audit_root = audit_root.clone();
 
@@ -883,14 +873,10 @@ mod tests {
 
                 let record_dir =
                     wait_for_only_session_record_dir(&helper_audit_root, "site-builder", deadline);
-                let sealed_by_unshare_dir = record_dir.join("runa/unshare-private");
-                fs::create_dir_all(&sealed_by_unshare_dir)
-                    .expect("fallback-private audit dir should be created");
-                fs::write(sealed_by_unshare_dir.join("artifact.txt"), "persisted\n")
-                    .expect("fallback-private audit file should be created");
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&sealed_by_unshare_dir, fs::Permissions::from_mode(0o111))
-                    .expect("fallback-private audit dir should become unreadable to the host");
+                let direct_dir = record_dir.join("runa/direct");
+                fs::create_dir_all(&direct_dir).expect("direct audit dir should be created");
+                fs::write(direct_dir.join("artifact.txt"), "persisted\n")
+                    .expect("direct audit file should be created");
                 fs::write(log_dir.join("release-start"), b"release\n")
                     .expect("start should be released");
             });
@@ -921,45 +907,51 @@ mod tests {
             events
         });
 
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0]["fields"]["event"], "runner.session_started");
         assert_eq!(events[1]["fields"]["event"], "runner.session_outcome");
         assert_eq!(events[1]["fields"]["outcome"], "success");
-        assert_eq!(events[2]["fields"]["event"], "runner.lifecycle_failure");
-        assert_eq!(events[2]["fields"]["stage"], "session audit finalization");
-        assert_eq!(events[3]["fields"]["event"], "runner.session_teardown");
-        assert_eq!(events[3]["fields"]["result"], "error");
+        assert_eq!(events[2]["fields"]["event"], "runner.session_teardown");
+        assert_eq!(events[2]["fields"]["result"], "ok");
 
         let record_dir = only_session_record_dir(&audit_root, "site-builder");
         let metadata = read_session_metadata(&record_dir);
+        assert_eq!(metadata["outcome"], "success");
+        assert!(
+            metadata["end_timestamp"].is_string(),
+            "successful audit finalization must publish end_timestamp"
+        );
         assert_eq!(
             fixture.read_log("unshare-commands.log"),
-            format!(
-                "validate find -P {root} ! -type d ! -type l -links +1 -print\n\
-dir find -P {root} -mindepth 1 -type d ! -path {metadata_dir} -exec chmod 555 {{}} +\n\
-file find -P {root} ! -type d ! -type l ! -path {metadata_path} -exec chmod 444 {{}} +\n",
-                root = record_dir.display(),
-                metadata_dir = record_dir.join("agentd").display(),
-                metadata_path = record_dir.join("agentd/session.json").display(),
-            ),
-            "podman unshare fallback must invoke chmod with octal mode arguments"
-        );
-        assert!(
-            metadata.get("end_timestamp").is_none(),
-            "audit finalization failure must leave end_timestamp incomplete"
-        );
-        assert!(
-            metadata.get("outcome").is_none(),
-            "audit finalization failure must leave outcome incomplete"
+            "",
+            "audit finalization must not invoke a user-namespace helper"
         );
 
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(
-            record_dir.join("runa/unshare-private"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .expect("fallback-private dir should become removable for test cleanup");
+        let direct_dir = record_dir.join("runa/direct");
+        let direct_file = direct_dir.join("artifact.txt");
+        assert_eq!(
+            fs::metadata(&direct_dir)
+                .expect("direct audit dir metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o555
+        );
+        assert_eq!(
+            fs::metadata(&direct_file)
+                .expect("direct audit file metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
+
+        fs::set_permissions(&direct_dir, fs::Permissions::from_mode(0o755))
+            .expect("direct dir should become removable for test cleanup");
+        fs::set_permissions(record_dir.join("runa"), fs::Permissions::from_mode(0o755))
+            .expect("runa dir should become removable for test cleanup");
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 

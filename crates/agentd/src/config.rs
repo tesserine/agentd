@@ -712,7 +712,7 @@ impl fmt::Display for ConfigError {
             ConfigError::AuditRootNotWritable { path, error } => {
                 write!(
                     f,
-                    "daemon audit root is not writable: {} ({error})",
+                    "daemon audit root failed daemon-local create/chmod/remove probe: {} ({error}); deployment must run agentd with a UID-aligned identity, or equivalent chmod authority, over session-written audit files",
                     path.display()
                 )
             }

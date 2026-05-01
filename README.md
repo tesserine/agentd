@@ -183,6 +183,19 @@ mount a host directory there. In practice, mount those shared session source
 trees into the daemon container at the same absolute paths recorded in
 `agentd.toml`.
 
+Audit sealing is performed by the daemon process with direct filesystem chmod
+operations; it does not enter Podman's user namespace during finalization. The
+startup probe verifies the daemon can create, chmod, restore, and remove its
+own probe entries under `audit_root`. That probe is necessary but not
+sufficient: deployment must also ensure files written by session containers are
+within the daemon's chmod authority. The primary supported contract is UID
+alignment. For a default rootless Podman map, session container UID `N > 0`
+appears on the host as `subuid_start + (N - 1)`, so the daemon's effective host
+identity must match the mapped writer UID for the unprivileged agent user, or
+the daemon must receive equivalent authority such as `CAP_FOWNER` over the
+audit tree. That same daemon identity still needs access to the mounted Podman
+socket and configured runtime paths.
+
 A host-installed `agentd` binary remains useful as a same-build CLI client for
 `agentd run`, but host-binary daemon supervision is out of band for supported
 deployments.

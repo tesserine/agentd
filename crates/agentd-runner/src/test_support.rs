@@ -113,7 +113,6 @@ impl Write for SharedBufferWriter {
 pub(crate) struct FakePodmanScenario {
     create: CommandBehavior,
     ps: CommandBehavior,
-    unshare: CommandBehavior,
     start: CommandBehavior,
     remove: CommandBehavior,
     secret_create: CommandBehavior,
@@ -131,7 +130,6 @@ impl FakePodmanScenario {
                     .set_container_state("created"),
             ),
             ps: CommandBehavior::from_outcome(CommandOutcome::new()),
-            unshare: CommandBehavior::from_outcome(CommandOutcome::new()),
             start: CommandBehavior::from_outcome(
                 CommandOutcome::new().set_container_state("running"),
             ),
@@ -161,11 +159,6 @@ impl FakePodmanScenario {
 
     pub(crate) fn with_start(mut self, behavior: CommandBehavior) -> Self {
         self.start = behavior;
-        self
-    }
-
-    pub(crate) fn with_unshare(mut self, behavior: CommandBehavior) -> Self {
-        self.unshare = behavior;
         self
     }
 
@@ -224,7 +217,6 @@ impl FakePodmanScenario {
 
         script.push_str(&render_command_branch("create", &self.create));
         script.push_str(&render_command_branch("ps", &self.ps));
-        script.push_str(&render_command_branch("unshare", &self.unshare));
         script.push_str(
             "    secret)\n\
                  subcommand=\"$1\"\n\
