@@ -3,7 +3,7 @@ use serde::Serialize;
 #[cfg(test)]
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
@@ -207,7 +207,7 @@ fn preflight_validate_sealable_tree(path: &Path) -> Result<(), RunnerError> {
     }
 
     if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
+        for entry in read_dir_for_audit_traversal(path, &metadata)? {
             let entry = entry?;
             preflight_validate_sealable_tree(&entry.path())?;
         }
@@ -231,7 +231,7 @@ fn seal_path_recursive(record: &SessionAuditRecord, path: &Path) -> Result<(), R
     }
 
     if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
+        for entry in read_dir_for_audit_traversal(path, &metadata)? {
             let entry = entry?;
             seal_path_recursive(record, &entry.path())?;
         }
@@ -242,6 +242,27 @@ fn seal_path_recursive(record: &SessionAuditRecord, path: &Path) -> Result<(), R
     }
 
     seal_path(path, metadata.is_dir())
+}
+
+fn read_dir_for_audit_traversal(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<fs::ReadDir, RunnerError> {
+    match fs::read_dir(path) {
+        Ok(entries) => Ok(entries),
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            let mode = metadata.permissions().mode();
+            let traversal_mode = mode | 0o500;
+            if traversal_mode != mode {
+                fs::set_permissions(path, fs::Permissions::from_mode(traversal_mode))?;
+            }
+            // Preflight chmod-up is intentionally non-transactional: successful
+            // sealing overwrites this with 0555, and failed validation leaves an
+            // incomplete audit record for operator inspection.
+            fs::read_dir(path).map_err(RunnerError::from)
+        }
+        Err(error) => Err(RunnerError::from(error)),
+    }
 }
 
 fn seal_path(path: &Path, is_dir: bool) -> Result<(), RunnerError> {
@@ -724,6 +745,79 @@ mod tests {
 
         make_tree_writable(&root);
 
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_audit_record_chmods_unreadable_directories_before_traversal() {
+        let root = unique_test_dir("agentd-audit-unreadable-dirs");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "1234567890abcdef",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let execute_only_dir = record.runa_dir.join("execute-only");
+        let no_access_dir = execute_only_dir.join("no-access");
+        let artifact_path = no_access_dir.join("artifact.txt");
+        fs::create_dir_all(&no_access_dir).expect("nested audit dirs should be created");
+        fs::write(&artifact_path, "persisted\n").expect("nested artifact should be writable");
+        fs::set_permissions(&no_access_dir, fs::Permissions::from_mode(0o000))
+            .expect("nested dir should become inaccessible");
+        fs::set_permissions(&execute_only_dir, fs::Permissions::from_mode(0o111))
+            .expect("parent dir should become execute-only");
+
+        let finalize_result = super::finalize_session_audit_record(
+            &record,
+            SessionAuditCompletion::Outcome(&SessionOutcome::Success { exit_code: 0 }),
+        );
+        if finalize_result.is_err() {
+            fs::set_permissions(&execute_only_dir, fs::Permissions::from_mode(0o755))
+                .expect("execute-only dir should become readable for cleanup");
+            fs::set_permissions(&no_access_dir, fs::Permissions::from_mode(0o755))
+                .expect("inaccessible dir should become readable for cleanup");
+        }
+        finalize_result.expect("audit record should finalize after chmod-up traversal");
+
+        let payload = fs::read_to_string(&record.metadata_path)
+            .expect("final session metadata should be readable");
+        let json: Value = serde_json::from_str(&payload).expect("metadata should be valid json");
+        assert_eq!(json["outcome"], "success");
+        assert!(json["end_timestamp"].is_string());
+
+        assert_eq!(
+            fs::metadata(&execute_only_dir)
+                .expect("execute-only dir metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o555
+        );
+        assert_eq!(
+            fs::metadata(&no_access_dir)
+                .expect("inaccessible dir metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o555
+        );
+        assert_eq!(
+            fs::metadata(&artifact_path)
+                .expect("nested artifact metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
+
+        make_tree_writable(&root);
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
     }
 

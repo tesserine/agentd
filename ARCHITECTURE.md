@@ -50,7 +50,7 @@ service:
 | `methodology_dir` and request/artifact schemas | daemon process reads; host Podman resolves staged bind sources | The path must exist for the daemon and be valid from the host Podman service's filesystem view. |
 | `audit_root` | daemon process creates/chmods; host Podman resolves staged bind sources; session containers write audit entries | Mount durable host storage at the configured audit root, with the daemon UID aligned to the session writer's mapped host UID or granted equivalent chmod authority. |
 | Agent-declared `mounts.source` | daemon process canonicalizes; host Podman resolves staged bind sources | Mount or expose each source so the daemon and host Podman agree on the source path. |
-| Runner staging directory | daemon process writes; host Podman resolves staged bind sources | The image sets `TMPDIR=/var/lib/agentd/tmp`; mount a host directory there. |
+| Runner staging directory | daemon process writes; host Podman resolves staged bind sources | The path named by `TMPDIR` must exist at the same absolute path for the daemon container and host Podman. The image default requires host `/var/lib/agentd/tmp` mounted to container `/var/lib/agentd/tmp`, or a changed `TMPDIR` exposed identically on both sides. |
 
 The path split follows directly from the current runner implementation. The
 daemon process validates and canonicalizes methodology, audit, additional

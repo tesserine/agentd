@@ -179,9 +179,12 @@ inside the daemon container. Session bind sources that the daemon opens and
 then forwards to host Podman must also be valid from the host Podman service's
 view: `methodology_dir`, each agent-declared `mounts.source`, `audit_root`, and
 the runner staging directory. This image sets `TMPDIR=/var/lib/agentd/tmp`, so
-mount a host directory there. In practice, mount those shared session source
-trees into the daemon container at the same absolute paths recorded in
-`agentd.toml`.
+the host must also expose that staging directory at `/var/lib/agentd/tmp` when
+using the image default. Mount host `/var/lib/agentd/tmp` to container
+`/var/lib/agentd/tmp`, or set `TMPDIR` to another path the operator can expose
+at the same absolute path on both the host and daemon container. In practice,
+mount all shared session source trees into the daemon container at the same
+absolute paths recorded in `agentd.toml` or used by `TMPDIR`.
 
 Audit sealing is performed by the daemon process with direct filesystem chmod
 operations; it does not enter Podman's user namespace during finalization. The
