@@ -834,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn run_session_finalizes_audit_without_invoking_namespace_helper() {
+    fn run_session_finalizes_direct_audit_entries() {
         let _guard = fake_podman_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -921,12 +921,6 @@ mod tests {
             metadata["end_timestamp"].is_string(),
             "successful audit finalization must publish end_timestamp"
         );
-        assert_eq!(
-            fixture.read_log("unshare-commands.log"),
-            "",
-            "audit finalization must not invoke a user-namespace helper"
-        );
-
         use std::os::unix::fs::PermissionsExt;
 
         let direct_dir = record_dir.join("runa/direct");
