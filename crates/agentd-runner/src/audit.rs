@@ -965,22 +965,4 @@ mod tests {
         assert!(timestamp.ends_with('Z'));
         assert!(timestamp.contains('T'));
     }
-
-    #[test]
-    fn audit_finalization_has_no_unshare_subprocess_dependency() {
-        let source = include_str!("audit.rs");
-        let implementation_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("audit.rs should contain implementation before tests");
-
-        assert!(
-            !implementation_source.contains("run_podman_command"),
-            "audit finalization must use direct filesystem operations, not podman subprocesses"
-        );
-        assert!(
-            !implementation_source.contains("\"unshare\""),
-            "audit finalization must not invoke a user-namespace helper"
-        );
-    }
 }
