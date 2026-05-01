@@ -252,7 +252,7 @@ fn read_dir_for_audit_traversal(
         Ok(entries) => Ok(entries),
         Err(error) if error.kind() == ErrorKind::PermissionDenied => {
             let mode = metadata.permissions().mode();
-            let traversal_mode = mode | 0o500;
+            let traversal_mode = audit_traversal_retry_mode(mode);
             if traversal_mode != mode {
                 fs::set_permissions(path, fs::Permissions::from_mode(traversal_mode))?;
             }
@@ -263,6 +263,10 @@ fn read_dir_for_audit_traversal(
         }
         Err(error) => Err(RunnerError::from(error)),
     }
+}
+
+fn audit_traversal_retry_mode(mode: u32) -> u32 {
+    mode | SEALED_DIRECTORY_MODE
 }
 
 fn seal_path(path: &Path, is_dir: bool) -> Result<(), RunnerError> {
@@ -819,6 +823,22 @@ mod tests {
 
         make_tree_writable(&root);
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn audit_traversal_retry_mode_grants_non_owner_traversal_authority() {
+        let retry_mode = super::audit_traversal_retry_mode(0o700);
+
+        assert_eq!(
+            retry_mode & 0o050,
+            0o050,
+            "group accessors must receive read and execute authority"
+        );
+        assert_eq!(
+            retry_mode & 0o005,
+            0o005,
+            "other accessors must receive read and execute authority"
+        );
     }
 
     #[test]
